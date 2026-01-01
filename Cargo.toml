@@ -7,8 +7,9 @@ description = "Brazilian B3 stock exchange investment tracker with tax calculati
 license = "MIT"
 
 [dependencies]
-# Database - Limbo (Rust SQLite rewrite)
-limbo = "0.0.22"
+# Database - SQLite
+# Note: Using rusqlite for now (stable), designed to swap to Limbo later when it's production-ready
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "cargo"] }
@@ -47,3 +48,6 @@ colored = "2.1"
 
 # Configuration
 toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.13"
