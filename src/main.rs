@@ -43,14 +43,10 @@ async fn main() -> Result<()> {
 
         Commands::Prices { action } => match action {
             PriceCommands::Update => {
-                println!("Updating all prices...");
-                // TODO: Implement price updates
-                Ok(())
+                handle_price_update().await
             }
             PriceCommands::History { ticker, from, to } => {
-                println!("Fetching historical prices for {} from {} to {}", ticker, from, to);
-                // TODO: Implement historical price fetching
-                Ok(())
+                handle_price_history(&ticker, &from, &to).await
             }
         },
 
@@ -74,18 +70,10 @@ async fn main() -> Result<()> {
 
         Commands::Actions { action } => match action {
             ActionCommands::Update => {
-                println!("Updating corporate actions...");
-                // TODO: Implement corporate actions update
-                Ok(())
+                handle_actions_update().await
             }
             ActionCommands::List { ticker } => {
-                if let Some(ref t) = ticker {
-                    println!("Listing corporate actions for: {}", t);
-                } else {
-                    println!("Listing all corporate actions");
-                }
-                // TODO: Implement corporate actions list
-                Ok(())
+                handle_actions_list(ticker.as_deref()).await
             }
         },
     }
@@ -213,4 +201,268 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Handle price update command
+async fn handle_price_update() -> Result<()> {
+    use colored::Colorize;
+    use pricing::PriceFetcher;
+
+    info!("Updating all asset prices");
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get all assets
+    let assets = db::get_all_assets(&conn)?;
+
+    if assets.is_empty() {
+        println!("{} No assets found in database", "ℹ".blue().bold());
+        println!("Import transactions first using: interest import <file>");
+        return Ok(());
+    }
+
+    println!("\n{} Updating prices for {} assets\n", "→".cyan().bold(), assets.len());
+
+    let fetcher = PriceFetcher::new();
+    let mut updated = 0;
+    let mut errors = 0;
+
+    for asset in &assets {
+        print!("  {} {}... ", asset.ticker, "→".cyan());
+
+        match fetcher.fetch_price(&asset.ticker).await {
+            Ok(price) => {
+                // Store price in database
+                let price_history = db::PriceHistory {
+                    id: None,
+                    asset_id: asset.id.unwrap(),
+                    price_date: chrono::Utc::now().date_naive(),
+                    close_price: price,
+                    open_price: None,
+                    high_price: None,
+                    low_price: None,
+                    volume: None,
+                    source: "YAHOO/BRAPI".to_string(),
+                    created_at: chrono::Utc::now(),
+                };
+
+                match db::insert_price_history(&conn, &price_history) {
+                    Ok(_) => {
+                        println!("{} R$ {}", "✓".green(), price);
+                        updated += 1;
+                    }
+                    Err(e) => {
+                        println!("{} {}", "✗".red(), e);
+                        errors += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("{} {}", "✗".red(), e);
+                errors += 1;
+            }
+        }
+    }
+
+    println!("\n{} Price update complete!", "✓".green().bold());
+    println!("  Updated: {}", updated.to_string().green());
+    if errors > 0 {
+        println!("  Errors: {}", errors.to_string().red());
+    }
+
+    Ok(())
+}
+
+/// Handle historical price fetching
+async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> {
+    use colored::Colorize;
+    use chrono::NaiveDate;
+    use tabled::{Table, Tabled, settings::Style};
+    use anyhow::Context;
+
+    info!("Fetching historical prices for {} from {} to {}", ticker, from, to);
+
+    let from_date = NaiveDate::parse_from_str(from, "%Y-%m-%d")
+        .context("Invalid from date. Use YYYY-MM-DD format")?;
+    let to_date = NaiveDate::parse_from_str(to, "%Y-%m-%d")
+        .context("Invalid to date. Use YYYY-MM-DD format")?;
+
+    println!("\n{} Fetching historical prices for {}", "→".cyan().bold(), ticker);
+
+    let prices = pricing::yahoo::fetch_historical_prices(ticker, from_date, to_date).await?;
+
+    if prices.is_empty() {
+        println!("{} No price data found", "ℹ".blue().bold());
+        return Ok(());
+    }
+
+    // Display prices in table
+    #[derive(Tabled)]
+    struct PriceRow {
+        #[tabled(rename = "Date")]
+        date: String,
+        #[tabled(rename = "Open")]
+        open: String,
+        #[tabled(rename = "High")]
+        high: String,
+        #[tabled(rename = "Low")]
+        low: String,
+        #[tabled(rename = "Close")]
+        close: String,
+        #[tabled(rename = "Volume")]
+        volume: String,
+    }
+
+    let rows: Vec<PriceRow> = prices
+        .iter()
+        .map(|p| PriceRow {
+            date: p.date.format("%Y-%m-%d").to_string(),
+            open: p.open.as_ref().map(|o| format!("R$ {:.2}", o)).unwrap_or_else(|| "-".to_string()),
+            high: p.high.as_ref().map(|h| format!("R$ {:.2}", h)).unwrap_or_else(|| "-".to_string()),
+            low: p.low.as_ref().map(|l| format!("R$ {:.2}", l)).unwrap_or_else(|| "-".to_string()),
+            close: format!("R$ {:.2}", p.close),
+            volume: p.volume.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+        })
+        .collect();
+
+    let table = Table::new(rows).with(Style::rounded()).to_string();
+    println!("\n{}", table);
+    println!("\n{} Total: {} price points", "✓".green().bold(), prices.len());
+
+    Ok(())
+}
+
+/// Handle corporate actions update
+async fn handle_actions_update() -> Result<()> {
+    use colored::Colorize;
+
+    info!("Updating corporate actions");
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get all assets
+    let assets = db::get_all_assets(&conn)?;
+
+    if assets.is_empty() {
+        println!("{} No assets found in database", "ℹ".blue().bold());
+        return Ok(());
+    }
+
+    println!("\n{} Fetching corporate actions for {} assets\n", "→".cyan().bold(), assets.len());
+
+    let mut total_actions = 0;
+    let mut total_events = 0;
+
+    for asset in &assets {
+        print!("  {} {}... ", asset.ticker, "→".cyan());
+
+        match pricing::brapi::fetch_quote(&asset.ticker, true).await {
+            Ok((_price, actions_opt, events_opt)) => {
+                let mut count = 0;
+
+                // Store corporate actions
+                if let Some(actions) = actions_opt {
+                    for brapi_action in actions {
+                        // Parse ratio from factor string (e.g., "1:2", "10%")
+                        let (ratio_from, ratio_to) = parse_factor(&brapi_action.factor);
+
+                        let action = db::CorporateAction {
+                            id: None,
+                            asset_id: asset.id.unwrap(),
+                            action_type: brapi_action.action_type,
+                            event_date: brapi_action.approved_date,
+                            ex_date: brapi_action.ex_date,
+                            ratio_from,
+                            ratio_to,
+                            applied: false,
+                            source: "BRAPI".to_string(),
+                            notes: brapi_action.remarks,
+                            created_at: chrono::Utc::now(),
+                        };
+
+                        // Check for duplicates
+                        if !db::corporate_action_exists(&conn, asset.id.unwrap(), &action.ex_date, &action.action_type)? {
+                            db::insert_corporate_action(&conn, &action)?;
+                            count += 1;
+                        }
+                    }
+                    total_actions += count;
+                }
+
+                // Store income events
+                if let Some(events) = events_opt {
+                    for brapi_event in events {
+                        let event_type = db::IncomeEventType::from_str(&brapi_event.event_type)
+                            .unwrap_or(db::IncomeEventType::Dividend);
+
+                        let event = db::IncomeEvent {
+                            id: None,
+                            asset_id: asset.id.unwrap(),
+                            event_date: brapi_event.payment_date,
+                            ex_date: brapi_event.ex_date,
+                            event_type,
+                            amount_per_quota: brapi_event.amount,
+                            total_amount: brapi_event.amount,  // Will be calculated based on holdings
+                            withholding_tax: rust_decimal::Decimal::ZERO,
+                            is_quota_pre_2026: None,
+                            source: "BRAPI".to_string(),
+                            notes: brapi_event.remarks,
+                            created_at: chrono::Utc::now(),
+                        };
+
+                        db::insert_income_event(&conn, &event)?;
+                        total_events += 1;
+                    }
+                }
+
+                if count > 0 {
+                    println!("{} {} actions", "✓".green(), count);
+                } else {
+                    println!("{}", "✓".green());
+                }
+            }
+            Err(e) => {
+                println!("{} {}", "✗".red(), e);
+            }
+        }
+    }
+
+    println!("\n{} Corporate actions update complete!", "✓".green().bold());
+    println!("  Actions: {}", total_actions.to_string().green());
+    println!("  Events: {}", total_events.to_string().green());
+
+    Ok(())
+}
+
+/// Handle listing corporate actions
+async fn handle_actions_list(ticker: Option<&str>) -> Result<()> {
+    use colored::Colorize;
+
+    println!("{} Listing corporate actions is not yet implemented", "ℹ".blue().bold());
+    if let Some(t) = ticker {
+        println!("  Filter: {}", t);
+    }
+
+    Ok(())
+}
+
+/// Parse factor string into ratio (from, to)
+/// Examples: "1:2" -> (1, 2), "10%" -> (100, 110), "2:1" -> (2, 1)
+fn parse_factor(factor: &str) -> (i32, i32) {
+    if let Some((from, to)) = factor.split_once(':') {
+        let from_val = from.trim().parse::<i32>().unwrap_or(1);
+        let to_val = to.trim().parse::<i32>().unwrap_or(1);
+        (from_val, to_val)
+    } else if factor.contains('%') {
+        // Percentage bonus: "10%" means 100:110
+        let pct = factor.replace('%', "").trim().parse::<f64>().unwrap_or(0.0);
+        let to_val = (100.0 + pct) as i32;
+        (100, to_val)
+    } else {
+        (1, 1)
+    }
 }
