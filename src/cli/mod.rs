@@ -1,0 +1,117 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "interest")]
+#[command(version, about = "Brazilian B3 investment tracker with tax calculations")]
+#[command(long_about = "Track your Brazilian stock exchange investments (stocks, FII, FIAGRO, FI-INFRA) with automatic price updates, performance analysis, and tax calculations.")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Import transactions from B3/CEI exports (Excel or CSV)
+    Import {
+        /// Path to the Excel or CSV file
+        file: String,
+
+        /// Preview only, don't save to database
+        #[arg(short, long)]
+        dry_run: bool,
+    },
+
+    /// Portfolio management and viewing
+    Portfolio {
+        #[command(subcommand)]
+        action: PortfolioCommands,
+    },
+
+    /// Price data management
+    Prices {
+        #[command(subcommand)]
+        action: PriceCommands,
+    },
+
+    /// Tax calculations and reports
+    Tax {
+        #[command(subcommand)]
+        action: TaxCommands,
+    },
+
+    /// Corporate actions (splits, bonuses, amortization)
+    Actions {
+        #[command(subcommand)]
+        action: ActionCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PortfolioCommands {
+    /// Show current portfolio with P&L
+    Show {
+        /// Filter by asset type (STOCK, FII, FIAGRO, FI_INFRA)
+        #[arg(short, long)]
+        asset_type: Option<String>,
+    },
+
+    /// Show performance metrics over time
+    Performance {
+        /// Time period: 1m, 3m, 6m, 1y, all
+        #[arg(short, long, default_value = "all")]
+        period: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PriceCommands {
+    /// Update all asset prices
+    Update,
+
+    /// Fetch historical prices for a specific ticker
+    History {
+        /// Ticker symbol (e.g., PETR4)
+        ticker: String,
+
+        /// Start date (YYYY-MM-DD)
+        #[arg(short, long)]
+        from: String,
+
+        /// End date (YYYY-MM-DD)
+        #[arg(short, long)]
+        to: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaxCommands {
+    /// Calculate tax for a specific month
+    Calculate {
+        /// Month in MM/YYYY format (e.g., 12/2025)
+        month: String,
+    },
+
+    /// Generate annual IRPF tax report
+    Report {
+        /// Year (e.g., 2025)
+        year: i32,
+    },
+
+    /// Show monthly tax summary for a year
+    Summary {
+        /// Year (e.g., 2025)
+        year: i32,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ActionCommands {
+    /// Update corporate actions from API
+    Update,
+
+    /// List corporate actions for a ticker
+    List {
+        /// Ticker symbol (optional, shows all if not specified)
+        ticker: Option<String>,
+    },
+}

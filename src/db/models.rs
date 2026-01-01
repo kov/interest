@@ -1,0 +1,246 @@
+use chrono::{DateTime, NaiveDate, Utc};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+/// Asset types supported by the system
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssetType {
+    Stock,      // Brazilian stocks (ações)
+    Fii,        // Real estate investment funds
+    Fiagro,     // Agribusiness investment funds
+    FiInfra,    // Infrastructure investment funds
+    Bond,       // Corporate bonds
+    GovBond,    // Government bonds (Tesouro Direto)
+}
+
+impl AssetType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AssetType::Stock => "STOCK",
+            AssetType::Fii => "FII",
+            AssetType::Fiagro => "FIAGRO",
+            AssetType::FiInfra => "FI_INFRA",
+            AssetType::Bond => "BOND",
+            AssetType::GovBond => "GOV_BOND",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "STOCK" => Some(AssetType::Stock),
+            "FII" => Some(AssetType::Fii),
+            "FIAGRO" => Some(AssetType::Fiagro),
+            "FI_INFRA" => Some(AssetType::FiInfra),
+            "BOND" => Some(AssetType::Bond),
+            "GOV_BOND" => Some(AssetType::GovBond),
+            _ => None,
+        }
+    }
+
+    /// Detect asset type from ticker pattern
+    /// Stocks end in 3-6, FIIs end in 11, FIAGROs/FI-INFRAs typically have specific patterns
+    pub fn detect_from_ticker(ticker: &str) -> Option<Self> {
+        if ticker.len() < 5 {
+            return None;
+        }
+
+        // Extract the numeric suffix
+        let suffix = &ticker[ticker.len() - 2..];
+
+        match suffix {
+            "11" => Some(AssetType::Fii),  // Most FIIs end in 11
+            "32" | "33" | "34" => Some(AssetType::Fiagro),  // Common FIAGRO patterns
+            _ if ticker.ends_with('3')
+                || ticker.ends_with('4')
+                || ticker.ends_with('5')
+                || ticker.ends_with('6') => Some(AssetType::Stock),
+            _ => None,  // Unknown pattern, will need manual classification
+        }
+    }
+}
+
+/// Asset (stock, fund, bond)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Asset {
+    pub id: Option<i64>,
+    pub ticker: String,
+    pub asset_type: AssetType,
+    pub name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Transaction type (buy or sell)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransactionType {
+    Buy,
+    Sell,
+}
+
+impl TransactionType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TransactionType::Buy => "BUY",
+            TransactionType::Sell => "SELL",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "BUY" | "COMPRA" | "C" => Some(TransactionType::Buy),
+            "SELL" | "VENDA" | "V" => Some(TransactionType::Sell),
+            _ => None,
+        }
+    }
+}
+
+/// Transaction (buy or sell of an asset)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    pub id: Option<i64>,
+    pub asset_id: i64,
+    pub transaction_type: TransactionType,
+    pub trade_date: NaiveDate,
+    pub settlement_date: Option<NaiveDate>,
+    pub quantity: Decimal,
+    pub price_per_unit: Decimal,
+    pub total_cost: Decimal,
+    pub fees: Decimal,
+    pub is_day_trade: bool,
+    pub quota_issuance_date: Option<NaiveDate>,  // For fund tax rules
+    pub notes: Option<String>,
+    pub source: String,  // 'CEI', 'B3_PORTAL', 'MANUAL'
+    pub created_at: DateTime<Utc>,
+}
+
+/// Corporate action type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CorporateActionType {
+    Split,         // Stock split (desdobramento)
+    ReverseSplit,  // Reverse split (grupamento)
+    Bonus,         // Bonus shares (bonificação)
+}
+
+impl CorporateActionType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CorporateActionType::Split => "SPLIT",
+            CorporateActionType::ReverseSplit => "REVERSE_SPLIT",
+            CorporateActionType::Bonus => "BONUS",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "SPLIT" | "DESDOBRAMENTO" => Some(CorporateActionType::Split),
+            "REVERSE_SPLIT" | "GRUPAMENTO" => Some(CorporateActionType::ReverseSplit),
+            "BONUS" | "BONIFICAÇÃO" | "BONIFICACAO" => Some(CorporateActionType::Bonus),
+            _ => None,
+        }
+    }
+}
+
+/// Corporate action (split, reverse split, bonus shares)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorporateAction {
+    pub id: Option<i64>,
+    pub asset_id: i64,
+    pub action_type: CorporateActionType,
+    pub event_date: NaiveDate,
+    pub ex_date: NaiveDate,
+    pub ratio_from: i32,  // e.g., 1 for 1:2 split
+    pub ratio_to: i32,    // e.g., 2 for 1:2 split
+    pub applied: bool,
+    pub source: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Price history entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceHistory {
+    pub id: Option<i64>,
+    pub asset_id: i64,
+    pub price_date: NaiveDate,
+    pub close_price: Decimal,
+    pub open_price: Option<Decimal>,
+    pub high_price: Option<Decimal>,
+    pub low_price: Option<Decimal>,
+    pub volume: Option<i64>,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Current position (holdings)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Position {
+    pub id: Option<i64>,
+    pub asset_id: i64,
+    pub quantity: Decimal,
+    pub average_cost: Decimal,
+    pub total_cost: Decimal,
+    pub adjusted_cost: Decimal,  // After amortization
+    pub last_updated: DateTime<Utc>,
+}
+
+/// Income event type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IncomeEventType {
+    Dividend,      // Regular dividend (rendimento)
+    Amortization,  // Capital return (amortização)
+    Jcp,          // Juros sobre Capital Próprio
+}
+
+impl IncomeEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IncomeEventType::Dividend => "DIVIDEND",
+            IncomeEventType::Amortization => "AMORTIZATION",
+            IncomeEventType::Jcp => "JCP",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "DIVIDEND" | "DIVIDENDO" | "RENDIMENTO" => Some(IncomeEventType::Dividend),
+            "AMORTIZATION" | "AMORTIZAÇÃO" | "AMORTIZACAO" => Some(IncomeEventType::Amortization),
+            "JCP" => Some(IncomeEventType::Jcp),
+            _ => None,
+        }
+    }
+}
+
+/// Income event (dividend, amortization, JCP)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomeEvent {
+    pub id: Option<i64>,
+    pub asset_id: i64,
+    pub event_date: NaiveDate,
+    pub ex_date: Option<NaiveDate>,
+    pub event_type: IncomeEventType,
+    pub amount_per_quota: Decimal,
+    pub total_amount: Decimal,
+    pub withholding_tax: Decimal,
+    pub is_quota_pre_2026: Option<bool>,  // For tax rule tracking
+    pub source: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Tax event (monthly summary)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxEvent {
+    pub id: Option<i64>,
+    pub year: i32,
+    pub month: i32,
+    pub asset_type: AssetType,
+    pub event_type: String,  // 'SWING_TRADE', 'DAY_TRADE'
+    pub total_sales: Decimal,
+    pub total_profit: Decimal,
+    pub total_loss: Decimal,
+    pub net_profit: Decimal,
+    pub tax_rate: Decimal,
+    pub tax_due: Decimal,
+    pub is_exempt: bool,
+    pub created_at: DateTime<Utc>,
+}
