@@ -46,19 +46,13 @@ async fn main() -> Result<()> {
 
         Commands::Tax { action } => match action {
             TaxCommands::Calculate { month } => {
-                println!("Calculating tax for month: {}", month);
-                // TODO: Implement tax calculation
-                Ok(())
+                handle_tax_calculate(&month).await
             }
             TaxCommands::Report { year } => {
-                println!("Generating IRPF report for year: {}", year);
-                // TODO: Implement IRPF report
-                Ok(())
+                handle_tax_report(year).await
             }
             TaxCommands::Summary { year } => {
-                println!("Showing tax summary for year: {}", year);
-                // TODO: Implement tax summary
-                Ok(())
+                handle_tax_summary(year).await
             }
         },
 
@@ -589,6 +583,228 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
     }
 
     println!();
+    Ok(())
+}
+
+/// Handle tax calculation for a specific month
+async fn handle_tax_calculate(month_str: &str) -> Result<()> {
+    use colored::Colorize;
+    use tabled::{Table, Tabled, settings::Style};
+    use anyhow::Context;
+
+    info!("Calculating swing trade tax for {}", month_str);
+
+    // Parse month string (MM/YYYY)
+    let parts: Vec<&str> = month_str.split('/').collect();
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!("Invalid month format. Use MM/YYYY (e.g., 01/2025)"));
+    }
+
+    let month: u32 = parts[0].parse().context("Invalid month number")?;
+    let year: i32 = parts[1].parse().context("Invalid year")?;
+
+    if month < 1 || month > 12 {
+        return Err(anyhow::anyhow!("Month must be between 01 and 12"));
+    }
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Calculate monthly tax
+    let calculations = tax::calculate_monthly_tax(&conn, year, month)?;
+
+    if calculations.is_empty() {
+        println!("\n{} No sales found for {}/{}\n", "ℹ".blue().bold(), month, year);
+        return Ok(());
+    }
+
+    println!("\n{} Swing Trade Tax Calculation - {}/{}\n", "💰".cyan().bold(), month, year);
+
+    // Display results by asset type
+    for calc in &calculations {
+        println!("{} {}", "Asset Type:".bold(), calc.asset_type.as_str().to_uppercase());
+        println!("  Total Sales:      {}", format!("R$ {:.2}", calc.total_sales).cyan());
+        println!("  Total Cost Basis: {}", format!("R$ {:.2}", calc.total_cost_basis).cyan());
+        println!("  Gross Profit:     {}", format!("R$ {:.2}", calc.total_profit).green());
+        println!("  Gross Loss:       {}", format!("R$ {:.2}", calc.total_loss).red());
+
+        let net_str = if calc.net_profit >= rust_decimal::Decimal::ZERO {
+            format!("R$ {:.2}", calc.net_profit).green()
+        } else {
+            format!("R$ {:.2}", calc.net_profit).red()
+        };
+        println!("  Net P&L:          {}", net_str);
+
+        if calc.exemption_applied > rust_decimal::Decimal::ZERO {
+            println!("  Exemption:        {} (sales under R$20,000)",
+                format!("R$ {:.2}", calc.exemption_applied).yellow().bold()
+            );
+        }
+
+        if calc.taxable_amount > rust_decimal::Decimal::ZERO {
+            println!("  Taxable Amount:   {}", format!("R$ {:.2}", calc.taxable_amount).yellow());
+            println!("  Tax Rate:         {}", "15%".yellow());
+            println!("  {} {}",
+                "Tax Due:".bold(),
+                format!("R$ {:.2}", calc.tax_due).red().bold()
+            );
+        } else if calc.net_profit < rust_decimal::Decimal::ZERO {
+            println!("  {} Loss to carry forward",
+                format!("R$ {:.2}", calc.net_profit.abs()).yellow().bold()
+            );
+        } else {
+            println!("  {} No tax due (exempt)", "Tax Due:".bold().green());
+        }
+
+        println!();
+    }
+
+    // Summary
+    let total_tax: rust_decimal::Decimal = calculations.iter()
+        .map(|c| c.tax_due)
+        .sum();
+
+    if total_tax > rust_decimal::Decimal::ZERO {
+        println!("{} Total Tax Due for {}/{}: {}\n",
+            "📋".cyan().bold(),
+            month,
+            year,
+            format!("R$ {:.2}", total_tax).red().bold()
+        );
+        println!("{} Payment due by last business day of {}/{}\n",
+            "⏰".yellow(),
+            if month == 12 { 1 } else { month + 1 },
+            if month == 12 { year + 1 } else { year }
+        );
+    }
+
+    Ok(())
+}
+
+/// Handle IRPF annual report generation
+async fn handle_tax_report(year: i32) -> Result<()> {
+    use colored::Colorize;
+
+    info!("Generating IRPF annual report for {}", year);
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Generate report
+    let report = tax::generate_annual_report(&conn, year)?;
+
+    if report.monthly_summaries.is_empty() {
+        println!("\n{} No transactions found for year {}\n", "ℹ".blue().bold(), year);
+        return Ok(());
+    }
+
+    println!("\n{} Annual IRPF Tax Report - {}\n", "📊".cyan().bold(), year);
+
+    // Monthly breakdown
+    println!("{}", "Monthly Summary:".bold());
+    for summary in &report.monthly_summaries {
+        println!("\n  {} ({}):", summary.month_name.bold(), summary.month);
+        println!("    Sales:  {}", format!("R$ {:.2}", summary.total_sales).cyan());
+        println!("    Profit: {}", format!("R$ {:.2}", summary.total_profit).green());
+        println!("    Loss:   {}", format!("R$ {:.2}", summary.total_loss).red());
+        println!("    Tax:    {}", format!("R$ {:.2}", summary.tax_due).yellow());
+    }
+
+    // Annual totals
+    println!("\n{} Annual Totals:", "📈".cyan().bold());
+    println!("  Total Sales:  {}", format!("R$ {:.2}", report.annual_total_sales).cyan());
+    println!("  Total Profit: {}", format!("R$ {:.2}", report.annual_total_profit).green());
+    println!("  Total Loss:   {}", format!("R$ {:.2}", report.annual_total_loss).red());
+    println!("  {} {}\n",
+        "Total Tax:".bold(),
+        format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
+    );
+
+    // Losses to carry forward
+    if !report.losses_to_carry_forward.is_empty() {
+        println!("{} Losses to Carry Forward:", "📋".yellow().bold());
+        for (asset_type, loss) in &report.losses_to_carry_forward {
+            println!("  {}: {}",
+                asset_type.as_str().to_uppercase(),
+                format!("R$ {:.2}", loss).yellow()
+            );
+        }
+        println!();
+    }
+
+    // Export to CSV
+    let csv_content = tax::irpf::export_to_csv(&report);
+    let csv_path = format!("irpf_report_{}.csv", year);
+    std::fs::write(&csv_path, csv_content)?;
+
+    println!("{} Report exported to: {}\n", "✓".green().bold(), csv_path);
+
+    Ok(())
+}
+
+/// Handle tax summary display
+async fn handle_tax_summary(year: i32) -> Result<()> {
+    use colored::Colorize;
+    use tabled::{Table, Tabled, settings::Style};
+
+    info!("Generating tax summary for {}", year);
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Generate report
+    let report = tax::generate_annual_report(&conn, year)?;
+
+    if report.monthly_summaries.is_empty() {
+        println!("\n{} No transactions found for year {}\n", "ℹ".blue().bold(), year);
+        return Ok(());
+    }
+
+    println!("\n{} Tax Summary - {}\n", "📊".cyan().bold(), year);
+
+    // Display monthly table
+    #[derive(Tabled)]
+    struct MonthRow {
+        #[tabled(rename = "Month")]
+        month: String,
+        #[tabled(rename = "Sales")]
+        sales: String,
+        #[tabled(rename = "Profit")]
+        profit: String,
+        #[tabled(rename = "Loss")]
+        loss: String,
+        #[tabled(rename = "Tax Due")]
+        tax: String,
+    }
+
+    let rows: Vec<MonthRow> = report
+        .monthly_summaries
+        .iter()
+        .map(|s| MonthRow {
+            month: s.month_name.to_string(),
+            sales: format!("R$ {:.2}", s.total_sales),
+            profit: format!("R$ {:.2}", s.total_profit),
+            loss: format!("R$ {:.2}", s.total_loss),
+            tax: format!("R$ {:.2}", s.tax_due),
+        })
+        .collect();
+
+    let table = Table::new(rows).with(Style::rounded()).to_string();
+    println!("{}", table);
+
+    // Annual summary
+    println!("\n{} Annual Total", "📈".cyan().bold());
+    println!("  Sales:  {}", format!("R$ {:.2}", report.annual_total_sales).cyan());
+    println!("  Profit: {}", format!("R$ {:.2}", report.annual_total_profit).green());
+    println!("  Loss:   {}", format!("R$ {:.2}", report.annual_total_loss).red());
+    println!("  {} {}\n",
+        "Tax:".bold(),
+        format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
+    );
+
     Ok(())
 }
 
