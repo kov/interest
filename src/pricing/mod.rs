@@ -4,13 +4,10 @@ pub mod yahoo;
 pub mod brapi;
 
 use anyhow::{Context, Result};
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
-
-pub use yahoo::{PriceData, HistoricalPrice};
-pub use brapi::{BrapiPriceData, BrapiCorporateAction, BrapiIncomeEvent};
 
 /// Price cache entry
 #[derive(Debug, Clone)]
@@ -91,6 +88,7 @@ impl PriceFetcher {
     }
 
     /// Clear cache
+    #[allow(dead_code)]
     pub fn clear_cache(&self) {
         let mut cache = self.cache.lock().unwrap();
         cache.clear();
@@ -98,6 +96,7 @@ impl PriceFetcher {
     }
 
     /// Get cache size
+    #[allow(dead_code)]
     pub fn cache_size(&self) -> usize {
         let cache = self.cache.lock().unwrap();
         cache.len()

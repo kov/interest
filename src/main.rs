@@ -443,7 +443,6 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
     use colored::Colorize;
     use tabled::{Table, Tabled, settings::Style};
     use anyhow::Context;
-    use std::str::FromStr;
 
     info!("Generating portfolio report");
 
@@ -589,7 +588,6 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
 /// Handle tax calculation for a specific month
 async fn handle_tax_calculate(month_str: &str) -> Result<()> {
     use colored::Colorize;
-    use tabled::{Table, Tabled, settings::Style};
     use anyhow::Context;
 
     info!("Calculating swing trade tax for {}", month_str);

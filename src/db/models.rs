@@ -130,6 +130,7 @@ impl CorporateActionType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "SPLIT" | "DESDOBRAMENTO" => Some(CorporateActionType::Split),
@@ -173,6 +174,7 @@ pub struct PriceHistory {
 
 /// Current position (holdings)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Position {
     pub id: Option<i64>,
     pub asset_id: i64,
@@ -229,6 +231,7 @@ pub struct IncomeEvent {
 
 /// Tax event (monthly summary)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TaxEvent {
     pub id: Option<i64>,
     pub year: i32,

@@ -3,8 +3,7 @@ use chrono::NaiveDate;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Yahoo Finance quote response
 #[derive(Debug, Deserialize)]
@@ -30,6 +29,7 @@ struct Meta {
     #[serde(rename = "regularMarketPrice")]
     regular_market_price: Option<f64>,
     currency: Option<String>,
+    #[allow(dead_code)]
     symbol: String,
 }
 

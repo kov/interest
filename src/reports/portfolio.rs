@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::db::{Asset, AssetType, Transaction, TransactionType, PriceHistory};
+use crate::db::{Asset, AssetType, Transaction, TransactionType};
 
 /// Summary of a single position
 #[derive(Debug, Clone)]
@@ -32,6 +32,7 @@ pub struct PortfolioReport {
 /// FIFO position tracker for a single asset
 #[derive(Debug)]
 struct FifoPosition {
+    #[allow(dead_code)]
     asset_id: i64,
     quantity: Decimal,
     total_cost: Decimal,

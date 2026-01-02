@@ -11,7 +11,9 @@ use super::cost_basis::{FifoMatcher, SaleCostBasis};
 /// Monthly tax calculation result
 #[derive(Debug, Clone)]
 pub struct MonthlyTaxCalculation {
+    #[allow(dead_code)]
     pub year: i32,
+    #[allow(dead_code)]
     pub month: u32,
     pub asset_type: AssetType,
     pub total_sales: Decimal,
@@ -21,8 +23,10 @@ pub struct MonthlyTaxCalculation {
     pub net_profit: Decimal,
     pub exemption_applied: Decimal,
     pub taxable_amount: Decimal,
+    #[allow(dead_code)]
     pub tax_rate: Decimal,
     pub tax_due: Decimal,
+    #[allow(dead_code)]
     pub sales: Vec<SaleCostBasis>,
 }
 

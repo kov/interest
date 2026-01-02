@@ -3,8 +3,7 @@ use chrono::NaiveDate;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::db::models::CorporateActionType;
 
@@ -16,6 +15,7 @@ struct BrapiQuoteResponse {
 
 #[derive(Debug, Deserialize)]
 struct BrapiQuote {
+    #[allow(dead_code)]
     symbol: String,
     #[serde(rename = "regularMarketPrice")]
     regular_market_price: Option<f64>,
@@ -43,16 +43,20 @@ struct DividendsData {
 #[derive(Debug, Deserialize)]
 struct CashDividend {
     #[serde(rename = "assetIssued")]
+    #[allow(dead_code)]
     asset_issued: String,
     #[serde(rename = "paymentDate")]
     payment_date: String,
     #[serde(rename = "rate")]
     rate: Option<f64>,
     #[serde(rename = "relatedTo")]
+    #[allow(dead_code)]
     related_to: Option<String>,
     #[serde(rename = "approvedOn")]
+    #[allow(dead_code)]
     approved_on: Option<String>,
     #[serde(rename = "isinCode")]
+    #[allow(dead_code)]
     isin_code: Option<String>,
     #[serde(rename = "label")]
     label: Option<String>,
@@ -65,12 +69,14 @@ struct CashDividend {
 #[derive(Debug, Deserialize)]
 struct StockDividend {
     #[serde(rename = "assetIssued")]
+    #[allow(dead_code)]
     asset_issued: String,
     #[serde(rename = "factor")]
     factor: Option<String>,
     #[serde(rename = "approvedOn")]
     approved_on: String,
     #[serde(rename = "isinCode")]
+    #[allow(dead_code)]
     isin_code: Option<String>,
     #[serde(rename = "label")]
     label: Option<String>,

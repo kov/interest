@@ -1,11 +1,10 @@
 use anyhow::Result;
-use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use crate::db::AssetType;
-use super::swing_trade::{MonthlyTaxCalculation, calculate_monthly_tax};
+use super::swing_trade::calculate_monthly_tax;
 
 /// Monthly summary for IRPF
 #[derive(Debug, Clone)]
@@ -16,11 +15,13 @@ pub struct MonthlyIrpfSummary {
     pub total_profit: Decimal,
     pub total_loss: Decimal,
     pub tax_due: Decimal,
+    #[allow(dead_code)]
     pub by_asset_type: HashMap<AssetType, AssetTypeMonthSummary>,
 }
 
 /// Asset type summary for a month
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AssetTypeMonthSummary {
     pub sales: Decimal,
     pub profit_loss: Decimal,
@@ -30,6 +31,7 @@ pub struct AssetTypeMonthSummary {
 /// Annual IRPF tax report
 #[derive(Debug, Clone)]
 pub struct AnnualTaxReport {
+    #[allow(dead_code)]
     pub year: i32,
     pub monthly_summaries: Vec<MonthlyIrpfSummary>,
     pub annual_total_sales: Decimal,

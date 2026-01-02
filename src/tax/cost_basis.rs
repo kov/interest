@@ -10,6 +10,7 @@ use crate::db::{Transaction, TransactionType};
 struct PurchaseLot {
     date: NaiveDate,
     quantity: Decimal,
+    #[allow(dead_code)]
     price_per_unit: Decimal,
     total_cost: Decimal,
     remaining: Decimal,
@@ -18,17 +19,22 @@ struct PurchaseLot {
 /// Cost basis result for a sale
 #[derive(Debug, Clone)]
 pub struct SaleCostBasis {
+    #[allow(dead_code)]
     pub sale_date: NaiveDate,
+    #[allow(dead_code)]
     pub quantity: Decimal,
+    #[allow(dead_code)]
     pub sale_price: Decimal,
     pub sale_total: Decimal,
     pub cost_basis: Decimal,
     pub profit_loss: Decimal,
+    #[allow(dead_code)]
     pub matched_lots: Vec<MatchedLot>,
 }
 
 /// A matched lot from FIFO
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MatchedLot {
     pub purchase_date: NaiveDate,
     pub quantity: Decimal,
@@ -128,6 +134,7 @@ impl FifoMatcher {
     }
 
     /// Get remaining quantity in purchase queue
+    #[allow(dead_code)]
     pub fn remaining_quantity(&self) -> Decimal {
         self.purchase_queue.iter().map(|lot| lot.remaining).sum()
     }
