@@ -9,7 +9,7 @@ mod utils;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands, ActionCommands};
+use cli::{Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands, ActionCommands, TransactionCommands};
 use tracing::info;
 
 #[tokio::main]
@@ -62,6 +62,28 @@ async fn main() -> Result<()> {
             }
             ActionCommands::List { ticker } => {
                 handle_actions_list(ticker.as_deref()).await
+            }
+        },
+
+        Commands::Transactions { action } => match action {
+            TransactionCommands::Add {
+                ticker,
+                transaction_type,
+                quantity,
+                price,
+                date,
+                fees,
+                notes,
+            } => {
+                handle_transaction_add(
+                    &ticker,
+                    &transaction_type,
+                    &quantity,
+                    &price,
+                    &date,
+                    &fees,
+                    notes.as_deref(),
+                ).await
             }
         },
     }
@@ -802,6 +824,110 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
         "Tax:".bold(),
         format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
     );
+
+    Ok(())
+}
+
+/// Handle manual transaction add command
+async fn handle_transaction_add(
+    ticker: &str,
+    transaction_type: &str,
+    quantity_str: &str,
+    price_str: &str,
+    date_str: &str,
+    fees_str: &str,
+    notes: Option<&str>,
+) -> Result<()> {
+    use colored::Colorize;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+    use chrono::NaiveDate;
+    use anyhow::Context;
+
+    info!("Adding manual transaction for {}", ticker);
+
+    // Parse and validate inputs
+    let quantity = Decimal::from_str(quantity_str)
+        .context("Invalid quantity. Must be a decimal number")?;
+
+    let price = Decimal::from_str(price_str)
+        .context("Invalid price. Must be a decimal number")?;
+
+    let fees = Decimal::from_str(fees_str)
+        .context("Invalid fees. Must be a decimal number")?;
+
+    let trade_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .context("Invalid date format. Use YYYY-MM-DD")?;
+
+    // Parse transaction type
+    let tx_type = match transaction_type.to_uppercase().as_str() {
+        "BUY" => db::TransactionType::Buy,
+        "SELL" => db::TransactionType::Sell,
+        _ => return Err(anyhow::anyhow!("Transaction type must be 'buy' or 'sell'")),
+    };
+
+    // Validate inputs
+    if quantity <= Decimal::ZERO {
+        return Err(anyhow::anyhow!("Quantity must be greater than zero"));
+    }
+
+    if price <= Decimal::ZERO {
+        return Err(anyhow::anyhow!("Price must be greater than zero"));
+    }
+
+    if fees < Decimal::ZERO {
+        return Err(anyhow::anyhow!("Fees cannot be negative"));
+    }
+
+    // Calculate total cost
+    let total_cost = (quantity * price) + fees;
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Detect asset type from ticker
+    let asset_type = db::AssetType::detect_from_ticker(ticker)
+        .unwrap_or(db::AssetType::Stock);
+
+    // Upsert asset
+    let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
+
+    // Create transaction
+    let transaction = db::Transaction {
+        id: None,
+        asset_id,
+        transaction_type: tx_type.clone(),
+        trade_date,
+        settlement_date: Some(trade_date), // Same as trade date for manual entries
+        quantity,
+        price_per_unit: price,
+        total_cost,
+        fees,
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: notes.map(|s| s.to_string()),
+        source: "MANUAL".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+
+    // Insert transaction
+    let tx_id = db::insert_transaction(&conn, &transaction)?;
+
+    // Display confirmation
+    println!("\n{} Transaction added successfully!", "✓".green().bold());
+    println!("  Transaction ID: {}", tx_id);
+    println!("  Ticker:         {}", ticker.cyan().bold());
+    println!("  Type:           {}", tx_type.as_str().to_uppercase());
+    println!("  Date:           {}", trade_date.format("%Y-%m-%d"));
+    println!("  Quantity:       {}", quantity);
+    println!("  Price:          {}", format!("R$ {:.2}", price).cyan());
+    println!("  Fees:           {}", format!("R$ {:.2}", fees).cyan());
+    println!("  Total:          {}", format!("R$ {:.2}", total_cost).cyan().bold());
+    if let Some(n) = notes {
+        println!("  Notes:          {}", n);
+    }
+    println!();
 
     Ok(())
 }

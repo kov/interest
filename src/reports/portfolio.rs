@@ -52,17 +52,20 @@ impl FifoPosition {
         self.total_cost += cost;
     }
 
-    fn remove_sell(&mut self, quantity: Decimal) -> Result<Decimal> {
+    fn remove_sell(&mut self, quantity: Decimal, ticker: &str) -> Result<Decimal> {
         if quantity > self.quantity {
             anyhow::bail!(
-                "Insufficient purchase history: Selling {} units but only {} available.\n\
+                "{}: Insufficient purchase history: Selling {} units but only {} available.\n\
                 \nThis usually means:\n\
                 1. Shares came from sources not in the import (term contracts, transfers, etc.)\n\
                 2. Incomplete transaction history in the CEI export\n\
                 3. Short selling (not yet supported)\n\
-                \nTo fix: Manually add the missing purchase transactions to the database.",
+                \nTo fix: Manually add the missing purchase transactions using:\n\
+                interest transactions add {} buy <quantity> <price> <date>",
+                ticker,
                 quantity,
-                self.quantity
+                self.quantity,
+                ticker
             );
         }
 
@@ -125,7 +128,7 @@ pub fn calculate_portfolio(
                     position.add_buy(tx.quantity, tx.total_cost);
                 }
                 TransactionType::Sell => {
-                    position.remove_sell(tx.quantity)?;
+                    position.remove_sell(tx.quantity, &asset.ticker)?;
                 }
             }
         }

@@ -44,6 +44,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: ActionCommands,
     },
+
+    /// Manual transaction management
+    Transactions {
+        #[command(subcommand)]
+        action: TransactionCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -113,5 +119,35 @@ pub enum ActionCommands {
     List {
         /// Ticker symbol (optional, shows all if not specified)
         ticker: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TransactionCommands {
+    /// Manually add a buy or sell transaction
+    Add {
+        /// Ticker symbol (e.g., PETR4, MXRF11)
+        ticker: String,
+
+        /// Transaction type: buy or sell
+        #[arg(value_parser = ["buy", "sell", "BUY", "SELL"])]
+        transaction_type: String,
+
+        /// Quantity of shares/quotas
+        quantity: String,
+
+        /// Price per unit
+        price: String,
+
+        /// Trade date (YYYY-MM-DD)
+        date: String,
+
+        /// Optional fees/brokerage
+        #[arg(short, long, default_value = "0")]
+        fees: String,
+
+        /// Optional notes
+        #[arg(short, long)]
+        notes: Option<String>,
     },
 }
