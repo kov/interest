@@ -4,6 +4,7 @@ pub mod models;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params, OptionalExtension};
+use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::info;
@@ -176,14 +177,10 @@ pub fn get_latest_price(conn: &Connection, asset_id: i64) -> Result<Option<Price
             id: Some(row.get(0)?),
             asset_id: row.get(1)?,
             price_date: row.get(2)?,
-            close_price: rust_decimal::Decimal::from_str(&row.get::<_, String>(3)?)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-            open_price: row.get::<_, Option<String>>(4)?
-                .and_then(|s| rust_decimal::Decimal::from_str(&s).ok()),
-            high_price: row.get::<_, Option<String>>(5)?
-                .and_then(|s| rust_decimal::Decimal::from_str(&s).ok()),
-            low_price: row.get::<_, Option<String>>(6)?
-                .and_then(|s| rust_decimal::Decimal::from_str(&s).ok()),
+            close_price: get_decimal_value(row, 3)?,
+            open_price: get_optional_decimal_value(row, 4)?,
+            high_price: get_optional_decimal_value(row, 5)?,
+            low_price: get_optional_decimal_value(row, 6)?,
             volume: row.get(7)?,
             source: row.get(8)?,
             created_at: row.get(9)?,
@@ -191,6 +188,49 @@ pub fn get_latest_price(conn: &Connection, asset_id: i64) -> Result<Option<Price
     }).optional()?;
 
     Ok(result)
+}
+
+/// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
+fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+    use rusqlite::types::ValueRef;
+
+    match row.get_ref(idx)? {
+        ValueRef::Text(bytes) => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            Decimal::from_str(s)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
+        ValueRef::Integer(i) => Ok(Decimal::from(i)),
+        ValueRef::Real(f) => Decimal::try_from(f)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "decimal".to_string(),
+            rusqlite::types::Type::Null
+        ))
+    }
+}
+
+/// Helper to read optional Decimal from SQLite
+fn get_optional_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Option<Decimal>, rusqlite::Error> {
+    use rusqlite::types::ValueRef;
+
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Text(bytes) => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            Decimal::from_str(s)
+                .map(Some)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
+        ValueRef::Integer(i) => Ok(Some(Decimal::from(i))),
+        ValueRef::Real(f) => Decimal::try_from(f)
+            .map(Some)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        _ => Ok(None)
+    }
 }
 
 /// Insert corporate action

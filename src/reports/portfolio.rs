@@ -53,14 +53,6 @@ impl FifoPosition {
     }
 
     fn remove_sell(&mut self, quantity: Decimal) -> Result<Decimal> {
-        if quantity > self.quantity {
-            anyhow::bail!(
-                "Attempted to sell {} units but only {} available",
-                quantity,
-                self.quantity
-            );
-        }
-
         // Calculate proportional cost basis for the sold units
         let avg_cost = if self.quantity > Decimal::ZERO {
             self.total_cost / self.quantity
@@ -70,8 +62,22 @@ impl FifoPosition {
 
         let cost_basis = avg_cost * quantity;
 
-        self.quantity -= quantity;
-        self.total_cost -= cost_basis;
+        // Handle overselling (short positions or missing buy data)
+        if quantity > self.quantity {
+            // Selling more than we have - could be:
+            // 1. Short selling
+            // 2. Shares from term contracts/other sources not in import
+            // 3. Incomplete transaction history
+            // Log warning but allow it to continue (portfolio can still be useful)
+            eprintln!("⚠️  Warning: Overselling detected for asset {}. Selling {} but only {} available. \
+                      \n    This indicates incomplete transaction history. P&L may be inaccurate.",
+                      self.asset_id, quantity, self.quantity);
+            self.quantity -= quantity;
+            self.total_cost = Decimal::ZERO; // Unknown cost for the short/missing portion
+        } else {
+            self.quantity -= quantity;
+            self.total_cost -= cost_basis;
+        }
 
         Ok(cost_basis)
     }
@@ -208,14 +214,10 @@ fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transa
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
-                quantity: Decimal::from_str(&row.get::<_, String>(5)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                price_per_unit: Decimal::from_str(&row.get::<_, String>(6)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                total_cost: Decimal::from_str(&row.get::<_, String>(7)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                fees: Decimal::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                quantity: get_decimal_value(row, 5)?,
+                price_per_unit: get_decimal_value(row, 6)?,
+                total_cost: get_decimal_value(row, 7)?,
+                fees: get_decimal_value(row, 8)?,
                 is_day_trade: row.get(9)?,
                 quota_issuance_date: row.get(10)?,
                 notes: row.get(11)?,
@@ -226,6 +228,32 @@ fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transa
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(transactions)
+}
+
+/// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)
+fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+    // Try to get as String first (for TEXT storage)
+    if let Ok(s) = row.get::<_, String>(idx) {
+        return Decimal::from_str(&s)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
+    }
+
+    // Fall back to i64 (for INTEGER storage due to SQLite type affinity)
+    if let Ok(i) = row.get::<_, i64>(idx) {
+        return Ok(Decimal::from(i));
+    }
+
+    // Try f64 for floating point values
+    if let Ok(f) = row.get::<_, f64>(idx) {
+        return Decimal::try_from(f)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
+    }
+
+    Err(rusqlite::Error::InvalidColumnType(
+        idx,
+        "quantity".to_string(),
+        rusqlite::types::Type::Null
+    ))
 }
 
 /// Calculate asset allocation breakdown

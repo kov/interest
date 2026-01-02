@@ -84,7 +84,13 @@ impl FifoMatcher {
         while remaining_to_sell > Decimal::ZERO {
             let lot = self.purchase_queue.front_mut()
                 .ok_or_else(|| anyhow!(
-                    "Insufficient purchase history for sale on {}. Selling {} but no purchases available.",
+                    "Insufficient purchase history for sale on {}. Selling {} units but no purchases available.\n\
+                    \nThis usually means:\n\
+                    1. Shares came from sources not in the import (term contracts, transfers, etc.)\n\
+                    2. Incomplete transaction history in the CEI export\n\
+                    3. Short selling (not yet supported)\n\
+                    \nTo fix: Manually add the missing purchase transactions to the database or \n\
+                    adjust the import file to include all historical purchases.",
                     tx.trade_date,
                     remaining_to_sell
                 ))?;

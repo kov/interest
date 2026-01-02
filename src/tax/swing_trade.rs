@@ -185,14 +185,10 @@ fn get_transactions_up_to_month(
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
-                quantity: Decimal::from_str(&row.get::<_, String>(5)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                price_per_unit: Decimal::from_str(&row.get::<_, String>(6)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                total_cost: Decimal::from_str(&row.get::<_, String>(7)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                fees: Decimal::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                quantity: get_decimal_value(row, 5)?,
+                price_per_unit: get_decimal_value(row, 6)?,
+                total_cost: get_decimal_value(row, 7)?,
+                fees: get_decimal_value(row, 8)?,
                 is_day_trade: row.get(9)?,
                 quota_issuance_date: row.get(10)?,
                 notes: row.get(11)?,
@@ -203,6 +199,32 @@ fn get_transactions_up_to_month(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(transactions)
+}
+
+/// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)
+fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+    // Try to get as String first (for TEXT storage)
+    if let Ok(s) = row.get::<_, String>(idx) {
+        return Decimal::from_str(&s)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
+    }
+
+    // Fall back to i64 (for INTEGER storage due to SQLite type affinity)
+    if let Ok(i) = row.get::<_, i64>(idx) {
+        return Ok(Decimal::from(i));
+    }
+
+    // Try f64 for floating point values
+    if let Ok(f) = row.get::<_, f64>(idx) {
+        return Decimal::try_from(f)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
+    }
+
+    Err(rusqlite::Error::InvalidColumnType(
+        idx,
+        "quantity".to_string(),
+        rusqlite::types::Type::Null
+    ))
 }
 
 #[cfg(test)]
