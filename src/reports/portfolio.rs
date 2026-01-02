@@ -53,6 +53,19 @@ impl FifoPosition {
     }
 
     fn remove_sell(&mut self, quantity: Decimal) -> Result<Decimal> {
+        if quantity > self.quantity {
+            anyhow::bail!(
+                "Insufficient purchase history: Selling {} units but only {} available.\n\
+                \nThis usually means:\n\
+                1. Shares came from sources not in the import (term contracts, transfers, etc.)\n\
+                2. Incomplete transaction history in the CEI export\n\
+                3. Short selling (not yet supported)\n\
+                \nTo fix: Manually add the missing purchase transactions to the database.",
+                quantity,
+                self.quantity
+            );
+        }
+
         // Calculate proportional cost basis for the sold units
         let avg_cost = if self.quantity > Decimal::ZERO {
             self.total_cost / self.quantity
@@ -62,22 +75,8 @@ impl FifoPosition {
 
         let cost_basis = avg_cost * quantity;
 
-        // Handle overselling (short positions or missing buy data)
-        if quantity > self.quantity {
-            // Selling more than we have - could be:
-            // 1. Short selling
-            // 2. Shares from term contracts/other sources not in import
-            // 3. Incomplete transaction history
-            // Log warning but allow it to continue (portfolio can still be useful)
-            eprintln!("⚠️  Warning: Overselling detected for asset {}. Selling {} but only {} available. \
-                      \n    This indicates incomplete transaction history. P&L may be inaccurate.",
-                      self.asset_id, quantity, self.quantity);
-            self.quantity -= quantity;
-            self.total_cost = Decimal::ZERO; // Unknown cost for the short/missing portion
-        } else {
-            self.quantity -= quantity;
-            self.total_cost -= cost_basis;
-        }
+        self.quantity -= quantity;
+        self.total_cost -= cost_basis;
 
         Ok(cost_basis)
     }
