@@ -57,11 +57,29 @@ async fn main() -> Result<()> {
         },
 
         Commands::Actions { action } => match action {
+            ActionCommands::Add {
+                ticker,
+                action_type,
+                ratio,
+                date,
+                notes,
+            } => {
+                handle_action_add(
+                    &ticker,
+                    &action_type,
+                    &ratio,
+                    &date,
+                    notes.as_deref(),
+                ).await
+            }
             ActionCommands::Update => {
                 handle_actions_update().await
             }
             ActionCommands::List { ticker } => {
                 handle_actions_list(ticker.as_deref()).await
+            }
+            ActionCommands::Apply { ticker } => {
+                handle_action_apply(ticker.as_deref()).await
             }
         },
 
@@ -456,6 +474,165 @@ async fn handle_actions_list(ticker: Option<&str>) -> Result<()> {
     if let Some(t) = ticker {
         println!("  Filter: {}", t);
     }
+
+    Ok(())
+}
+
+/// Handle manual corporate action add command
+async fn handle_action_add(
+    ticker: &str,
+    action_type_str: &str,
+    ratio_str: &str,
+    date_str: &str,
+    notes: Option<&str>,
+) -> Result<()> {
+    use colored::Colorize;
+    use chrono::NaiveDate;
+    use anyhow::Context;
+
+    info!("Adding manual corporate action for {}", ticker);
+
+    // Parse action type
+    let action_type = match action_type_str.to_uppercase().as_str() {
+        "SPLIT" => db::CorporateActionType::Split,
+        "REVERSE-SPLIT" => db::CorporateActionType::ReverseSplit,
+        "BONUS" => db::CorporateActionType::Bonus,
+        _ => return Err(anyhow::anyhow!("Action type must be 'split', 'reverse-split', or 'bonus'")),
+    };
+
+    // Parse ratio (from:to format, e.g., "1:2" or "10:1")
+    let ratio_parts: Vec<&str> = ratio_str.split(':').collect();
+    if ratio_parts.len() != 2 {
+        return Err(anyhow::anyhow!("Ratio must be in format 'from:to' (e.g., '1:2', '10:1')"));
+    }
+
+    let ratio_from: i32 = ratio_parts[0].trim().parse()
+        .context("Invalid ratio 'from' value. Must be an integer")?;
+    let ratio_to: i32 = ratio_parts[1].trim().parse()
+        .context("Invalid ratio 'to' value. Must be an integer")?;
+
+    if ratio_from <= 0 || ratio_to <= 0 {
+        return Err(anyhow::anyhow!("Ratio values must be positive integers"));
+    }
+
+    // Parse ex-date
+    let ex_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .context("Invalid date format. Use YYYY-MM-DD")?;
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get or create asset
+    let asset_type = db::AssetType::detect_from_ticker(ticker)
+        .unwrap_or(db::AssetType::Stock);
+    let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
+
+    // Check if this corporate action already exists
+    if db::corporate_action_exists(&conn, asset_id, &ex_date, &action_type)? {
+        println!("{} Corporate action already exists for {} on {}",
+            "⚠".yellow().bold(), ticker.cyan().bold(), ex_date);
+        return Ok(());
+    }
+
+    // Create corporate action
+    let action = db::CorporateAction {
+        id: None,
+        asset_id,
+        action_type: action_type.clone(),
+        event_date: ex_date, // Same as ex_date for manual entries
+        ex_date,
+        ratio_from,
+        ratio_to,
+        applied: false,
+        source: "MANUAL".to_string(),
+        notes: notes.map(|s| s.to_string()),
+        created_at: chrono::Utc::now(),
+    };
+
+    // Insert corporate action
+    let action_id = db::insert_corporate_action(&conn, &action)?;
+
+    // Display confirmation
+    println!("\n{} Corporate action added successfully!", "✓".green().bold());
+    println!("  Action ID:      {}", action_id);
+    println!("  Ticker:         {}", ticker.cyan().bold());
+    println!("  Type:           {}", action_type.as_str());
+    println!("  Ratio:          {}:{} ({})", ratio_from, ratio_to,
+        match action_type {
+            db::CorporateActionType::Split => format!("each share becomes {}", ratio_to as f64 / ratio_from as f64),
+            db::CorporateActionType::ReverseSplit => format!("{} shares become 1", ratio_from as f64 / ratio_to as f64),
+            db::CorporateActionType::Bonus => format!("{}% bonus", ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0),
+        }
+    );
+    println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
+    println!("  Applied:        {}", "No (use 'interest actions apply' to apply)".yellow());
+    if let Some(n) = notes {
+        println!("  Notes:          {}", n);
+    }
+    println!("\n{} Run this command to apply the action:", "→".blue().bold());
+    println!("  interest actions apply {}", ticker);
+    println!();
+
+    Ok(())
+}
+
+/// Handle apply corporate actions command
+async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
+    use colored::Colorize;
+
+    info!("Applying corporate actions");
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get unapplied corporate actions
+    let actions = if let Some(ticker) = ticker_filter {
+        // Get asset ID for the ticker
+        let assets = db::get_all_assets(&conn)?;
+        let asset = assets.iter()
+            .find(|a| a.ticker.eq_ignore_ascii_case(ticker))
+            .ok_or_else(|| anyhow::anyhow!("Ticker {} not found in database", ticker))?;
+
+        crate::corporate_actions::get_unapplied_actions(&conn, Some(asset.id.unwrap()))?
+    } else {
+        crate::corporate_actions::get_unapplied_actions(&conn, None)?
+    };
+
+    if actions.is_empty() {
+        println!("{} No unapplied corporate actions found", "ℹ".blue().bold());
+        if let Some(t) = ticker_filter {
+            println!("  Filter: {}", t);
+        }
+        return Ok(());
+    }
+
+    println!("\n{} Found {} unapplied corporate action(s)\n",
+        "📋".cyan().bold(), actions.len());
+
+    // Apply each action
+    for action in actions {
+        let asset = db::get_all_assets(&conn)?
+            .into_iter()
+            .find(|a| a.id == Some(action.asset_id))
+            .ok_or_else(|| anyhow::anyhow!("Asset not found for action {}", action.id.unwrap_or(0)))?;
+
+        println!("  {} Applying {} for {} (ex-date: {})",
+            "→".blue(),
+            action.action_type.as_str().cyan(),
+            asset.ticker.cyan().bold(),
+            action.ex_date.format("%Y-%m-%d")
+        );
+
+        // Apply the action
+        let adjusted_count = crate::corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
+
+        println!("    {} Adjusted {} transaction(s)", "✓".green(), adjusted_count);
+    }
+
+    println!("\n{} All corporate actions applied successfully!", "✓".green().bold());
+    println!();
 
     Ok(())
 }

@@ -112,12 +112,38 @@ pub enum TaxCommands {
 
 #[derive(Subcommand)]
 pub enum ActionCommands {
+    /// Manually add a corporate action (split, reverse split, bonus)
+    Add {
+        /// Ticker symbol (e.g., PETR4, A1MD34)
+        ticker: String,
+
+        /// Action type: split, reverse-split, or bonus
+        #[arg(value_parser = ["split", "reverse-split", "bonus", "SPLIT", "REVERSE-SPLIT", "BONUS"])]
+        action_type: String,
+
+        /// Ratio in format "from:to" (e.g., "1:2" for 1:2 split, "10:1" for 10:1 reverse split)
+        ratio: String,
+
+        /// Ex-date when the action becomes effective (YYYY-MM-DD)
+        date: String,
+
+        /// Optional notes
+        #[arg(short, long)]
+        notes: Option<String>,
+    },
+
     /// Update corporate actions from API
     Update,
 
     /// List corporate actions for a ticker
     List {
         /// Ticker symbol (optional, shows all if not specified)
+        ticker: Option<String>,
+    },
+
+    /// Apply unapplied corporate actions to transactions
+    Apply {
+        /// Ticker symbol (optional, applies all if not specified)
         ticker: Option<String>,
     },
 }
