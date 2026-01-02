@@ -26,13 +26,7 @@ async fn main() -> Result<()> {
 
         Commands::Portfolio { action } => match action {
             PortfolioCommands::Show { asset_type } => {
-                if let Some(ref atype) = asset_type {
-                    println!("Showing portfolio for asset type: {}", atype);
-                } else {
-                    println!("Showing full portfolio");
-                }
-                // TODO: Implement portfolio show
-                Ok(())
+                handle_portfolio_show(asset_type.as_deref()).await
             }
             PortfolioCommands::Performance { period } => {
                 println!("Showing performance for period: {}", period);
@@ -447,6 +441,154 @@ async fn handle_actions_list(ticker: Option<&str>) -> Result<()> {
         println!("  Filter: {}", t);
     }
 
+    Ok(())
+}
+
+/// Handle portfolio show command
+async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
+    use colored::Colorize;
+    use tabled::{Table, Tabled, settings::Style};
+    use anyhow::Context;
+    use std::str::FromStr;
+
+    info!("Generating portfolio report");
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Parse asset type filter if provided
+    let asset_type_filter = if let Some(type_str) = asset_type {
+        Some(db::AssetType::from_str(type_str)
+            .context(format!("Invalid asset type: {}", type_str))?)
+    } else {
+        None
+    };
+
+    // Calculate portfolio
+    let report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+
+    if report.positions.is_empty() {
+        println!("{} No positions found", "ℹ".blue().bold());
+        println!("Import transactions first using: interest import <file>");
+        return Ok(());
+    }
+
+    // Display header
+    if let Some(ref filter) = asset_type_filter {
+        let filter_name: &db::AssetType = filter;
+        println!("\n{} Portfolio - {} only\n", "📊".cyan().bold(), filter_name.as_str().to_uppercase());
+    } else {
+        println!("\n{} Complete Portfolio\n", "📊".cyan().bold());
+    }
+
+    // Display positions table
+    #[derive(Tabled)]
+    struct PositionRow {
+        #[tabled(rename = "Ticker")]
+        ticker: String,
+        #[tabled(rename = "Type")]
+        asset_type: String,
+        #[tabled(rename = "Quantity")]
+        quantity: String,
+        #[tabled(rename = "Avg Cost")]
+        avg_cost: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Price")]
+        price: String,
+        #[tabled(rename = "Value")]
+        value: String,
+        #[tabled(rename = "P&L")]
+        pl: String,
+        #[tabled(rename = "P&L %")]
+        pl_pct: String,
+    }
+
+    let rows: Vec<PositionRow> = report
+        .positions
+        .iter()
+        .map(|p| {
+            let pl_str = if let Some(pl) = p.unrealized_pl {
+                if pl >= rust_decimal::Decimal::ZERO {
+                    format!("R$ {:.2}", pl).green().to_string()
+                } else {
+                    format!("R$ {:.2}", pl).red().to_string()
+                }
+            } else {
+                "-".to_string()
+            };
+
+            let pl_pct_str = if let Some(pl_pct) = p.unrealized_pl_pct {
+                if pl_pct >= rust_decimal::Decimal::ZERO {
+                    format!("{:.2}%", pl_pct).green().to_string()
+                } else {
+                    format!("{:.2}%", pl_pct).red().to_string()
+                }
+            } else {
+                "-".to_string()
+            };
+
+            PositionRow {
+                ticker: p.asset.ticker.clone(),
+                asset_type: p.asset.asset_type.as_str().to_string(),
+                quantity: format!("{:.2}", p.quantity),
+                avg_cost: format!("R$ {:.2}", p.average_cost),
+                total_cost: format!("R$ {:.2}", p.total_cost),
+                price: p.current_price
+                    .map(|pr| format!("R$ {:.2}", pr))
+                    .unwrap_or_else(|| "-".to_string()),
+                value: p.current_value
+                    .map(|v| format!("R$ {:.2}", v))
+                    .unwrap_or_else(|| "-".to_string()),
+                pl: pl_str,
+                pl_pct: pl_pct_str,
+            }
+        })
+        .collect();
+
+    let table = Table::new(rows).with(Style::rounded()).to_string();
+    println!("{}", table);
+
+    // Display summary
+    println!("\n{} Summary", "📈".cyan().bold());
+    println!("  Total Cost:  {}", format!("R$ {:.2}", report.total_cost).cyan());
+    println!("  Total Value: {}", format!("R$ {:.2}", report.total_value).cyan());
+
+    if report.total_pl >= rust_decimal::Decimal::ZERO {
+        println!("  Total P&L:   {} ({})",
+            format!("R$ {:.2}", report.total_pl).green().bold(),
+            format!("{:.2}%", report.total_pl_pct).green().bold()
+        );
+    } else {
+        println!("  Total P&L:   {} ({})",
+            format!("R$ {:.2}", report.total_pl).red().bold(),
+            format!("{:.2}%", report.total_pl_pct).red().bold()
+        );
+    }
+
+    // Display asset allocation if showing full portfolio
+    if asset_type_filter.is_none() {
+        let allocation = reports::calculate_allocation(&report);
+
+        if allocation.len() > 1 {
+            println!("\n{} Asset Allocation", "🎯".cyan().bold());
+
+            let mut alloc_vec: Vec<_> = allocation.iter().collect();
+            alloc_vec.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+
+            for (asset_type, (value, pct)) in alloc_vec {
+                let type_ref: &db::AssetType = asset_type;
+                println!("  {}: {} ({:.2}%)",
+                    type_ref.as_str().to_uppercase(),
+                    format!("R$ {:.2}", value).cyan(),
+                    pct
+                );
+            }
+        }
+    }
+
+    println!();
     Ok(())
 }
 
