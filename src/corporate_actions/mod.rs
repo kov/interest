@@ -76,6 +76,9 @@ pub fn get_unapplied_actions(
 /// For splits:    new_qty = old_qty × (ratio_to / ratio_from)
 ///                new_price = old_price × (ratio_from / ratio_to)
 ///
+/// This function is idempotent - safe to call multiple times. It only adjusts
+/// transactions that haven't been adjusted by this action yet.
+///
 /// Returns the number of transactions adjusted.
 pub fn apply_corporate_action(
     conn: &Connection,
@@ -90,18 +93,24 @@ pub fn apply_corporate_action(
         action.ratio_to
     );
 
-    // Get all transactions for this asset before the ex-date
+    let action_id = action.id.ok_or_else(|| anyhow::anyhow!("Corporate action must have an ID"))?;
+
+    // Get all transactions for this asset before the ex-date that haven't been adjusted yet
     let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC"
+        "SELECT t.id, t.asset_id, t.transaction_type, t.trade_date, t.settlement_date,
+                t.quantity, t.price_per_unit, t.total_cost, t.fees, t.is_day_trade,
+                t.quota_issuance_date, t.notes, t.source, t.created_at
+         FROM transactions t
+         WHERE t.asset_id = ?1 AND t.trade_date < ?2
+           AND NOT EXISTS (
+               SELECT 1 FROM corporate_action_adjustments caa
+               WHERE caa.action_id = ?3 AND caa.transaction_id = t.id
+           )
+         ORDER BY t.trade_date ASC"
     )?;
 
     let transactions = stmt
-        .query_map(rusqlite::params![action.asset_id, action.ex_date], |row| {
+        .query_map(rusqlite::params![action.asset_id, action.ex_date, action_id], |row| {
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
@@ -123,9 +132,9 @@ pub fn apply_corporate_action(
         .collect::<Result<Vec<_>, _>>()?;
 
     if transactions.is_empty() {
-        info!("No transactions found before ex-date {}", action.ex_date);
+        info!("No unadjusted transactions found before ex-date {}", action.ex_date);
         // Mark as applied anyway
-        mark_action_as_applied(conn, action.id.unwrap())?;
+        mark_action_as_applied(conn, action_id)?;
         return Ok(0);
     }
 
@@ -135,11 +144,15 @@ pub fn apply_corporate_action(
     // Adjust each transaction
     let mut adjusted_count = 0;
     for tx in transactions {
-        let new_quantity = tx.quantity * ratio_to / ratio_from;
-        let new_price = tx.price_per_unit * ratio_from / ratio_to;
+        let tx_id = tx.id.ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
+
+        let old_quantity = tx.quantity;
+        let old_price = tx.price_per_unit;
+        let new_quantity = old_quantity * ratio_to / ratio_from;
+        let new_price = old_price * ratio_from / ratio_to;
 
         // Verify total cost remains unchanged (within rounding tolerance)
-        let old_total = tx.quantity * tx.price_per_unit;
+        let old_total = old_quantity * old_price;
         let new_total = new_quantity * new_price;
         let diff = (new_total - old_total).abs();
         let tolerance = Decimal::from_str("0.01").unwrap(); // 1 cent tolerance
@@ -147,7 +160,7 @@ pub fn apply_corporate_action(
         if diff > tolerance {
             tracing::warn!(
                 "Total cost changed for transaction {}: {} -> {} (diff: {})",
-                tx.id.unwrap_or(0),
+                tx_id,
                 old_total,
                 new_total,
                 diff
@@ -162,7 +175,22 @@ pub fn apply_corporate_action(
             rusqlite::params![
                 new_quantity.to_string(),
                 new_price.to_string(),
-                tx.id.unwrap()
+                tx_id
+            ],
+        )?;
+
+        // Record the adjustment in the junction table
+        conn.execute(
+            "INSERT INTO corporate_action_adjustments
+             (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                action_id,
+                tx_id,
+                old_quantity.to_string(),
+                new_quantity.to_string(),
+                old_price.to_string(),
+                new_price.to_string()
             ],
         )?;
 
@@ -170,7 +198,7 @@ pub fn apply_corporate_action(
     }
 
     // Mark the corporate action as applied
-    mark_action_as_applied(conn, action.id.unwrap())?;
+    mark_action_as_applied(conn, action_id)?;
 
     info!(
         "Successfully adjusted {} transactions for {} {}",
@@ -180,6 +208,141 @@ pub fn apply_corporate_action(
     );
 
     Ok(adjusted_count)
+}
+
+/// Apply relevant corporate actions to a single transaction
+///
+/// This is called when adding manual historical transactions. It finds all
+/// corporate actions with ex-date after the transaction's trade date and
+/// applies them in chronological order.
+///
+/// Returns the number of actions applied.
+pub fn apply_actions_to_transaction(
+    conn: &Connection,
+    transaction_id: i64,
+) -> Result<usize> {
+    // Get the transaction details
+    let mut stmt = conn.prepare(
+        "SELECT asset_id, trade_date FROM transactions WHERE id = ?1"
+    )?;
+
+    let (asset_id, trade_date): (i64, chrono::NaiveDate) = stmt.query_row([transaction_id], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+
+    // Find all applied corporate actions for this asset with ex-date after trade_date
+    let mut actions_stmt = conn.prepare(
+        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to,
+                applied, source, notes, created_at
+         FROM corporate_actions
+         WHERE asset_id = ?1 AND ex_date > ?2 AND applied = 1
+         ORDER BY ex_date ASC"
+    )?;
+
+    let actions = actions_stmt
+        .query_map(rusqlite::params![asset_id, trade_date], |row| {
+            Ok(CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: crate::db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
+                    .unwrap_or(crate::db::CorporateActionType::Split),
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                ratio_from: row.get(5)?,
+                ratio_to: row.get(6)?,
+                applied: row.get(7)?,
+                source: row.get(8)?,
+                notes: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if actions.is_empty() {
+        return Ok(0);
+    }
+
+    // Get the current transaction state
+    let mut tx_stmt = conn.prepare(
+        "SELECT quantity, price_per_unit FROM transactions WHERE id = ?1"
+    )?;
+
+    let (mut quantity, mut price): (Decimal, Decimal) = tx_stmt.query_row([transaction_id], |row| {
+        Ok((get_decimal_value(row, 0)?, get_decimal_value(row, 1)?))
+    })?;
+
+    let mut applied_count = 0;
+
+    // Apply each action in chronological order
+    for action in actions {
+        let action_id = action.id.unwrap();
+
+        // Check if this action has already been applied to this transaction
+        let already_adjusted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM corporate_action_adjustments
+             WHERE action_id = ?1 AND transaction_id = ?2)",
+            rusqlite::params![action_id, transaction_id],
+            |row| row.get(0),
+        )?;
+
+        if already_adjusted {
+            continue;
+        }
+
+        let old_quantity = quantity;
+        let old_price = price;
+
+        let ratio_from = Decimal::from(action.ratio_from);
+        let ratio_to = Decimal::from(action.ratio_to);
+
+        quantity = quantity * ratio_to / ratio_from;
+        price = price * ratio_from / ratio_to;
+
+        // Record the adjustment
+        conn.execute(
+            "INSERT INTO corporate_action_adjustments
+             (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                action_id,
+                transaction_id,
+                old_quantity.to_string(),
+                quantity.to_string(),
+                old_price.to_string(),
+                price.to_string()
+            ],
+        )?;
+
+        applied_count += 1;
+
+        info!(
+            "Auto-applied {} (ratio {}:{}) to transaction {}",
+            action.action_type.as_str(),
+            action.ratio_from,
+            action.ratio_to,
+            transaction_id
+        );
+    }
+
+    // Update the transaction with the final adjusted values
+    if applied_count > 0 {
+        conn.execute(
+            "UPDATE transactions SET quantity = ?1, price_per_unit = ?2 WHERE id = ?3",
+            rusqlite::params![
+                quantity.to_string(),
+                price.to_string(),
+                transaction_id
+            ],
+        )?;
+
+        info!(
+            "Auto-applied {} corporate action(s) to transaction {}",
+            applied_count,
+            transaction_id
+        );
+    }
+
+    Ok(applied_count)
 }
 
 /// Mark a corporate action as applied

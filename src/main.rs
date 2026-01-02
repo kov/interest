@@ -1091,6 +1091,9 @@ async fn handle_transaction_add(
     // Insert transaction
     let tx_id = db::insert_transaction(&conn, &transaction)?;
 
+    // Auto-apply any relevant corporate actions to this historical transaction
+    let actions_applied = crate::corporate_actions::apply_actions_to_transaction(&conn, tx_id)?;
+
     // Display confirmation
     println!("\n{} Transaction added successfully!", "✓".green().bold());
     println!("  Transaction ID: {}", tx_id);
@@ -1103,6 +1106,13 @@ async fn handle_transaction_add(
     println!("  Total:          {}", format!("R$ {:.2}", total_cost).cyan().bold());
     if let Some(n) = notes {
         println!("  Notes:          {}", n);
+    }
+
+    if actions_applied > 0 {
+        println!("\n{} Auto-applied {} corporate action(s) to this transaction",
+            "ℹ".blue().bold(), actions_applied);
+        println!("  The quantity and price have been adjusted automatically.");
+        println!("  Run 'interest portfolio show' to see the adjusted values.");
     }
     println!();
 
