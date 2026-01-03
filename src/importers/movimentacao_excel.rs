@@ -1,3 +1,22 @@
+//! Movimentacao Excel file importer
+//!
+//! Parses B3 "Movimentação" files which contain comprehensive account movement history:
+//! - Trade transactions (buy/sell)
+//! - **Term contracts** (compra a termo) and their liquidations
+//! - Corporate actions (splits, bonuses, mergers)
+//! - Income events (dividends, yields, amortization)
+//! - Stock lending, subscription rights, and more
+//!
+//! ## Important: Term Contract Handling
+//!
+//! Term contracts have special ticker behavior:
+//! - **Purchase**: Ticker has 'T' suffix (e.g., ANIM3T)
+//! - **Liquidation**: When term expires, 'T' is dropped (e.g., ANIM3T → ANIM3)
+//! - The liquidation entry in movimentacao shows the BASE ticker (ANIM3)
+//! - Cost basis from ANIM3T purchase should transfer to ANIM3 holding
+//!
+//! This is tracked via transaction notes and should be handled during position calculations.
+
 use anyhow::{anyhow, Context, Result};
 use calamine::{open_workbook, Reader, Xlsx, Data, DataType};
 use chrono::NaiveDate;
@@ -25,21 +44,101 @@ pub struct MovimentacaoEntry {
 }
 
 impl MovimentacaoEntry {
-    /// Extract ticker from product name (e.g., "PETR4 - PETROBRAS" -> "PETR4")
+    /// Extract ticker from product name
+    ///
+    /// Handles multiple formats:
+    /// - Standard: "PETR4 - PETROBRAS" -> "PETR4"
+    /// - Debentures: "DEB - ELET23 - COMPANY" -> "ELET23"
+    /// - CDB: "CDB - CDB92576XY3 - ITAU" -> "CDB92576XY3"
+    /// - Tesouro Direto: "Tesouro IPCA+ 2035" -> "TESOURO_IPCA_2035"
     fn extract_ticker(product: &str) -> Option<String> {
-        // Ticker is usually before the first space or dash
+        // Handle CDBs: "CDB - CODE" or "CDB - CODE - BANK"
+        if product.starts_with("CDB ") {
+            let parts: Vec<&str> = product.split(" - ").collect();
+            if parts.len() >= 2 {
+                // The CDB code is the identifier (e.g., "CDB92576XY3")
+                return Some(parts[1].trim().to_uppercase());
+            }
+        }
+
+        // Handle debentures: "DEB - TICKER - COMPANY"
+        if product.starts_with("DEB ") {
+            let parts: Vec<&str> = product.split(" - ").collect();
+            if parts.len() >= 2 {
+                let ticker = parts[1].trim();
+                if ticker.len() >= 4 && ticker.len() <= 6
+                    && ticker.chars().last().map(|c| c.is_numeric()).unwrap_or(false) {
+                    return Some(ticker.to_uppercase());
+                }
+            }
+        }
+
+        // Handle Tesouro Direto (government bonds) - create synthetic ticker from name
+        if product.starts_with("Tesouro ") {
+            // Extract bond type and year
+            // e.g., "Tesouro IPCA+ com Juros Semestrais 2035" -> "TESOURO_IPCA_2035"
+            let parts: Vec<&str> = product.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let bond_type = parts.get(1)?.replace('+', "").replace("com", "");
+                let year = parts.last()?;
+                let synthetic_ticker = format!("TESOURO_{}_{}", bond_type, year);
+                return Some(synthetic_ticker.to_uppercase());
+            }
+        }
+
+        // Handle CRI (Real Estate Receivables Certificate): "CRI - CODE - COMPANY"
+        if product.starts_with("CRI ") {
+            let parts: Vec<&str> = product.split(" - ").collect();
+            if parts.len() >= 2 {
+                return Some(format!("CRI_{}", parts[1].trim()));
+            }
+        }
+
+        // Handle Options: "Opção de Compra - PETRF407 - PETR"
+        if product.starts_with("Opção ") {
+            let parts: Vec<&str> = product.split(" - ").collect();
+            if parts.len() >= 2 {
+                return Some(parts[1].trim().to_uppercase());
+            }
+        }
+
+        // Handle term contracts with English names: "COMMON STOCK - ANIM3T - ANIM"
+        if product.contains("STOCK - ") {
+            let parts: Vec<&str> = product.split(" - ").collect();
+            if parts.len() >= 2 {
+                let ticker = parts[1].trim();
+                if ticker.len() >= 4 {
+                    return Some(ticker.to_uppercase());
+                }
+            }
+        }
+
+        // Handle term contracts in Portuguese: "Termo de Ação ANIM3 - ANIM3T - ANIM"
+        if product.starts_with("Termo de ") {
+            let parts: Vec<&str> = product.split(" - ").collect();
+            if parts.len() >= 2 {
+                let ticker = parts[1].trim();
+                if ticker.len() >= 4 {
+                    return Some(ticker.to_uppercase());
+                }
+            }
+        }
+
+        // Standard format: "TICKER - COMPANY NAME"
         let parts: Vec<&str> = product.split(&[' ', '-'][..]).collect();
 
         if let Some(first) = parts.first() {
             let potential_ticker = first.trim();
-            // Brazilian tickers are typically 4-6 characters ending in digit
+            // Brazilian tickers are typically 4-6 characters, but ETFs can be longer (up to 9)
+            // They must end in a digit
             if potential_ticker.len() >= 4
-                && potential_ticker.len() <= 6
+                && potential_ticker.len() <= 9
                 && potential_ticker.chars().last().map(|c| c.is_numeric()).unwrap_or(false) {
                 return Some(potential_ticker.to_uppercase());
             }
         }
 
+        debug!("Could not extract ticker from product: '{}'", product);
         None
     }
 
@@ -108,6 +207,21 @@ impl MovimentacaoEntry {
         )
     }
 
+    /// Check if this is a term contract liquidation
+    pub fn is_term_liquidation(&self) -> bool {
+        self.movement_type == "Liquidação Termo"
+    }
+
+    /// Get the term contract ticker (adds 'T' suffix to base ticker)
+    /// Used for matching liquidations to their original term purchases
+    pub fn get_term_ticker(&self) -> Option<String> {
+        if let Some(base_ticker) = &self.ticker {
+            Some(format!("{}T", base_ticker))
+        } else {
+            None
+        }
+    }
+
     /// Determine if this is a corporate action
     pub fn is_corporate_action(&self) -> bool {
         matches!(self.movement_type.as_str(),
@@ -127,18 +241,26 @@ impl MovimentacaoEntry {
 
     /// Convert to Transaction (for trades)
     pub fn to_transaction(&self, asset_id: i64) -> Result<Transaction> {
-        let transaction_type = match self.movement_type.as_str() {
+        let (transaction_type, notes) = match self.movement_type.as_str() {
             "Compra" | "COMPRA/VENDA" | "COMPRA / VENDA" | "COMPRA/VENDA DEFINITIVA/CESSAO" => {
-                TransactionType::Buy
+                (TransactionType::Buy, format!("Imported from movimentacao: {}", self.movement_type))
             }
-            "Venda" => TransactionType::Sell,
+            "Venda" => {
+                (TransactionType::Sell, format!("Imported from movimentacao: {}", self.movement_type))
+            }
             "Liquidação Termo" => {
-                // Term contracts can be buy or sell - check direction
-                if self.direction.contains("Debito") || self.direction.contains("Saída") {
-                    TransactionType::Buy
+                // Term contract liquidation
+                // Note: The ticker in the movimentacao file will be the BASE ticker (e.g., ANIM3)
+                // but the original purchase would have been with the T suffix (e.g., ANIM3T)
+                // When the term expires, the T is dropped and you receive the base asset
+
+                let note = if let Some(ticker) = &self.ticker {
+                    format!("Term contract liquidation (original ticker: {}T → {})", ticker, ticker)
                 } else {
-                    TransactionType::Sell
-                }
+                    "Term contract liquidation".to_string()
+                };
+
+                (TransactionType::Buy, note)
             }
             _ => return Err(anyhow!("Not a trade movement type: {}", self.movement_type)),
         };
@@ -164,7 +286,7 @@ impl MovimentacaoEntry {
             fees: Decimal::ZERO,  // Fees not separate in movimentacao file
             is_day_trade: false,
             quota_issuance_date: None,
-            notes: Some(format!("Imported from movimentacao: {}", self.movement_type)),
+            notes: Some(notes),
             source: "MOVIMENTACAO".to_string(),
             created_at: chrono::Utc::now(),
         })
