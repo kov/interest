@@ -20,6 +20,10 @@ tokio = { version = "1.40", features = ["full"] }
 # HTTP client for price APIs
 reqwest = { version = "0.12", features = ["json"] }
 
+# Headless browser for web scraping (investing.com, etc.)
+headless_chrome = "1.0"
+scraper = "0.22"  # HTML parsing
+
 # Serialization/deserialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

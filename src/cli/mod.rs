@@ -132,6 +132,24 @@ pub enum ActionCommands {
         notes: Option<String>,
     },
 
+    /// Scrape corporate actions from investing.com
+    Scrape {
+        /// Ticker symbol (e.g., A1MD34)
+        ticker: String,
+
+        /// investing.com URL (optional, will auto-build from asset name)
+        #[arg(short, long)]
+        url: Option<String>,
+
+        /// Company name for URL building (optional, uses database if not provided)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Save scraped actions to database
+        #[arg(short, long)]
+        save: bool,
+    },
+
     /// Update corporate actions from API
     Update,
 
@@ -145,6 +163,34 @@ pub enum ActionCommands {
     Apply {
         /// Ticker symbol (optional, applies all if not specified)
         ticker: Option<String>,
+    },
+
+    /// Delete a corporate action by ID
+    Delete {
+        /// Corporate action ID
+        id: i64,
+    },
+
+    /// Edit a corporate action's details
+    Edit {
+        /// Corporate action ID
+        id: i64,
+
+        /// New action type: split, reverse-split, or bonus
+        #[arg(long, value_parser = ["split", "reverse-split", "bonus", "SPLIT", "REVERSE-SPLIT", "BONUS"])]
+        action_type: Option<String>,
+
+        /// New ratio in format "from:to" (e.g., "1:8")
+        #[arg(long)]
+        ratio: Option<String>,
+
+        /// New ex-date (YYYY-MM-DD)
+        #[arg(long)]
+        date: Option<String>,
+
+        /// New notes
+        #[arg(long)]
+        notes: Option<String>,
     },
 }
 

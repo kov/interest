@@ -6,6 +6,7 @@ mod corporate_actions;
 mod tax;
 mod reports;
 mod utils;
+mod scraping;
 
 use anyhow::Result;
 use clap::Parser;
@@ -72,6 +73,14 @@ async fn main() -> Result<()> {
                     notes.as_deref(),
                 ).await
             }
+            ActionCommands::Scrape { ticker, url, name, save } => {
+                handle_action_scrape(
+                    &ticker,
+                    url.as_deref(),
+                    name.as_deref(),
+                    save,
+                ).await
+            }
             ActionCommands::Update => {
                 handle_actions_update().await
             }
@@ -80,6 +89,24 @@ async fn main() -> Result<()> {
             }
             ActionCommands::Apply { ticker } => {
                 handle_action_apply(ticker.as_deref()).await
+            }
+            ActionCommands::Delete { id } => {
+                handle_action_delete(id).await
+            }
+            ActionCommands::Edit {
+                id,
+                action_type,
+                ratio,
+                date,
+                notes,
+            } => {
+                handle_action_edit(
+                    id,
+                    action_type.as_deref(),
+                    ratio.as_deref(),
+                    date.as_deref(),
+                    notes.as_deref(),
+                ).await
             }
         },
 
@@ -577,6 +604,159 @@ async fn handle_action_add(
     Ok(())
 }
 
+/// Handle scrape corporate actions from investing.com
+async fn handle_action_scrape(
+    ticker: &str,
+    url: Option<&str>,
+    name: Option<&str>,
+    save: bool,
+) -> Result<()> {
+    use anyhow::Context;
+    use colored::Colorize;
+
+    info!("Scraping corporate actions for {} from investing.com", ticker);
+
+    // Initialize database to get asset info
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get or create asset
+    let asset_type = db::AssetType::detect_from_ticker(ticker)
+        .unwrap_or(db::AssetType::Stock);
+    let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
+
+    // Determine URL
+    let scrape_url = if let Some(u) = url {
+        u.to_string()
+    } else {
+        // Try to build URL automatically
+        let company_name = if let Some(n) = name {
+            // User provided name - save it to database for future use
+            conn.execute(
+                "UPDATE assets SET name = ?1 WHERE id = ?2",
+                rusqlite::params![n, asset_id],
+            )?;
+            n.to_string()
+        } else {
+            // Try to get asset name from database
+            let assets = db::get_all_assets(&conn)?;
+            let asset = assets.iter()
+                .find(|a| a.ticker.eq_ignore_ascii_case(ticker));
+
+            let db_name = asset.and_then(|a| a.name.clone());
+
+            if let Some(name) = db_name {
+                name
+            } else {
+                // Fetch company name from Yahoo Finance
+                println!("{} Fetching company name from Yahoo Finance...", "🔍".cyan().bold());
+
+                match pricing::yahoo::fetch_company_name(ticker).await {
+                    Ok(fetched_name) => {
+                        println!("  Found: {}", fetched_name.green());
+
+                        // Save to database for future use
+                        if let Some(asset) = asset {
+                            if let Some(asset_id) = asset.id {
+                                let _ = conn.execute(
+                                    "UPDATE assets SET name = ?1 WHERE id = ?2",
+                                    rusqlite::params![&fetched_name, asset_id],
+                                );
+                            }
+                        }
+
+                        fetched_name
+                    }
+                    Err(e) => {
+                        println!("{} Could not fetch company name from Yahoo Finance: {}",
+                            "⚠".yellow().bold(), e);
+                        println!("  Please provide either:");
+                        println!("    1. URL with --url flag");
+                        println!("    2. Company name with --name flag");
+                        println!("\n{} Example:", "→".blue().bold());
+                        println!("  interest actions scrape {} --name \"Advanced Micro Devices Inc\"", ticker);
+                        return Err(anyhow::anyhow!("Could not determine company name"));
+                    }
+                }
+            }
+        };
+
+        let auto_url = crate::scraping::InvestingScraper::build_splits_url(ticker, &company_name);
+        println!("{} Auto-built URL from company name:", "🔗".cyan().bold());
+        println!("  {}", auto_url.dimmed());
+        println!("  If this URL is incorrect, provide the correct one with --url\n");
+        auto_url
+    };
+
+    println!("\n{} Launching headless browser to scrape: {}", "🌐".cyan().bold(), scrape_url);
+    println!("  This may take 10-30 seconds to bypass Cloudflare...\n");
+
+    // Create scraper and fetch data
+    let scraper = crate::scraping::InvestingScraper::new()
+        .context("Failed to create scraper. Ensure Chrome/Chromium is installed.")?;
+
+    let mut actions = scraper.scrape_corporate_actions(&scrape_url, &scrape_url)
+        .context("Failed to scrape corporate actions")?;
+
+    if actions.is_empty() {
+        println!("{} No corporate actions found on the page", "ℹ".yellow().bold());
+        return Ok(());
+    }
+
+    // Set asset_id for all actions
+    for action in &mut actions {
+        action.asset_id = asset_id;
+    }
+
+    // Display scraped actions
+    println!("{} Found {} corporate action(s):\n", "✓".green().bold(), actions.len());
+
+    for action in &actions {
+        println!("  {} {} {}:{} on {}",
+            match action.action_type {
+                db::CorporateActionType::Split => "📈",
+                db::CorporateActionType::ReverseSplit => "📉",
+                db::CorporateActionType::Bonus => "🎁",
+            },
+            action.action_type.as_str().cyan(),
+            action.ratio_from,
+            action.ratio_to,
+            action.ex_date.format("%Y-%m-%d")
+        );
+    }
+
+    if save {
+        println!("\n{} Saving to database...", "💾".cyan().bold());
+
+        let mut saved_count = 0;
+        let mut skipped_count = 0;
+
+        for action in actions {
+            // Check if already exists
+            if db::corporate_action_exists(&conn, asset_id, &action.ex_date, &action.action_type)? {
+                skipped_count += 1;
+                continue;
+            }
+
+            db::insert_corporate_action(&conn, &action)?;
+            saved_count += 1;
+        }
+
+        println!("\n{} Saved {} action(s), skipped {} duplicate(s)",
+            "✓".green().bold(), saved_count, skipped_count);
+
+        if saved_count > 0 {
+            println!("\n{} Run this command to apply the actions:", "→".blue().bold());
+            println!("  interest actions apply {}", ticker);
+        }
+    } else {
+        println!("\n{} Actions not saved. Use --save flag to save to database", "ℹ".blue().bold());
+    }
+    println!();
+
+    Ok(())
+}
+
 /// Handle apply corporate actions command
 async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
     use colored::Colorize;
@@ -633,6 +813,218 @@ async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
 
     println!("\n{} All corporate actions applied successfully!", "✓".green().bold());
     println!();
+
+    Ok(())
+}
+
+/// Handle action delete command
+async fn handle_action_delete(action_id: i64) -> Result<()> {
+    use anyhow::Context;
+    use colored::Colorize;
+
+    info!("Deleting corporate action {}", action_id);
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get the action details before deleting
+    let action = conn.query_row(
+        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source, notes, created_at
+         FROM corporate_actions WHERE id = ?1",
+        rusqlite::params![action_id],
+        |row| {
+            Ok(db::CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
+                    .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                ratio_from: row.get(5)?,
+                ratio_to: row.get(6)?,
+                applied: row.get(7)?,
+                source: row.get(8)?,
+                notes: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        },
+    ).context(format!("Corporate action with ID {} not found", action_id))?;
+
+    // Get asset details
+    let asset = db::get_all_assets(&conn)?
+        .into_iter()
+        .find(|a| a.id == Some(action.asset_id))
+        .ok_or_else(|| anyhow::anyhow!("Asset not found for action"))?;
+
+    // Check if already applied
+    if action.applied {
+        println!("\n{} Cannot delete applied corporate action!", "⚠".yellow().bold());
+        println!("  This action has already been applied to transactions.");
+        println!("  You would need to manually revert the adjustments first.");
+        return Err(anyhow::anyhow!("Cannot delete applied action"));
+    }
+
+    // Display action details
+    println!("\n{} Deleting corporate action:\n", "🗑".red().bold());
+    println!("  ID:       {}", action_id);
+    println!("  Ticker:   {}", asset.ticker.cyan().bold());
+    println!("  Type:     {}", action.action_type.as_str());
+    println!("  Ratio:    {}:{}", action.ratio_from, action.ratio_to);
+    println!("  Ex-date:  {}", action.ex_date.format("%Y-%m-%d"));
+    println!("  Source:   {}", action.source);
+    if let Some(ref notes) = action.notes {
+        println!("  Notes:    {}", notes);
+    }
+
+    // Delete from database
+    conn.execute("DELETE FROM corporate_actions WHERE id = ?1", rusqlite::params![action_id])?;
+
+    println!("\n{} Corporate action deleted successfully!\n", "✓".green().bold());
+
+    Ok(())
+}
+
+/// Handle action edit command
+async fn handle_action_edit(
+    action_id: i64,
+    action_type: Option<&str>,
+    ratio: Option<&str>,
+    date: Option<&str>,
+    notes: Option<&str>,
+) -> Result<()> {
+    use anyhow::Context;
+    use colored::Colorize;
+    use chrono::NaiveDate;
+
+    info!("Editing corporate action {}", action_id);
+
+    // Validate that at least one field is provided
+    if action_type.is_none() && ratio.is_none() && date.is_none() && notes.is_none() {
+        println!("\n{} No changes specified. Use --action-type, --ratio, --date, or --notes", "ℹ".yellow().bold());
+        return Ok(());
+    }
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get the action details
+    let mut action = conn.query_row(
+        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source, notes, created_at
+         FROM corporate_actions WHERE id = ?1",
+        rusqlite::params![action_id],
+        |row| {
+            Ok(db::CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
+                    .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                ratio_from: row.get(5)?,
+                ratio_to: row.get(6)?,
+                applied: row.get(7)?,
+                source: row.get(8)?,
+                notes: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        },
+    ).context(format!("Corporate action with ID {} not found", action_id))?;
+
+    // Check if already applied
+    if action.applied {
+        println!("\n{} Cannot edit applied corporate action!", "⚠".yellow().bold());
+        println!("  This action has already been applied to transactions.");
+        println!("  Delete and re-add it if you need to make changes.");
+        return Err(anyhow::anyhow!("Cannot edit applied action"));
+    }
+
+    // Get asset details
+    let asset = db::get_all_assets(&conn)?
+        .into_iter()
+        .find(|a| a.id == Some(action.asset_id))
+        .ok_or_else(|| anyhow::anyhow!("Asset not found for action"))?;
+
+    println!("\n{} Editing corporate action for {}\n", "✏".cyan().bold(), asset.ticker.cyan().bold());
+
+    // Apply updates
+    let mut updates = Vec::new();
+
+    if let Some(new_type) = action_type {
+        let new_action_type = db::CorporateActionType::from_str(new_type)
+            .context(format!("Invalid action type: {}", new_type))?;
+        println!("  Type:     {} → {}",
+            action.action_type.as_str().dimmed(),
+            new_action_type.as_str().green()
+        );
+        action.action_type = new_action_type;
+        updates.push("action_type");
+    }
+
+    if let Some(ratio_str) = ratio {
+        let parts: Vec<&str> = ratio_str.split(':').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!("Invalid ratio format. Use 'from:to' (e.g., '1:8')"));
+        }
+        let new_from: i32 = parts[0].trim().parse()
+            .context("Invalid ratio 'from' value")?;
+        let new_to: i32 = parts[1].trim().parse()
+            .context("Invalid ratio 'to' value")?;
+
+        println!("  Ratio:    {}:{} → {}:{}",
+            action.ratio_from.to_string().dimmed(),
+            action.ratio_to.to_string().dimmed(),
+            new_from.to_string().green(),
+            new_to.to_string().green()
+        );
+        action.ratio_from = new_from;
+        action.ratio_to = new_to;
+        updates.push("ratio_from");
+        updates.push("ratio_to");
+    }
+
+    if let Some(date_str) = date {
+        let new_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+            .context("Invalid date format. Use YYYY-MM-DD")?;
+
+        println!("  Ex-date:  {} → {}",
+            action.ex_date.format("%Y-%m-%d").to_string().dimmed(),
+            new_date.format("%Y-%m-%d").to_string().green()
+        );
+        action.ex_date = new_date;
+        action.event_date = new_date;
+        updates.push("ex_date");
+        updates.push("event_date");
+    }
+
+    if let Some(new_notes) = notes {
+        let old_notes = action.notes.as_deref().unwrap_or("(none)");
+        println!("  Notes:    {} → {}",
+            old_notes.dimmed(),
+            new_notes.green()
+        );
+        action.notes = Some(new_notes.to_string());
+        updates.push("notes");
+    }
+
+    // Update database
+    conn.execute(
+        "UPDATE corporate_actions
+         SET action_type = ?1, ratio_from = ?2, ratio_to = ?3, ex_date = ?4, event_date = ?5, notes = ?6
+         WHERE id = ?7",
+        rusqlite::params![
+            action.action_type.as_str(),
+            action.ratio_from,
+            action.ratio_to,
+            action.ex_date,
+            action.event_date,
+            action.notes,
+            action_id,
+        ],
+    )?;
+
+    println!("\n{} Corporate action updated successfully!\n", "✓".green().bold());
 
     Ok(())
 }
