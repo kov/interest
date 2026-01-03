@@ -2,12 +2,14 @@
 
 pub mod cei_excel;
 pub mod cei_csv;
+pub mod movimentacao_excel;
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
 use tracing::info;
 
 pub use cei_excel::RawTransaction;
+pub use movimentacao_excel::MovimentacaoEntry;
 
 /// Import transactions from a file (auto-detects Excel vs CSV)
 pub fn import_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<RawTransaction>> {

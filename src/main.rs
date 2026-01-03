@@ -21,8 +21,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Import { file, dry_run } => {
-            handle_import(&file, dry_run).await
+        Commands::Import { file, dry_run, movimentacao } => {
+            handle_import(&file, dry_run, movimentacao).await
         }
 
         Commands::Portfolio { action } => match action {
@@ -131,11 +131,19 @@ async fn main() -> Result<()> {
                 ).await
             }
         },
+
+        Commands::Inspect { file, full, column } => {
+            handle_inspect(&file, full, column).await
+        },
     }
 }
 
 /// Handle import command
-async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
+async fn handle_import(file_path: &str, dry_run: bool, movimentacao: bool) -> Result<()> {
+    if movimentacao {
+        return handle_movimentacao_import(file_path, dry_run).await;
+    }
+
     use colored::Colorize;
     use tabled::{Table, Tabled, settings::Style};
 
@@ -254,6 +262,248 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
     if errors > 0 {
         println!("  Errors: {}", errors.to_string().red());
     }
+
+    Ok(())
+}
+
+/// Handle movimentacao import command
+async fn handle_movimentacao_import(file_path: &str, dry_run: bool) -> Result<()> {
+    use colored::Colorize;
+    use tabled::{Table, Tabled, settings::Style};
+    use tracing::warn;
+
+    info!("Importing movimentacao from: {}", file_path);
+
+    // Parse the movimentacao file
+    let entries = importers::movimentacao_excel::parse_movimentacao_excel(file_path)?;
+
+    println!("\n{} Found {} movimentacao entries\n", "✓".green().bold(), entries.len());
+
+    // Categorize entries
+    let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
+    let corporate_actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+    let income_events: Vec<_> = entries.iter().filter(|e| e.is_income_event()).collect();
+    let other: Vec<_> = entries.iter()
+        .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
+        .collect();
+
+    println!("{} Summary:", "📊".cyan().bold());
+    println!("  {} Trades (buy/sell/term)", trades.len().to_string().green());
+    println!("  {} Corporate actions (splits, bonuses, mergers)", corporate_actions.len().to_string().yellow());
+    println!("  {} Income events (dividends, yields, amortization)", income_events.len().to_string().cyan());
+    println!("  {} Other movements", other.len().to_string().dimmed());
+    println!();
+
+    // Show preview of trades
+    if !trades.is_empty() {
+        println!("{} Sample trades:", "💰".cyan().bold());
+
+        #[derive(Tabled)]
+        struct TradePreview {
+            #[tabled(rename = "Date")]
+            date: String,
+            #[tabled(rename = "Type")]
+            movement_type: String,
+            #[tabled(rename = "Ticker")]
+            ticker: String,
+            #[tabled(rename = "Qty")]
+            quantity: String,
+            #[tabled(rename = "Price")]
+            price: String,
+        }
+
+        let preview: Vec<TradePreview> = trades
+            .iter()
+            .take(5)
+            .map(|e| TradePreview {
+                date: e.date.format("%d/%m/%Y").to_string(),
+                movement_type: e.movement_type.clone(),
+                ticker: e.ticker.clone().unwrap_or_else(|| "?".to_string()),
+                quantity: e.quantity.map(|q| q.to_string()).unwrap_or_else(|| "-".to_string()),
+                price: e.unit_price.map(|p| format!("R$ {:.2}", p)).unwrap_or_else(|| "-".to_string()),
+            })
+            .collect();
+
+        let table = Table::new(preview).with(Style::rounded()).to_string();
+        println!("{}\n", table);
+    }
+
+    // Show preview of corporate actions
+    if !corporate_actions.is_empty() {
+        println!("{} Corporate actions:", "🏢".cyan().bold());
+
+        for action in corporate_actions.iter().take(5) {
+            println!("  {} {} - {}",
+                action.date.format("%d/%m/%Y").to_string().dimmed(),
+                action.movement_type.yellow(),
+                action.ticker.as_ref().unwrap_or(&action.product)
+            );
+        }
+        println!();
+    }
+
+    // Show preview of income events
+    if !income_events.is_empty() {
+        println!("{} Income events:", "💵".cyan().bold());
+
+        for event in income_events.iter().take(5) {
+            let value = event.operation_value
+                .map(|v| format!("R$ {:.2}", v))
+                .unwrap_or_else(|| "-".to_string());
+
+            println!("  {} {} - {} {}",
+                event.date.format("%d/%m/%Y").to_string().dimmed(),
+                event.movement_type.cyan(),
+                event.ticker.as_ref().unwrap_or(&event.product),
+                value.green()
+            );
+        }
+        println!();
+    }
+
+    if dry_run {
+        println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
+        println!("\n{} What would be imported:", "📝".cyan().bold());
+        println!("  • {} trade transactions", trades.len());
+        println!("  • {} corporate actions", corporate_actions.len());
+        println!("  • {} income events (not yet implemented)", income_events.len());
+        return Ok(());
+    }
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Import trades
+    let mut imported_trades = 0;
+    let mut skipped_trades = 0;
+    let mut errors = 0;
+
+    println!("{} Importing trades...", "⏳".cyan().bold());
+
+    for entry in trades {
+        if entry.ticker.is_none() {
+            warn!("Skipping trade with no ticker: {:?}", entry.product);
+            skipped_trades += 1;
+            continue;
+        }
+
+        let ticker = entry.ticker.as_ref().unwrap();
+        let asset_type = db::AssetType::detect_from_ticker(ticker)
+            .unwrap_or(db::AssetType::Stock);
+
+        // Upsert asset
+        let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error upserting asset {}: {}", ticker, e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Convert to transaction
+        let transaction = match entry.to_transaction(asset_id) {
+            Ok(tx) => tx,
+            Err(e) => {
+                warn!("Failed to convert entry to transaction: {}", e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Check for duplicates
+        if db::transaction_exists(
+            &conn,
+            asset_id,
+            &transaction.trade_date,
+            &transaction.transaction_type,
+            &transaction.quantity,
+        )? {
+            skipped_trades += 1;
+            continue;
+        }
+
+        // Insert transaction
+        match db::insert_transaction(&conn, &transaction) {
+            Ok(_) => imported_trades += 1,
+            Err(e) => {
+                eprintln!("Error inserting transaction: {}", e);
+                errors += 1;
+            }
+        }
+    }
+
+    // Import corporate actions
+    let mut imported_actions = 0;
+    let mut skipped_actions = 0;
+
+    println!("{} Importing corporate actions...", "⏳".cyan().bold());
+
+    for entry in corporate_actions {
+        if entry.ticker.is_none() {
+            warn!("Skipping corporate action with no ticker: {:?}", entry.product);
+            skipped_actions += 1;
+            continue;
+        }
+
+        let ticker = entry.ticker.as_ref().unwrap();
+        let asset_type = db::AssetType::detect_from_ticker(ticker)
+            .unwrap_or(db::AssetType::Stock);
+
+        // Upsert asset
+        let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error upserting asset {}: {}", ticker, e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Convert to corporate action
+        let action = match entry.to_corporate_action(asset_id) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("Failed to convert entry to corporate action: {}", e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Insert corporate action (no duplicate check for now - user can manage manually)
+        match db::insert_corporate_action(&conn, &action) {
+            Ok(_) => {
+                imported_actions += 1;
+                println!("  {} Added {} for {} on {}",
+                    "✓".green(),
+                    action.action_type.as_str().yellow(),
+                    ticker.cyan(),
+                    action.event_date
+                );
+            }
+            Err(e) => {
+                eprintln!("Error inserting corporate action: {}", e);
+                errors += 1;
+            }
+        }
+    }
+
+    println!("\n{} Import complete!", "✓".green().bold());
+    println!("  {} Trades:", "💰".cyan());
+    println!("    Imported: {}", imported_trades.to_string().green());
+    if skipped_trades > 0 {
+        println!("    Skipped: {}", skipped_trades.to_string().yellow());
+    }
+    println!("  {} Corporate actions:", "🏢".cyan());
+    println!("    Imported: {}", imported_actions.to_string().green());
+    if skipped_actions > 0 {
+        println!("    Skipped: {}", skipped_actions.to_string().yellow());
+    }
+    if errors > 0 {
+        println!("  {} Errors: {}", "❌".red(), errors.to_string().red());
+    }
+    println!("\n{} Income events not yet implemented - coming soon!", "ℹ".blue().bold());
 
     Ok(())
 }
@@ -1526,4 +1776,114 @@ fn parse_factor(factor: &str) -> (i32, i32) {
     } else {
         (1, 1)
     }
+}
+
+/// Handle inspect command - show Excel file structure
+async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> Result<()> {
+    use anyhow::Context;
+    use colored::Colorize;
+    use calamine::{open_workbook, Reader, Xlsx, Data};
+    use std::collections::HashMap;
+
+    println!("{} Inspecting file: {}\n", "📊".cyan().bold(), file_path.green());
+
+    let mut workbook: Xlsx<_> = open_workbook(file_path)
+        .context("Failed to open Excel file")?;
+
+    let sheet_names = workbook.sheet_names().to_vec();
+    println!("{} Found {} sheet(s):", "📄".cyan().bold(), sheet_names.len());
+    for name in &sheet_names {
+        println!("  • {}", name.yellow());
+    }
+    println!();
+
+    // Inspect each sheet
+    for sheet_name in sheet_names {
+        println!("{}", "=".repeat(80).dimmed());
+        println!("{} Sheet: {}", "📋".cyan().bold(), sheet_name.yellow().bold());
+        println!("{}", "=".repeat(80).dimmed());
+
+        match workbook.worksheet_range(&sheet_name) {
+            Ok(range) => {
+                let rows: Vec<&[Data]> = range.rows().collect();
+
+                if rows.is_empty() {
+                    println!("  {}", "Empty sheet".dimmed());
+                    continue;
+                }
+
+                println!("  {} rows, {} columns\n", rows.len(),
+                    rows.first().map(|r: &&[Data]| r.len()).unwrap_or(0));
+
+                // Show first row (usually headers)
+                if let Some(header) = rows.first() {
+                    println!("{} Header row:", "📌".cyan().bold());
+                    for (i, cell) in header.iter().enumerate() {
+                        let cell_str: String = cell.to_string();
+                        if !cell_str.trim().is_empty() {
+                            println!("  [{}] {}", i, cell_str.green());
+                        }
+                    }
+                    println!();
+                }
+
+                // Show a few data rows if requested
+                if full {
+                    let data_rows = rows.iter().skip(1).take(10);
+                    println!("{} Sample data rows:", "📝".cyan().bold());
+
+                    for (row_idx, row) in data_rows.enumerate() {
+                        println!("  Row {}:", row_idx + 2);
+                        for (col_idx, cell) in row.iter().enumerate() {
+                            let cell_str: String = cell.to_string();
+                            if !cell_str.trim().is_empty() {
+                                println!("    [{}] {}", col_idx, cell_str);
+                            }
+                        }
+                        println!();
+                    }
+                } else {
+                    // Just show how many data rows
+                    if rows.len() > 1 {
+                        println!("  {} data rows (use --full to see sample data)\n",
+                            (rows.len() - 1).to_string().yellow());
+                    }
+                }
+
+                // Analyze column unique values if requested
+                if let Some(col_idx) = column {
+                    println!("{} Analyzing column [{}]:", "🔍".cyan().bold(), col_idx);
+
+                    let mut value_counts: HashMap<String, usize> = HashMap::new();
+
+                    for row in rows.iter().skip(1) {  // Skip header
+                        if let Some(cell) = row.get(col_idx) {
+                            let cell_str: String = cell.to_string();
+                            if !cell_str.trim().is_empty() && cell_str != "-" {
+                                *value_counts.entry(cell_str).or_insert(0) += 1;
+                            }
+                        }
+                    }
+
+                    // Sort by count descending
+                    let mut sorted_values: Vec<_> = value_counts.into_iter().collect();
+                    sorted_values.sort_by(|a, b| b.1.cmp(&a.1));
+
+                    println!("  Found {} unique values:\n", sorted_values.len().to_string().yellow());
+
+                    for (value, count) in sorted_values {
+                        println!("    {} → {} occurrences", value.green(), count.to_string().dimmed());
+                    }
+                    println!();
+                }
+            }
+            Err(e) => {
+                println!("  {} Failed to read sheet: {}", "❌".red(), e);
+            }
+        }
+
+        println!();
+    }
+
+    Ok(())
 }

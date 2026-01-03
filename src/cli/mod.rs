@@ -19,6 +19,10 @@ pub enum Commands {
         /// Preview only, don't save to database
         #[arg(short, long)]
         dry_run: bool,
+
+        /// Import from Movimentação file (includes corporate actions, dividends, etc.)
+        #[arg(short, long)]
+        movimentacao: bool,
     },
 
     /// Portfolio management and viewing
@@ -49,6 +53,20 @@ pub enum Commands {
     Transactions {
         #[command(subcommand)]
         action: TransactionCommands,
+    },
+
+    /// Inspect Excel/CSV file structure
+    Inspect {
+        /// Path to the Excel or CSV file
+        file: String,
+
+        /// Show full data rows, not just headers
+        #[arg(short, long)]
+        full: bool,
+
+        /// Analyze and show unique values in a column (e.g., --column 2 for movement types)
+        #[arg(short, long)]
+        column: Option<usize>,
     },
 }
 
