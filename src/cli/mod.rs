@@ -49,6 +49,9 @@ pub enum Commands {
         action: ActionCommands,
     },
 
+    /// Process term contract liquidations
+    ProcessTerms,
+
     /// Manual transaction management
     Transactions {
         #[command(subcommand)]
