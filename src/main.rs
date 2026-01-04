@@ -618,6 +618,122 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             Ok(())
         }
 
+        importers::ImportResult::OfertasPublicas(entries) => {
+            info!("Detected Ofertas Públicas format");
+            println!("\n{} Found {} ofertas públicas entries\n", "✓".green().bold(), entries.len());
+
+            #[derive(Tabled)]
+            struct OfertaPreview {
+                #[tabled(rename = "Date")]
+                date: String,
+                #[tabled(rename = "Ticker")]
+                ticker: String,
+                #[tabled(rename = "Qty")]
+                quantity: String,
+                #[tabled(rename = "Price")]
+                price: String,
+                #[tabled(rename = "Offer")]
+                offer: String,
+            }
+
+            let preview: Vec<OfertaPreview> = entries
+                .iter()
+                .take(5)
+                .map(|e| OfertaPreview {
+                    date: e.date.format("%d/%m/%Y").to_string(),
+                    ticker: e.ticker.clone(),
+                    quantity: e.quantity.to_string(),
+                    price: format!("R$ {:.2}", e.unit_price),
+                    offer: e.offer.clone(),
+                })
+                .collect();
+
+            let table = Table::new(preview).with(Style::rounded()).to_string();
+            println!("{}\n", table);
+
+            if dry_run {
+                println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
+                println!("\n{} What would be imported:", "📝".cyan().bold());
+                println!("  • {} offer allocation transactions", entries.len());
+                return Ok(());
+            }
+
+            db::init_database(None)?;
+            let conn = db::open_db(None)?;
+
+            let mut imported = 0;
+            let mut skipped_old = 0;
+            let mut errors = 0;
+            let mut max_date: Option<chrono::NaiveDate> = None;
+
+            let last_import_date =
+                db::get_last_import_date(&conn, "OFERTAS_PUBLICAS", "allocations")?;
+
+            println!("{} Importing offer allocations...", "⏳".cyan().bold());
+
+            for entry in entries {
+                let asset_type = db::AssetType::detect_from_ticker(&entry.ticker)
+                    .unwrap_or(db::AssetType::Stock);
+
+                let asset_id = match db::upsert_asset(&conn, &entry.ticker, &asset_type, None) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("Error upserting asset {}: {}", entry.ticker, e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                if let Some(last_date) = last_import_date {
+                    if entry.date <= last_date {
+                        skipped_old += 1;
+                        continue;
+                    }
+                }
+
+                let transaction = match entry.to_transaction(asset_id) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        eprintln!("Error converting offer to transaction: {}", e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                match db::insert_transaction(&conn, &transaction) {
+                    Ok(_) => {
+                        imported += 1;
+                        max_date = Some(match max_date {
+                            Some(current) if current >= transaction.trade_date => current,
+                            _ => transaction.trade_date,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Error inserting offer transaction: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            if let Some(last_date) = max_date {
+                db::set_last_import_date(&conn, "OFERTAS_PUBLICAS", "allocations", last_date)?;
+            }
+
+            println!("\n{} Import complete!", "✓".green().bold());
+            println!("  Imported: {}", imported.to_string().green());
+            if skipped_old > 0 {
+                println!(
+                    "  Skipped (before last import date): {}",
+                    skipped_old.to_string().yellow()
+                );
+            }
+            if errors > 0 {
+                println!("  Errors: {}", errors.to_string().red());
+            }
+
+            Ok(())
+        }
+
         importers::ImportResult::IrpfPositions(_) => {
             // This should never happen - IRPF imports use handle_irpf_import directly
             unreachable!("IrpfPositions should not be returned by import_file_auto")

@@ -18,6 +18,7 @@ use interest::db::{
     insert_corporate_action, open_db, set_last_import_date, upsert_asset,
 };
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
+use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
 use interest::tax::cost_basis::FifoMatcher;
 use interest::term_contracts::process_term_liquidations;
 use rust_decimal::Decimal;
@@ -216,6 +217,17 @@ fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<
         skipped_actions_old,
         auto_applied_actions,
     })
+}
+
+#[test]
+fn test_13_ofertas_publicas_import_normalizes_ticker() -> Result<()> {
+    let entries = parse_ofertas_publicas_excel("tests/data/13_ofertas_publicas.xlsx")?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry.ticker, "AMBP3");
+    assert_eq!(entry.raw_ticker, "AMBP3L");
+    assert_eq!(entry.quantity, Decimal::from(1064));
+    Ok(())
 }
 
 /// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)

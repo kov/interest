@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use calamine::{open_workbook, Reader, Xlsx};
+use calamine::{open_workbook, Reader, Xlsx, DataType};
 use std::path::Path;
 use tracing::info;
 
@@ -8,6 +8,7 @@ use tracing::info;
 pub enum FileType {
     Cei,
     Movimentacao,
+    OfertasPublicas,
 }
 
 /// Detect the type of import file based on its contents
@@ -40,8 +41,34 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> Result<FileType> {
 
         info!("Examining Excel sheets: {:?}", sheet_names);
 
-        // Check for Movimentacao sheet (most specific - exact match)
+        // Check for Movimentacao sheet (may also be Ofertas Públicas)
         if sheet_names.iter().any(|name| name == "Movimentação") {
+            let mut workbook: Xlsx<_> = open_workbook(path)
+                .context("Failed to open Excel file for header detection")?;
+            if let Ok(range) = workbook.worksheet_range("Movimentação") {
+                if let Some(header_row) = range.rows().next() {
+                    let headers: Vec<String> = header_row
+                        .iter()
+                        .filter_map(|cell| cell.get_string())
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                    let has_ofertas_header = headers.iter().any(|h| {
+                        matches!(
+                            h.as_str(),
+                            "Oferta"
+                                | "Modalidade de Reserva"
+                                | "Preço Máximo"
+                                | "Data de liquidação"
+                                | "Quantidade Reservada"
+                        )
+                    });
+                    if has_ofertas_header {
+                        info!("Detected Ofertas Públicas format (Movimentação sheet with ofertas headers)");
+                        return Ok(FileType::OfertasPublicas);
+                    }
+                }
+            }
+
             info!("Detected Movimentacao format (found 'Movimentação' sheet)");
             return Ok(FileType::Movimentacao);
         }
@@ -64,7 +91,8 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> Result<FileType> {
              Found sheets: {:?}\n\
              Expected either:\n  \
              - CEI format with sheets matching: negociação, ativos, trading\n  \
-             - Movimentacao format with sheet: Movimentação",
+             - Movimentacao format with sheet: Movimentação\n  \
+             - Ofertas Públicas format with sheet: Movimentação + oferta headers",
             sheet_names
         ));
     }

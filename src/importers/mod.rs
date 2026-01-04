@@ -3,6 +3,7 @@
 pub mod cei_excel;
 pub mod cei_csv;
 pub mod movimentacao_excel;
+pub mod ofertas_publicas_excel;
 pub mod irpf_pdf;
 mod file_detector;
 
@@ -12,6 +13,7 @@ use tracing::info;
 
 pub use cei_excel::RawTransaction;
 pub use movimentacao_excel::MovimentacaoEntry;
+pub use ofertas_publicas_excel::OfertaPublicaEntry;
 pub use irpf_pdf::IrpfPosition;
 pub use file_detector::FileType;
 
@@ -20,6 +22,7 @@ pub use file_detector::FileType;
 pub enum ImportResult {
     Cei(Vec<RawTransaction>),
     Movimentacao(Vec<MovimentacaoEntry>),
+    OfertasPublicas(Vec<OfertaPublicaEntry>),
     IrpfPositions(Vec<IrpfPosition>),
 }
 
@@ -42,6 +45,10 @@ pub fn import_file_auto<P: AsRef<Path>>(path: P) -> Result<ImportResult> {
         FileType::Movimentacao => {
             let entries = movimentacao_excel::parse_movimentacao_excel(path_ref)?;
             Ok(ImportResult::Movimentacao(entries))
+        }
+        FileType::OfertasPublicas => {
+            let entries = ofertas_publicas_excel::parse_ofertas_publicas_excel(path_ref)?;
+            Ok(ImportResult::OfertasPublicas(entries))
         }
     }
 }

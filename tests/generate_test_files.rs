@@ -37,6 +37,58 @@ fn create_workbook_with_header() -> Workbook {
 
 #[test]
 #[ignore]
+fn generate_13_ofertas_publicas() {
+    /*
+    Test ofertas públicas import with L-suffix normalization.
+
+    Scenario:
+    - AMBP3L allocation 1064 @ 13.25 on 06/11/2023
+    - Expect normalized ticker AMBP3 in import
+    */
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("Movimentação").unwrap();
+
+    let headers = vec![
+        "Data de liquidação",
+        "Empresa",
+        "Tipo",
+        "Oferta",
+        "Instituição",
+        "Quantidade",
+        "Preço",
+        "Valor",
+        "Código de Negociação",
+        "Preço Máximo",
+        "Modalidade de Reserva",
+        "Quantidade Reservada",
+        "Valor Reservado",
+    ];
+
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_string(0, col as u16, *header).unwrap();
+    }
+
+    worksheet.write_string(1, 0, "06/11/2023").unwrap();
+    worksheet.write_string(1, 1, "AMBIPAR PARTICIPACOES E EMPREENDIMENTOS S/A").unwrap();
+    worksheet.write_string(1, 2, "OUTRO").unwrap();
+    worksheet.write_string(1, 3, "Ambipar S.A. (P)").unwrap();
+    worksheet.write_string(1, 4, "XP INVESTIMENTOS CCTVM S/A").unwrap();
+    worksheet.write_number(1, 5, 1064.0).unwrap();
+    worksheet.write_number(1, 6, 13.25).unwrap();
+    worksheet.write_number(1, 7, 14098.0).unwrap();
+    worksheet.write_string(1, 8, "AMBP3L").unwrap();
+    worksheet.write_number(1, 9, 15.0).unwrap();
+    worksheet.write_string(1, 10, "Acionista compra até o LSP").unwrap();
+    worksheet.write_number(1, 11, 1064.0).unwrap();
+    worksheet.write_number(1, 12, 0.0).unwrap();
+
+    workbook.save("tests/data/13_ofertas_publicas.xlsx").unwrap();
+    println!("✓ Created: 13_ofertas_publicas.xlsx");
+}
+
+#[test]
+#[ignore]
 fn generate_12_desdobro_inference() {
     /*
     Test Desdobro ratio inference from credited quantity.
