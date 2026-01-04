@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 use crate::db::{Transaction, TransactionType};
+use crate::db::models::AssetType;
 
 /// Cost basis result for a sale
 #[derive(Debug, Clone)]
@@ -18,6 +19,7 @@ pub struct SaleCostBasis {
     pub profit_loss: Decimal,
     #[allow(dead_code)]
     pub matched_lots: Vec<MatchedLot>,
+    pub asset_type: AssetType,
 }
 
 /// A matched lot from average cost calculation
@@ -99,6 +101,7 @@ impl AverageCostMatcher {
                 quantity: tx.quantity,
                 cost: cost_basis,
             }],
+            asset_type: AssetType::Stock,
         })
     }
 

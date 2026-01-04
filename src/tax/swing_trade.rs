@@ -26,6 +26,8 @@ impl TaxCategory {
         match (asset_type, is_day_trade) {
             (AssetType::Stock, false) => TaxCategory::StockSwingTrade,
             (AssetType::Stock, true) => TaxCategory::StockDayTrade,
+            (AssetType::Etf, false) => TaxCategory::StockSwingTrade,
+            (AssetType::Etf, true) => TaxCategory::StockDayTrade,
             (AssetType::Fii, false) => TaxCategory::FiiSwingTrade,
             (AssetType::Fii, true) => TaxCategory::FiiDayTrade,
             (AssetType::Fiagro, false) => TaxCategory::FiagroSwingTrade,
@@ -230,11 +232,12 @@ pub fn calculate_monthly_tax(
                             tx.is_day_trade
                         );
 
-                        let sale = if tx.is_day_trade {
+                        let mut sale = if tx.is_day_trade {
                             day_trade_matcher.match_sale(&tx)?
                         } else {
                             swing_matcher.match_sale(&tx)?
                         };
+                        sale.asset_type = asset.asset_type.clone();
                         sales_by_category.entry(category)
                             .or_insert_with(Vec::new)
                             .push(sale);
@@ -301,12 +304,28 @@ pub fn calculate_monthly_tax(
 
         // Apply exemption threshold (only to positive profit)
         let exemption_threshold = category.monthly_exemption_threshold();
+        let stock_sales_total: Decimal = sales
+            .iter()
+            .filter(|sale| sale.asset_type == AssetType::Stock)
+            .map(|sale| sale.sale_total)
+            .sum();
+        let stock_profit_total: Decimal = sales
+            .iter()
+            .filter(|sale| sale.asset_type == AssetType::Stock)
+            .map(|sale| sale.profit_loss)
+            .sum();
+
         let (exemption_applied, taxable_amount) = if profit_after_loss_offset <= Decimal::ZERO {
             // Loss or break-even - no tax
             (Decimal::ZERO, Decimal::ZERO)
-        } else if exemption_threshold > Decimal::ZERO && total_sales <= exemption_threshold {
-            // Full exemption (stocks under R$20k)
-            (profit_after_loss_offset, Decimal::ZERO)
+        } else if exemption_threshold > Decimal::ZERO && stock_sales_total <= exemption_threshold {
+            // Exempt only the stock profit portion when stock sales are under R$20k.
+            let exemption = if stock_profit_total > Decimal::ZERO {
+                stock_profit_total.min(profit_after_loss_offset)
+            } else {
+                Decimal::ZERO
+            };
+            (exemption, profit_after_loss_offset - exemption)
         } else {
             // No exemption, full tax
             (Decimal::ZERO, profit_after_loss_offset)

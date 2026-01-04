@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum AssetType {
     Stock,      // Brazilian stocks (ações)
+    Etf,        // Exchange-traded funds
     Fii,        // Real estate investment funds
     Fiagro,     // Agribusiness investment funds
     FiInfra,    // Infrastructure investment funds
@@ -17,6 +18,7 @@ impl AssetType {
     pub fn as_str(&self) -> &'static str {
         match self {
             AssetType::Stock => "STOCK",
+            AssetType::Etf => "ETF",
             AssetType::Fii => "FII",
             AssetType::Fiagro => "FIAGRO",
             AssetType::FiInfra => "FI_INFRA",
@@ -28,6 +30,7 @@ impl AssetType {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "STOCK" => Some(AssetType::Stock),
+            "ETF" => Some(AssetType::Etf),
             "FII" => Some(AssetType::Fii),
             "FIAGRO" => Some(AssetType::Fiagro),
             "FI_INFRA" => Some(AssetType::FiInfra),
@@ -50,6 +53,18 @@ impl AssetType {
             "CRMG15" | "ELET23" | "LIGHD7" | "LAMEA6" | "UNEG11"
         ) {
             return Some(AssetType::Bond);
+        }
+        if matches!(
+            upper.as_str(),
+            "CDII11" | "JURO11" | "BODB11" | "BDIF11" | "IFRA11" | "XPID11" | "KDIF11"
+        ) {
+            return Some(AssetType::FiInfra);
+        }
+        if matches!(upper.as_str(), "CRAA11" | "FGAA11") {
+            return Some(AssetType::Fiagro);
+        }
+        if matches!(upper.as_str(), "DIVD11" | "NDIV11" | "UTLL11" | "TIRB11") {
+            return Some(AssetType::Etf);
         }
 
         // Extract the numeric suffix
@@ -267,6 +282,7 @@ mod tests {
     fn test_asset_type_conversions() {
         // Test to_str and from_str roundtrip
         assert_eq!(AssetType::Stock.as_str(), "STOCK");
+        assert_eq!(AssetType::Etf.as_str(), "ETF");
         assert_eq!(AssetType::Fii.as_str(), "FII");
         assert_eq!(AssetType::Fiagro.as_str(), "FIAGRO");
         assert_eq!(AssetType::FiInfra.as_str(), "FI_INFRA");
@@ -274,6 +290,7 @@ mod tests {
         assert_eq!(AssetType::GovBond.as_str(), "GOV_BOND");
 
         assert_eq!(AssetType::from_str("STOCK"), Some(AssetType::Stock));
+        assert_eq!(AssetType::from_str("ETF"), Some(AssetType::Etf));
         assert_eq!(AssetType::from_str("stock"), Some(AssetType::Stock));
         assert_eq!(AssetType::from_str("FII"), Some(AssetType::Fii));
         assert_eq!(AssetType::from_str("FIAGRO"), Some(AssetType::Fiagro));
@@ -307,6 +324,19 @@ mod tests {
         assert_eq!(AssetType::detect_from_ticker("LIGHD7"), Some(AssetType::Bond));
         assert_eq!(AssetType::detect_from_ticker("LAMEA6"), Some(AssetType::Bond));
         assert_eq!(AssetType::detect_from_ticker("UNEG11"), Some(AssetType::Bond));
+        assert_eq!(AssetType::detect_from_ticker("CDII11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("JURO11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("BODB11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("BDIF11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("IFRA11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("XPID11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("KDIF11"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::detect_from_ticker("CRAA11"), Some(AssetType::Fiagro));
+        assert_eq!(AssetType::detect_from_ticker("FGAA11"), Some(AssetType::Fiagro));
+        assert_eq!(AssetType::detect_from_ticker("DIVD11"), Some(AssetType::Etf));
+        assert_eq!(AssetType::detect_from_ticker("NDIV11"), Some(AssetType::Etf));
+        assert_eq!(AssetType::detect_from_ticker("UTLL11"), Some(AssetType::Etf));
+        assert_eq!(AssetType::detect_from_ticker("TIRB11"), Some(AssetType::Etf));
 
         // Unknown patterns
         assert_eq!(AssetType::detect_from_ticker("SHORT"), None);
