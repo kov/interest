@@ -15,6 +15,7 @@ pub use models::{
     Asset, AssetType, Transaction, TransactionType,
     CorporateAction, CorporateActionType, PriceHistory, IncomeEvent, IncomeEventType,
 };
+use crate::term_contracts;
 
 /// Get the default database path (~/.interest/data.db)
 pub fn get_default_db_path() -> Result<PathBuf> {
@@ -261,6 +262,12 @@ pub fn insert_price_history(conn: &Connection, price: &PriceHistory) -> Result<i
 /// Filter tickers unsupported in portfolio/tax (e.g., options like ITSAA101).
 pub fn is_supported_portfolio_ticker(ticker: &str) -> bool {
     ticker.len() <= 6
+        && !term_contracts::is_term_contract(ticker)
+        && !is_follow_on_option_ticker(ticker)
+}
+
+fn is_follow_on_option_ticker(ticker: &str) -> bool {
+    matches!(ticker.to_uppercase().as_str(), "JURO15" | "CDII15")
 }
 
 /// Rename/merger mappings applied in portfolio/tax calculations.
