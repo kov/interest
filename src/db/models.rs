@@ -44,6 +44,14 @@ impl AssetType {
             return None;
         }
 
+        let upper = ticker.to_uppercase();
+        if matches!(
+            upper.as_str(),
+            "CRMG15" | "ELET23" | "LIGHD7" | "LAMEA6" | "UNEG11"
+        ) {
+            return Some(AssetType::Bond);
+        }
+
         // Extract the numeric suffix
         let suffix = &ticker[ticker.len() - 2..];
 
@@ -292,6 +300,13 @@ mod tests {
         assert_eq!(AssetType::detect_from_ticker("TEST32"), Some(AssetType::Fiagro));
         assert_eq!(AssetType::detect_from_ticker("TEST33"), Some(AssetType::Fiagro));
         assert_eq!(AssetType::detect_from_ticker("TEST34"), Some(AssetType::Fiagro));
+
+        // Bond overrides
+        assert_eq!(AssetType::detect_from_ticker("CRMG15"), Some(AssetType::Bond));
+        assert_eq!(AssetType::detect_from_ticker("ELET23"), Some(AssetType::Bond));
+        assert_eq!(AssetType::detect_from_ticker("LIGHD7"), Some(AssetType::Bond));
+        assert_eq!(AssetType::detect_from_ticker("LAMEA6"), Some(AssetType::Bond));
+        assert_eq!(AssetType::detect_from_ticker("UNEG11"), Some(AssetType::Bond));
 
         // Unknown patterns
         assert_eq!(AssetType::detect_from_ticker("SHORT"), None);
