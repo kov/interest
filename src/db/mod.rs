@@ -256,6 +256,11 @@ pub fn insert_price_history(conn: &Connection, price: &PriceHistory) -> Result<i
     Ok(conn.last_insert_rowid())
 }
 
+/// Filter tickers unsupported in portfolio/tax (e.g., options like ITSAA101).
+pub fn is_supported_portfolio_ticker(ticker: &str) -> bool {
+    ticker.len() <= 6
+}
+
 /// Get latest price for an asset
 pub fn get_latest_price(conn: &Connection, asset_id: i64) -> Result<Option<PriceHistory>> {
     let mut stmt = conn.prepare(

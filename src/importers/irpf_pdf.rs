@@ -79,23 +79,27 @@ fn parse_positions_from_text(text: &str, year: i32) -> Result<Vec<IrpfPosition>>
     let mut positions = Vec::new();
 
     // Split text into sections by "CÓDIGO:" markers
-    // Each Code 31 entry is a separate section
+    // Each Code 31 (stocks/BDRs) or Code 73 (FIIs) entry is a separate section
     let sections: Vec<&str> = text.split("CÓDIGO").collect();
 
     for section in sections {
-        // Check if this section contains any Code 31 entries (stocks)
+        // Check if this section contains any Code 31/73 entries (stocks/FIIs)
         // The section format is: "DISCRIMINAÇÃO SITUAÇÃO EM\n\n31/12/...\n\n31 TICKER..."
         // A section may contain multiple "31 " lines
-        if !section.contains("\n31 ") && !section.starts_with("31 ") {
+        if !section.contains("\n31 ")
+            && !section.starts_with("31 ")
+            && !section.contains("\n73 ")
+            && !section.starts_with("73 ")
+        {
             continue;
         }
 
-        // Find all lines starting with "31 " in this section
+        // Find all lines starting with "31 " or "73 " in this section
         // Use a regex to find all occurrences
-        let line_regex = Regex::new(r"(?:^|\n)31\s+([^\n]+)")?;
+        let line_regex = Regex::new(r"(?:^|\n)(31|73)\s+([^\n]+)")?;
 
         for captures in line_regex.captures_iter(section) {
-            let line = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+            let line = captures.get(2).map(|m| m.as_str()).unwrap_or("");
 
             match parse_code_31_line(line, year) {
                 Ok(Some(position)) => {
@@ -124,8 +128,8 @@ fn parse_positions_from_text(text: &str, year: i32) -> Result<Vec<IrpfPosition>>
     Ok(positions)
 }
 
-/// Parse a single Code 31 line (stock position)
-/// Takes the content of a line starting with "31 " (without the "31 " prefix)
+/// Parse a single Code 31/73 line (stock/FII position)
+/// Takes the content of a line starting with "31 " or "73 " (without the prefix)
 fn parse_code_31_line(discrim: &str, target_year: i32) -> Result<Option<IrpfPosition>> {
     // Format: "TICKER quantity (year) quantity (year) value1 value2"
     // Example: "CYRE3 600 (2017) 131 (2016) 7,611.60 0.00"
@@ -321,6 +325,17 @@ mod tests {
 
         assert_eq!(result.ticker, "SAPR11");
         assert_eq!(result.quantity, Decimal::new(300, 0));
+    }
+
+    #[test]
+    fn test_parse_code_73_line_fii() {
+        // FII entry (Code 73 in IRPF) uses same line structure
+        let line = "BRCR11 113 (2019) 0.00 10,934.90";
+        let result = parse_code_31_line(line, 2019).unwrap().unwrap();
+
+        assert_eq!(result.ticker, "BRCR11");
+        assert_eq!(result.quantity, Decimal::new(113, 0));
+        assert_eq!(result.total_cost, Decimal::new(1093490, 2));
     }
 
     #[test]

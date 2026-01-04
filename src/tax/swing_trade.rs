@@ -162,6 +162,10 @@ pub fn calculate_monthly_tax(
 
     // Process each asset ONCE
     for asset in assets {
+        if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
+            continue;
+        }
+
         // Skip FI-Infra entirely
         if asset.asset_type == AssetType::FiInfra {
             continue;

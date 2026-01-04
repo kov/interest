@@ -103,9 +103,16 @@ pub fn calculate_portfolio(
 
     // Filter by asset type if requested
     let filtered_assets: Vec<_> = if let Some(filter) = asset_type_filter {
-        assets.into_iter().filter(|a| &a.asset_type == filter).collect()
+        assets
+            .into_iter()
+            .filter(|a| &a.asset_type == filter)
+            .filter(|a| crate::db::is_supported_portfolio_ticker(&a.ticker))
+            .collect()
     } else {
         assets
+            .into_iter()
+            .filter(|a| crate::db::is_supported_portfolio_ticker(&a.ticker))
+            .collect()
     };
 
     // Calculate positions for each asset
