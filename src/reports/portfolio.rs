@@ -1,10 +1,11 @@
 use anyhow::Result;
+use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::db::{Asset, AssetType, Transaction, TransactionType};
+use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
 
 /// Summary of a single position
 #[derive(Debug, Clone)]
@@ -101,17 +102,24 @@ pub fn calculate_portfolio(
     // Get all assets
     let assets = crate::db::get_all_assets(conn)?;
 
+    let mut assets_by_ticker = HashMap::new();
+    for asset in &assets {
+        assets_by_ticker.insert(asset.ticker.clone(), asset.clone());
+    }
+
     // Filter by asset type if requested
     let filtered_assets: Vec<_> = if let Some(filter) = asset_type_filter {
         assets
             .into_iter()
             .filter(|a| &a.asset_type == filter)
             .filter(|a| crate::db::is_supported_portfolio_ticker(&a.ticker))
+            .filter(|a| !crate::db::is_rename_source_ticker(&a.ticker))
             .collect()
     } else {
         assets
             .into_iter()
             .filter(|a| crate::db::is_supported_portfolio_ticker(&a.ticker))
+            .filter(|a| !crate::db::is_rename_source_ticker(&a.ticker))
             .collect()
     };
 
@@ -124,7 +132,22 @@ pub fn calculate_portfolio(
         let asset_id = asset.id.unwrap();
 
         // Get all transactions for this asset, ordered by date
-        let transactions = get_asset_transactions(conn, asset_id)?;
+        let mut transactions = get_asset_transactions(conn, asset_id)?;
+
+        for (source_ticker, effective_date) in crate::db::rename_sources_for(&asset.ticker) {
+            if let Some(source_asset) = assets_by_ticker.get(source_ticker) {
+                if let Some(carryover) = build_rename_carryover_transaction(
+                    conn,
+                    source_asset,
+                    asset_id,
+                    effective_date,
+                )? {
+                    transactions.push(carryover);
+                }
+            }
+        }
+
+        transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
 
         // Calculate average-cost position
         let mut position = AvgCostPosition::new(asset_id);
@@ -237,6 +260,156 @@ fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transa
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(transactions)
+}
+
+/// Get all transactions for an asset before a cutoff date (exclusive).
+fn get_asset_transactions_before(
+    conn: &Connection,
+    asset_id: i64,
+    before_date: NaiveDate,
+) -> Result<Vec<Transaction>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
+                quantity, price_per_unit, total_cost, fees, is_day_trade,
+                quota_issuance_date, notes, source, created_at
+         FROM transactions
+         WHERE asset_id = ?1 AND trade_date < ?2
+         ORDER BY trade_date ASC, id ASC"
+    )?;
+
+    let transactions = stmt
+        .query_map(rusqlite::params![asset_id, before_date], |row| {
+            Ok(Transaction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                    .unwrap_or(TransactionType::Buy),
+                trade_date: row.get(3)?,
+                settlement_date: row.get(4)?,
+                quantity: get_decimal_value(row, 5)?,
+                price_per_unit: get_decimal_value(row, 6)?,
+                total_cost: get_decimal_value(row, 7)?,
+                fees: get_decimal_value(row, 8)?,
+                is_day_trade: row.get(9)?,
+                quota_issuance_date: row.get(10)?,
+                notes: row.get(11)?,
+                source: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(transactions)
+}
+
+fn build_rename_carryover_transaction(
+    conn: &Connection,
+    source_asset: &Asset,
+    target_asset_id: i64,
+    effective_date: NaiveDate,
+) -> Result<Option<Transaction>> {
+    let source_id = match source_asset.id {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let transactions = get_asset_transactions_before(conn, source_id, effective_date)?;
+    let mut position = AvgCostPosition::new(source_id);
+
+    for tx in transactions {
+        if tx.is_day_trade {
+            continue;
+        }
+
+        match tx.transaction_type {
+            TransactionType::Buy => {
+                position.add_buy(tx.quantity, tx.total_cost);
+            }
+            TransactionType::Sell => {
+                position.remove_sell(tx.quantity, &source_asset.ticker)?;
+            }
+        }
+    }
+
+    if position.quantity <= Decimal::ZERO {
+        return Ok(None);
+    }
+
+    let mut quantity = position.quantity;
+    let mut total_cost = position.total_cost;
+    apply_actions_to_carryover(conn, target_asset_id, effective_date, &mut quantity, &mut total_cost)?;
+    if quantity <= Decimal::ZERO {
+        return Ok(None);
+    }
+
+    let price_per_unit = if quantity > Decimal::ZERO {
+        total_cost / quantity
+    } else {
+        Decimal::ZERO
+    };
+
+    Ok(Some(Transaction {
+        id: None,
+        asset_id: target_asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: effective_date,
+        settlement_date: Some(effective_date),
+        quantity,
+        price_per_unit,
+        total_cost,
+        fees: Decimal::ZERO,
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: Some(format!("Rename from {}", source_asset.ticker)),
+        source: "RENAME".to_string(),
+        created_at: chrono::Utc::now(),
+    }))
+}
+
+fn apply_actions_to_carryover(
+    conn: &Connection,
+    asset_id: i64,
+    effective_date: NaiveDate,
+    quantity: &mut Decimal,
+    total_cost: &mut Decimal,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT action_type, ratio_from, ratio_to, ex_date
+         FROM corporate_actions
+         WHERE asset_id = ?1 AND applied = 1 AND ex_date >= ?2
+         ORDER BY ex_date ASC",
+    )?;
+
+    let actions = stmt
+        .query_map(rusqlite::params![asset_id, effective_date], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, NaiveDate>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
+        let action_type = CorporateActionType::from_str(&action_type_str)
+            .unwrap_or(CorporateActionType::Split);
+        let ratio_from = Decimal::from(ratio_from);
+        let ratio_to = Decimal::from(ratio_to);
+
+        match action_type {
+            CorporateActionType::CapitalReturn => {
+                let amount_per_share = ratio_from / Decimal::from(100);
+                let reduction = amount_per_share * *quantity;
+                *total_cost = (*total_cost - reduction).max(Decimal::ZERO);
+            }
+            _ => {
+                *quantity = *quantity * ratio_to / ratio_from;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)

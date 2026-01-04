@@ -12,6 +12,7 @@ mod term_contracts;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands, ActionCommands, TransactionCommands};
+use rust_decimal::Decimal;
 use tracing::{info, warn};
 
 #[tokio::main]
@@ -1692,7 +1693,13 @@ fn infer_split_ratio_from_credit(
         _ => return Ok(None),
     };
 
-    let old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
+    let mut old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
+    if let Some(ticker) = entry.ticker.as_deref() {
+        let carryover = rename_carryover_quantity(conn, ticker, entry.date, asset_id)?;
+        if carryover > Decimal::ZERO {
+            old_qty += carryover;
+        }
+    }
     if old_qty <= Decimal::ZERO {
         warn!(
             "Cannot infer split ratio for {} on {}: position before date is {}",
@@ -1703,40 +1710,89 @@ fn infer_split_ratio_from_credit(
         return Ok(None);
     }
 
-    // Movimentacao "Credito" entries represent additional shares credited.
-    let new_qty = old_qty + credit_qty;
-    if new_qty <= old_qty {
-        warn!(
-            "Cannot infer split ratio for {} on {}: credited qty {} does not increase position {}",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            credit_qty,
-            old_qty
-        );
-        return Ok(None);
+    // Movimentacao "Credito" entries can represent either:
+    // 1) additional shares credited (increment), or
+    // 2) the new total position after the split.
+    let ratio_from_increment = (old_qty + credit_qty) / old_qty;
+    let ratio_from_total = credit_qty / old_qty;
+
+    let ratio_increment_i32 = ratio_from_increment.to_i32().and_then(|r| {
+        if r > 1 && Decimal::from(r) == ratio_from_increment {
+            Some(r)
+        } else {
+            None
+        }
+    });
+    let ratio_total_i32 = ratio_from_total.to_i32().and_then(|r| {
+        if r > 1 && Decimal::from(r) == ratio_from_total {
+            Some(r)
+        } else {
+            None
+        }
+    });
+
+    let selected_ratio = match (ratio_increment_i32, ratio_total_i32) {
+        (Some(r_inc), Some(r_total)) => {
+            let implied_credit_inc = old_qty * Decimal::from(r_inc - 1);
+            let implied_total = old_qty * Decimal::from(r_total);
+            let diff_inc = (credit_qty - implied_credit_inc).abs();
+            let diff_total = (credit_qty - implied_total).abs();
+            if diff_total < diff_inc {
+                r_total
+            } else {
+                r_inc
+            }
+        }
+        (Some(r_inc), None) => r_inc,
+        (None, Some(r_total)) => r_total,
+        (None, None) => {
+            warn!(
+                "Cannot infer split ratio for {} on {}: computed ratios {} and {}",
+                entry.ticker.as_deref().unwrap_or("?"),
+                entry.date,
+                ratio_from_increment,
+                ratio_from_total
+            );
+            return Ok(None);
+        }
+    };
+
+    Ok(Some((1, selected_ratio)))
+}
+
+fn rename_carryover_quantity(
+    conn: &rusqlite::Connection,
+    target_ticker: &str,
+    before_date: chrono::NaiveDate,
+    _asset_id: i64,
+) -> Result<Decimal> {
+    use rust_decimal::Decimal;
+    use rusqlite::OptionalExtension;
+
+    let mut total = Decimal::ZERO;
+
+    for (source_ticker, effective_date) in db::rename_sources_for(target_ticker) {
+        if effective_date >= before_date {
+            continue;
+        }
+
+        let source_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM assets WHERE ticker = ?1",
+                [source_ticker],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(id) = source_id {
+            let source_qty = db::get_asset_position_before_date(conn, id, effective_date)?;
+            if source_qty > Decimal::ZERO {
+                total += source_qty;
+            }
+        }
     }
 
-    let ratio = new_qty / old_qty;
-    let ratio_i32 = ratio.to_i32().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Split ratio {} is not an integer for {} on {}",
-            ratio,
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date
-        )
-    })?;
-
-    if Decimal::from(ratio_i32) != ratio || ratio_i32 <= 1 {
-        warn!(
-            "Cannot infer split ratio for {} on {}: computed ratio {}",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            ratio
-        );
-        return Ok(None);
-    }
-
-    Ok(Some((1, ratio_i32)))
+    Ok(total)
 }
 
 fn infer_bonus_ratio_from_credit(

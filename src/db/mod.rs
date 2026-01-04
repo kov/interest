@@ -3,6 +3,8 @@
 pub mod models;
 
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
+use std::sync::OnceLock;
 use rusqlite::{Connection, params, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
@@ -259,6 +261,43 @@ pub fn insert_price_history(conn: &Connection, price: &PriceHistory) -> Result<i
 /// Filter tickers unsupported in portfolio/tax (e.g., options like ITSAA101).
 pub fn is_supported_portfolio_ticker(ticker: &str) -> bool {
     ticker.len() <= 6
+}
+
+/// Rename/merger mappings applied in portfolio/tax calculations.
+pub struct RenameMapping {
+    pub from: &'static str,
+    pub to: &'static str,
+    pub effective_date: NaiveDate,
+}
+
+pub fn rename_mappings() -> &'static [RenameMapping] {
+    static MAPPINGS: OnceLock<Vec<RenameMapping>> = OnceLock::new();
+    MAPPINGS.get_or_init(|| {
+        vec![
+            RenameMapping {
+                from: "JSLG3",
+                to: "SIMH3",
+                effective_date: NaiveDate::from_ymd_opt(2020, 9, 21).unwrap(),
+            },
+            RenameMapping {
+                from: "BAHI3",
+                to: "BIED3",
+                effective_date: NaiveDate::from_ymd_opt(2024, 11, 26).unwrap(),
+            },
+        ]
+    })
+}
+
+pub fn is_rename_source_ticker(ticker: &str) -> bool {
+    rename_mappings().iter().any(|m| m.from.eq_ignore_ascii_case(ticker))
+}
+
+pub fn rename_sources_for(ticker: &str) -> Vec<(&'static str, NaiveDate)> {
+    rename_mappings()
+        .iter()
+        .filter(|m| m.to.eq_ignore_ascii_case(ticker))
+        .map(|m| (m.from, m.effective_date))
+        .collect()
 }
 
 /// Get latest price for an asset

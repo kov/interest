@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::db::{Asset, AssetType, Transaction, TransactionType};
+use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
 use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
 use super::loss_carryforward;
 
@@ -160,8 +160,20 @@ pub fn calculate_monthly_tax(
         NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap().pred_opt().unwrap()
     };
 
+    let mut assets_by_ticker = HashMap::new();
+    for asset in &assets {
+        assets_by_ticker.insert(asset.ticker.clone(), asset.clone());
+    }
+
     // Process each asset ONCE
     for asset in assets {
+        if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
+            continue;
+        }
+
+        if crate::db::is_rename_source_ticker(&asset.ticker) {
+            continue;
+        }
         if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
             continue;
         }
@@ -174,7 +186,26 @@ pub fn calculate_monthly_tax(
         let asset_id = asset.id.unwrap();
 
         // Get all transactions for this asset up to end of month
-        let transactions = get_transactions_up_to_month(conn, asset_id, year, month)?;
+        let mut transactions = get_transactions_up_to_month(conn, asset_id, year, month)?;
+
+        for (source_ticker, effective_date) in crate::db::rename_sources_for(&asset.ticker) {
+            if effective_date > month_end {
+                continue;
+            }
+
+            if let Some(source_asset) = assets_by_ticker.get(source_ticker) {
+                if let Some(carryover) = build_rename_carryover_transaction(
+                    conn,
+                    source_asset,
+                    asset_id,
+                    effective_date,
+                )? {
+                    transactions.push(carryover);
+                }
+            }
+        }
+
+        transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
 
         // Calculate cost basis for sales in this month using average cost
         // Separate matchers for swing and day trade flows
@@ -305,6 +336,153 @@ pub fn calculate_monthly_tax(
     }
 
     Ok(results)
+}
+
+fn get_transactions_before(
+    conn: &Connection,
+    asset_id: i64,
+    before_date: NaiveDate,
+) -> Result<Vec<Transaction>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
+                quantity, price_per_unit, total_cost, fees, is_day_trade,
+                quota_issuance_date, notes, source, created_at
+         FROM transactions
+         WHERE asset_id = ?1 AND trade_date < ?2
+         ORDER BY trade_date ASC, id ASC"
+    )?;
+
+    let transactions = stmt
+        .query_map(rusqlite::params![asset_id, before_date], |row| {
+            Ok(Transaction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                    .unwrap_or(TransactionType::Buy),
+                trade_date: row.get(3)?,
+                settlement_date: row.get(4)?,
+                quantity: get_decimal_value(row, 5)?,
+                price_per_unit: get_decimal_value(row, 6)?,
+                total_cost: get_decimal_value(row, 7)?,
+                fees: get_decimal_value(row, 8)?,
+                is_day_trade: row.get(9)?,
+                quota_issuance_date: row.get(10)?,
+                notes: row.get(11)?,
+                source: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(transactions)
+}
+
+fn build_rename_carryover_transaction(
+    conn: &Connection,
+    source_asset: &Asset,
+    target_asset_id: i64,
+    effective_date: NaiveDate,
+) -> Result<Option<Transaction>> {
+    let source_id = match source_asset.id {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let transactions = get_transactions_before(conn, source_id, effective_date)?;
+    let mut matcher = AverageCostMatcher::new();
+
+    for tx in transactions {
+        if tx.is_day_trade {
+            continue;
+        }
+
+        match tx.transaction_type {
+            TransactionType::Buy => matcher.add_purchase(&tx),
+            TransactionType::Sell => {
+                let _ = matcher.match_sale(&tx)?;
+            }
+        }
+    }
+
+    let mut quantity = matcher.remaining_quantity();
+    if quantity <= Decimal::ZERO {
+        return Ok(None);
+    }
+
+    let mut total_cost = matcher.average_cost() * quantity;
+    apply_actions_to_carryover(conn, target_asset_id, effective_date, &mut quantity, &mut total_cost)?;
+    if quantity <= Decimal::ZERO {
+        return Ok(None);
+    }
+
+    let price_per_unit = if quantity > Decimal::ZERO {
+        total_cost / quantity
+    } else {
+        Decimal::ZERO
+    };
+
+    Ok(Some(Transaction {
+        id: None,
+        asset_id: target_asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: effective_date,
+        settlement_date: Some(effective_date),
+        quantity,
+        price_per_unit,
+        total_cost,
+        fees: Decimal::ZERO,
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: Some(format!("Rename from {}", source_asset.ticker)),
+        source: "RENAME".to_string(),
+        created_at: chrono::Utc::now(),
+    }))
+}
+
+fn apply_actions_to_carryover(
+    conn: &Connection,
+    asset_id: i64,
+    effective_date: NaiveDate,
+    quantity: &mut Decimal,
+    total_cost: &mut Decimal,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT action_type, ratio_from, ratio_to, ex_date
+         FROM corporate_actions
+         WHERE asset_id = ?1 AND applied = 1 AND ex_date >= ?2
+         ORDER BY ex_date ASC",
+    )?;
+
+    let actions = stmt
+        .query_map(rusqlite::params![asset_id, effective_date], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, NaiveDate>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
+        let action_type = CorporateActionType::from_str(&action_type_str)
+            .unwrap_or(CorporateActionType::Split);
+        let ratio_from = Decimal::from(ratio_from);
+        let ratio_to = Decimal::from(ratio_to);
+
+        match action_type {
+            CorporateActionType::CapitalReturn => {
+                let amount_per_share = ratio_from / Decimal::from(100);
+                let reduction = amount_per_share * *quantity;
+                *total_cost = (*total_cost - reduction).max(Decimal::ZERO);
+            }
+            _ => {
+                *quantity = *quantity * ratio_to / ratio_from;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Get all transactions for an asset up to the end of specified month
