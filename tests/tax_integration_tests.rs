@@ -398,14 +398,14 @@ fn test_multi_category_same_month() -> Result<()> {
     assert_eq!(stock_swing.tax_due, dec!(0));
 
     // Verify stock day trade (20%, no exemption)
-    // Note: FIFO means day trade sells against earlier swing trade purchases!
-    // Cost basis: 50 @ R$20 + 50 @ R$10 = R$1500
+    // Average cost uses day trade pool only
+    // Cost basis: 100 @ R$10 = R$1000
     // Sales: 100 @ R$11 = R$1100
-    // Loss: R$1100 - R$1500 = -R$400
+    // Profit: R$100
     assert_eq!(stock_day.total_sales, dec!(1100.00));
-    assert_eq!(stock_day.net_profit, dec!(-400.00)); // Loss due to FIFO
+    assert_eq!(stock_day.net_profit, dec!(100.00));
     assert_eq!(stock_day.exemption_applied, dec!(0));
-    assert_eq!(stock_day.tax_due, dec!(0)); // No tax on losses
+    assert_eq!(stock_day.tax_due, dec!(20.00)); // 20% of 100
 
     // Verify FII (20%, no exemption)
     assert_eq!(fii_swing.total_sales, dec!(600.00));

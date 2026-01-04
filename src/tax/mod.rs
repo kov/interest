@@ -1,4 +1,4 @@
-// Tax module - Brazilian tax calculations (FIFO, swing trade, IRPF)
+// Tax module - Brazilian tax calculations (average cost, swing trade, IRPF)
 
 pub mod cost_basis;
 pub mod swing_trade;

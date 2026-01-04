@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Interest is a CLI tool for tracking Brazilian B3 stock exchange investments with automatic price updates, FIFO cost basis calculations, and tax reporting. Written in Rust, it handles complex Brazilian tax rules including swing trade/day trade distinctions, fund quota vintage tracking (pre/post-2026), and corporate action adjustments.
+Interest is a CLI tool for tracking Brazilian B3 stock exchange investments with automatic price updates, average cost basis calculations, and tax reporting. Written in Rust, it handles complex Brazilian tax rules including swing trade/day trade distinctions, fund quota vintage tracking (pre/post-2026), and corporate action adjustments.
 
 ## Commands
 
@@ -80,7 +80,7 @@ src/
 │   └── irpf_pdf.rs       - IRPF tax declaration PDF parser
 ├── corporate_actions/ - Split/reverse-split/bonus handling with idempotency
 ├── tax/          - Brazilian tax calculations
-│   ├── cost_basis.rs     - FIFO matching algorithm
+│   ├── cost_basis.rs     - Average cost matching algorithm
 │   ├── swing_trade.rs    - 15% tax, R$20k exemption for stocks
 │   ├── darf.rs           - DARF payment generation
 │   ├── irpf.rs           - Annual IRPF report
@@ -94,7 +94,7 @@ src/
 
 1. **Import**: File → Parser → RawTransaction → Database
 2. **Corporate Actions**: Add action → Apply (adjust transactions) → Track in junction table
-3. **Tax Calculation**: Transactions → FIFO matcher → Cost basis → Tax calculation
+3. **Tax Calculation**: Transactions → average-cost matcher → Cost basis → Tax calculation
 4. **Portfolio**: Database → Current positions → Fetch prices → Calculate P&L
 
 ### Key Design Patterns
@@ -149,17 +149,16 @@ CREATE TABLE corporate_action_adjustments (
 2. If not, apply adjustment and record it
 3. If yes, skip (already adjusted)
 
-#### 3. FIFO Cost Basis Matching
+#### 3. Average Cost Basis Matching
 
 Algorithm in `tax/cost_basis.rs`:
 
 ```rust
-// Maintains queue of purchase lots (earliest first)
+// Maintains running total quantity and cost
 // For each sale:
-//   1. Match against oldest lot first
-//   2. Calculate proportional cost: (sold_qty / lot_qty) * lot_cost
-//   3. Reduce lot quantity or remove if fully consumed
-//   4. Move to next lot if needed
+//   1. Compute avg_cost = total_cost / total_qty
+//   2. cost_basis = avg_cost * sold_qty
+//   3. Reduce total_cost by cost_basis and total_qty by sold_qty
 ```
 
 **Critical**: Process transactions in chronological order (`ORDER BY trade_date ASC`).
@@ -250,7 +249,7 @@ See `irpf_pdf.rs` for reference implementation with custom `IrpfPosition` type.
 
 1. Define category in `TaxCategory` enum if needed
 2. Implement calculation in `tax/` module
-3. Use FIFO matcher from `cost_basis.rs` for gains/losses
+3. Use average-cost matcher from `cost_basis.rs` for gains/losses
 4. Add DARF payment generation in `darf.rs`
 5. Write integration test in `tests/tax_integration_tests.rs`
 
@@ -302,7 +301,7 @@ Run: `cargo test --test generate_test_files -- --nocapture`
 ## Critical Invariants
 
 1. **Decimal precision**: All money/quantity calculations use `Decimal`, never `f64`
-2. **FIFO ordering**: Always process transactions by `trade_date ASC`
+2. **Ordering**: Always process transactions by `trade_date ASC`
 3. **Total cost preservation**: After corporate actions, `quantity × price` must equal original total
 4. **Idempotent actions**: Junction table prevents double-adjustment
 5. **No negative positions**: Selling more than owned should error (not short selling)

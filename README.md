@@ -8,12 +8,12 @@ A command-line tool for tracking Brazilian stock exchange investments (B3) with 
 
 - **Transaction Import**: Import from B3/CEI Excel/CSV exports
 - **Manual Transaction Entry**: Add buy/sell transactions manually with auto-adjustment
-- **Portfolio Tracking**: Real-time portfolio with P&L calculations using FIFO
+- **Portfolio Tracking**: Real-time portfolio with P&L calculations using average cost
 - **Price Updates**: Fetch current prices from Yahoo Finance and Brapi.dev
 - **Corporate Actions**: Manual entry and automatic adjustment of splits/reverse splits/bonuses
 - **Idempotent Application**: Safe to reapply corporate actions without double-adjustment
 - **Auto-Adjustment**: New historical transactions automatically adjusted for splits
-- **FIFO Cost Basis**: Accurate cost basis calculations for tax purposes
+- **Average Cost Basis**: Accurate cost basis calculations for tax purposes
 - **Tax Calculations**: Swing trade tax calculations (15% on net profit)
 - **Asset Types**: Stocks, Real Estate Funds (FII), Agribusiness Funds (FIAGRO), Infrastructure Funds (FI-INFRA)
 
@@ -73,7 +73,7 @@ interest prices update
 
 **Core Tables:**
 - `assets` - Ticker definitions (ticker, asset_type, name)
-- `transactions` - Buy/sell records with FIFO tracking
+- `transactions` - Buy/sell records with average cost tracking
 - `corporate_actions` - Splits, reverse splits, bonuses
 - `corporate_action_adjustments` - **Junction table** tracking which transactions were adjusted
 - `price_history` - Daily OHLCV price data
@@ -224,7 +224,7 @@ interest portfolio performance --period 1y
 - Total portfolio value and P&L
 
 **Calculations:**
-- Uses FIFO (First In, First Out) cost basis
+- Uses average cost basis for sales
 - Automatically accounts for corporate actions
 - Real-time prices from Yahoo Finance/Brapi.dev
 
@@ -282,7 +282,7 @@ The tool auto-detects asset types from ticker suffixes:
 
 **Calculation method:**
 1. Sum all sales for the month by asset type
-2. Calculate profit/loss for each sale using FIFO cost basis
+2. Calculate profit/loss for each sale using average cost basis
 3. Net profit = total profits - total losses
 4. Apply exemption (stocks only)
 5. Tax = net profit × 15%
@@ -337,9 +337,9 @@ The tool auto-detects asset types from ticker suffixes:
 
 **Why:** Even 0.01 cent errors compound over thousands of transactions and can lead to incorrect tax calculations.
 
-### 2. FIFO Cost Basis
+### 2. Average Cost Basis
 
-**Assumption:** Brazilian tax law requires FIFO (First In, First Out) for cost basis calculations.
+**Assumption:** Cost basis is calculated using average cost per asset.
 
 **Implementation:**
 - Transactions processed in chronological order (by `trade_date`)
@@ -593,7 +593,7 @@ See `TODO` file for planned features.
 
 When contributing:
 1. **Never use `f64`** for financial calculations - always use `Decimal`
-2. **Write tests** for tax calculations and FIFO logic
+2. **Write tests** for tax calculations and average cost logic
 3. **Document assumptions** in code comments
 4. **Update this README** for new features or design decisions
 

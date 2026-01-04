@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::db::{Asset, AssetType, Transaction, TransactionType};
-use super::cost_basis::{FifoMatcher, SaleCostBasis};
+use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
 use super::loss_carryforward;
 
 /// Tax category for operations
@@ -172,14 +172,19 @@ pub fn calculate_monthly_tax(
         // Get all transactions for this asset up to end of month
         let transactions = get_transactions_up_to_month(conn, asset_id, year, month)?;
 
-        // Calculate cost basis for sales in this month using FIFO
-        // ONE matcher per asset, shared between swing and day trades
-        let mut matcher = FifoMatcher::new();
+        // Calculate cost basis for sales in this month using average cost
+        // Separate matchers for swing and day trade flows
+        let mut swing_matcher = AverageCostMatcher::new();
+        let mut day_trade_matcher = AverageCostMatcher::new();
 
         for tx in transactions {
             match tx.transaction_type {
                 TransactionType::Buy => {
-                    matcher.add_purchase(&tx);
+                    if tx.is_day_trade {
+                        day_trade_matcher.add_purchase(&tx);
+                    } else {
+                        swing_matcher.add_purchase(&tx);
+                    }
                 }
                 TransactionType::Sell => {
                     // Only process sales in the target month
@@ -190,7 +195,11 @@ pub fn calculate_monthly_tax(
                             tx.is_day_trade
                         );
 
-                        let sale = matcher.match_sale(&tx)?;
+                        let sale = if tx.is_day_trade {
+                            day_trade_matcher.match_sale(&tx)?
+                        } else {
+                            swing_matcher.match_sale(&tx)?
+                        };
                         sales_by_category.entry(category)
                             .or_insert_with(Vec::new)
                             .push(sale);
@@ -198,8 +207,12 @@ pub fn calculate_monthly_tax(
                         // We've passed the target month, no need to process further
                         break;
                     } else {
-                        // Sale before target month, still need to process for FIFO
-                        let _ = matcher.match_sale(&tx)?;
+                        // Sale before target month, still need to process to maintain average cost
+                        if tx.is_day_trade {
+                            let _ = day_trade_matcher.match_sale(&tx)?;
+                        } else {
+                            let _ = swing_matcher.match_sale(&tx)?;
+                        }
                     }
                 }
             }

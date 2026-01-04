@@ -248,7 +248,7 @@ fn generate_01_basic_purchase_and_sale() {
     - Buy 100 PETR4 @ R$25.00 = R$2,500.00 on 2025-01-10
     - Buy 50 PETR4 @ R$30.00 = R$1,500.00 on 2025-02-15
     - Sell 80 PETR4 @ R$35.00 = R$2,800.00 on 2025-03-20
-      - FIFO: 80 from first lot @ R$25.00 = R$2,000.00 cost basis
+      - Average cost basis applied to the sale
       - Profit: R$2,800.00 - R$2,000.00 = R$800.00
     - Remaining: 20 from first lot + 50 from second lot = 70 shares
     */
@@ -392,7 +392,7 @@ fn generate_04_stock_split() {
       - Adjusted: 200 VALE3 @ R$40.00 = R$8,000.00 (cost unchanged)
     - Buy 50 VALE3 @ R$42.00 = R$2,100.00 on 2025-03-01
     - Sell 150 VALE3 @ R$45.00 = R$6,750.00 on 2025-04-10
-      - FIFO: 150 from first lot @ R$40.00 = R$6,000.00
+      - Average cost basis applied after split adjustments
       - Profit: R$750.00
     - Remaining: 50 from first lot + 50 from second lot = 100 shares
     */
@@ -509,7 +509,7 @@ fn generate_06_multiple_splits() {
       - First lot: 100 @ R$2.50 = R$500.00
       - Second lot: 50 @ R$2.75 = R$137.50
     - Sell 200 ITSA4 @ R$3.00 = R$600.00 on 2025-05-20
-      - FIFO: 100 @ R$2.50 + 100 @ R$2.75 = R$525.00
+      - Average cost basis applied after multiple splits
       - Profit: R$75.00
     - Remaining: 50 shares from second lot
     */
@@ -584,7 +584,7 @@ fn generate_07_capital_return() {
       - Adjusted cost basis: R$900.00 (R$9.00/share)
     - Buy 50 MXRF11 @ R$10.50 = R$525.00 on 2025-03-01
     - Sell 120 MXRF11 @ R$11.00 = R$1,320.00 on 2025-04-20
-      - FIFO: 100 @ R$9.00 = R$900.00 + 20 @ R$10.50 = R$210.00
+      - Average cost basis applied after capital return
       - Cost basis: R$1,110.00
       - Profit: R$210.00
     - Remaining: 30 shares @ R$10.50
@@ -654,7 +654,7 @@ fn generate_08_complex_scenario() {
     - Term contract: Buy 200 BBAS3T @ R$24.00 = R$4,800.00 on 2025-04-01
     - Term liquidation: 200 BBAS3T -> BBAS3 on 2025-05-30
     - Sell 400 BBAS3 @ R$26.00 = R$10,400.00 on 2025-06-15
-      - FIFO: 100 @ R$20.00 + 200 @ R$21.00 + 100 @ R$23.00
+      - Average cost basis applied after multiple events
       - Cost: R$2,000 + R$4,200 + R$2,300 = R$8,500.00
       - Profit: R$1,900.00
     - Remaining: 50 @ R$23.00 + 200 @ R$24.00 = 250 shares

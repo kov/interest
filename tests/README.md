@@ -6,7 +6,7 @@ This directory contains comprehensive integration tests for the Interest Tracker
 
 The test suite validates:
 - ✅ XLS/Excel file import (Movimentação format)
-- ✅ FIFO cost basis calculations
+- ✅ Average cost basis calculations
 - ✅ Stock splits and reverse splits
 - ✅ Corporate action adjustments
 - ✅ Adjustment deduplication (no double-counting)
@@ -27,13 +27,13 @@ Test XLS files are generated programmatically using Rust:
 cargo test --test generate_test_files -- --ignored
 ```
 
-This creates 9 test XLS files in `tests/data/`:
+This creates test XLS files in `tests/data/`:
 
-1. **01_basic_purchase_sale.xlsx** - Basic buy/sell with FIFO cost basis
+1. **01_basic_purchase_sale.xlsx** - Basic buy/sell with average cost basis
    - Buy 100 PETR4 @ R$25.00
    - Buy 50 PETR4 @ R$30.00
    - Sell 80 PETR4 @ R$35.00
-   - Tests: FIFO matching, cost basis = R$2,000, profit = R$800
+   - Tests: average cost matching and profit calculation
 
 2. **02_term_contract_lifecycle.xlsx** - Term contracts (purchase, expiry, sale)
    - Buy 200 ANIM3T (term) @ R$10.00
@@ -145,7 +145,7 @@ test result: ok. 12 passed; 0 failed; 0 ignored
 
 ### ✅ Fully Tested Features
 
-- **Basic Transactions**: Buy/sell with accurate FIFO cost basis
+- **Basic Transactions**: Buy/sell with accurate average cost basis
 - **Stock Splits**: Both regular (1:2) and reverse (10:1) splits
 - **Multiple Splits**: Cumulative adjustments across multiple split events
 - **Adjustment Deduplication**: Ensures splits aren't applied twice
@@ -183,7 +183,7 @@ Each test follows this structure:
 2. Import test XLS file
 3. Verify transactions imported correctly
 4. Apply corporate actions (if applicable)
-5. Calculate cost basis using FIFO
+5. Calculate cost basis using average cost
 6. Assert expected outcomes (quantities, costs, profits)
 
 ## Implementation Highlights
@@ -229,7 +229,7 @@ All tests use temporary databases that are automatically cleaned up after comple
 
 ### Core Functionality Tests
 
-- **test_01_basic_purchase_and_sale**: Verifies FIFO cost basis with multiple purchase lots
+- **test_01_basic_purchase_and_sale**: Verifies average cost basis with multiple purchase lots
 - **test_02_term_contract_lifecycle**: Tests term contract purchase, liquidation, and cost transfer
 - **test_03_term_contract_sold_before_expiry**: Validates term contracts traded before expiry
 

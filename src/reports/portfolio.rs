@@ -29,16 +29,16 @@ pub struct PortfolioReport {
     pub total_pl_pct: Decimal,
 }
 
-/// FIFO position tracker for a single asset
+/// Average-cost position tracker for a single asset
 #[derive(Debug)]
-struct FifoPosition {
+struct AvgCostPosition {
     #[allow(dead_code)]
     asset_id: i64,
     quantity: Decimal,
     total_cost: Decimal,
 }
 
-impl FifoPosition {
+impl AvgCostPosition {
     fn new(asset_id: i64) -> Self {
         Self {
             asset_id,
@@ -93,7 +93,7 @@ impl FifoPosition {
     }
 }
 
-/// Calculate current portfolio positions using FIFO
+/// Calculate current portfolio positions using average cost
 pub fn calculate_portfolio(
     conn: &Connection,
     asset_type_filter: Option<&AssetType>,
@@ -119,8 +119,8 @@ pub fn calculate_portfolio(
         // Get all transactions for this asset, ordered by date
         let transactions = get_asset_transactions(conn, asset_id)?;
 
-        // Calculate FIFO position
-        let mut position = FifoPosition::new(asset_id);
+        // Calculate average-cost position
+        let mut position = AvgCostPosition::new(asset_id);
 
         for tx in transactions {
             match tx.transaction_type {
@@ -283,8 +283,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fifo_position_buy_and_sell() {
-        let mut position = FifoPosition::new(1);
+    fn test_avg_position_buy_and_sell() {
+        let mut position = AvgCostPosition::new(1);
 
         // Buy 100 @ R$10 = R$1000
         position.add_buy(Decimal::from(100), Decimal::from(1000));
@@ -311,8 +311,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fifo_position_oversell() {
-        let mut position = FifoPosition::new(1);
+    fn test_avg_position_oversell() {
+        let mut position = AvgCostPosition::new(1);
         position.add_buy(Decimal::from(100), Decimal::from(1000));
 
         // Try to sell more than we have

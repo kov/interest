@@ -1,12 +1,12 @@
 # Repository Guidelines
 
 ## Project Overview
-Interest is a Rust CLI for tracking Brazilian B3 investments. It imports broker files, applies corporate actions, and calculates FIFO cost basis and tax (swing/day trade, FIIs, FIAGRO, FI-Infra), with DARF payment info.
+Interest is a Rust CLI for tracking Brazilian B3 investments. It imports broker files, applies corporate actions, and calculates average cost basis and tax (swing/day trade, FIIs, FIAGRO, FI-Infra), with DARF payment info.
 
 ## Architecture & Data Flow
 - **Import**: File → importer → normalized transactions in SQLite (`~/.interest/data.db`).
 - **Corporate actions**: Actions are applied to pre‑ex‑date transactions and tracked in a junction table to keep adjustments idempotent.
-- **Tax**: FIFO matcher computes cost basis, then tax rules and loss carryforward apply.
+- **Tax**: Average-cost matcher computes cost basis, then tax rules and loss carryforward apply.
 
 ## Project Structure & Module Organization
 - `src/cli/`: clap command definitions.
@@ -32,7 +32,7 @@ Use `RUST_LOG=debug` for verbose output when debugging import issues.
 ## Coding Style & Naming Conventions
 - Rust 2021, 4‑space indentation, `snake_case` for functions/vars.
 - **Money/quantity must use `rust_decimal::Decimal`** (never `f64`).
-- Keep transaction processing ordered by `trade_date ASC` for FIFO accuracy.
+- Keep transaction processing ordered by `trade_date ASC` for average cost accuracy.
 - Prefer content-based file detection (`file_detector.rs`) over extensions.
 
 ## Testing Guidelines

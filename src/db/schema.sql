@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     asset_id INTEGER NOT NULL UNIQUE,
     quantity DECIMAL(15,4) NOT NULL,           -- Current quantity held
-    average_cost DECIMAL(15,4) NOT NULL,       -- Average cost per unit (FIFO)
+    average_cost DECIMAL(15,4) NOT NULL,       -- Average cost per unit
     total_cost DECIMAL(15,4) NOT NULL,         -- Total invested
     adjusted_cost DECIMAL(15,4) NOT NULL,      -- After amortization adjustments
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,

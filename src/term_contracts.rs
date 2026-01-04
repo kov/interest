@@ -122,7 +122,7 @@ pub fn match_liquidation_to_purchases(
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Match using FIFO (First-In-First-Out)
+    // Match using date order (deterministic selection)
     let mut matches = Vec::new();
     let mut remaining = liquidation_quantity;
 

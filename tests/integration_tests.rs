@@ -2,7 +2,7 @@
 //!
 //! These tests verify end-to-end functionality:
 //! - XLS import
-//! - Cost basis calculations with FIFO
+//! - Cost basis calculations with average cost
 //! - Term contract lifecycle and cost basis transfer
 //! - Split/reverse split adjustments
 //! - Capital return adjustments
@@ -19,7 +19,7 @@ use interest::db::{
 };
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
 use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
-use interest::tax::cost_basis::FifoMatcher;
+use interest::tax::cost_basis::AverageCostMatcher;
 use interest::term_contracts::process_term_liquidations;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -316,7 +316,7 @@ fn calculate_position(transactions: &[Transaction]) -> (Decimal, Decimal) {
             }
             TransactionType::Sell => {
                 total_quantity -= tx.quantity;
-                // Cost is handled via FIFO, not simple subtraction
+                // Cost is handled via average cost, not simple subtraction
             }
         }
     }
@@ -351,20 +351,23 @@ fn test_01_basic_purchase_and_sale() -> Result<()> {
     assert_eq!(transactions[2].quantity, dec!(80));
     assert_eq!(transactions[2].price_per_unit, dec!(35));
 
-    // Test FIFO cost basis calculation
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&transactions[0]);
-    fifo.add_purchase(&transactions[1]);
+    // Test average cost basis calculation
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&transactions[0]);
+    avg.add_purchase(&transactions[1]);
 
-    let sale_result = fifo.match_sale(&transactions[2])?;
+    let sale_result = avg.match_sale(&transactions[2])?;
 
-    // FIFO: 80 shares from first lot @ R$25.00 = R$2,000.00 cost basis
-    assert_eq!(sale_result.cost_basis, dec!(2000));
+    let expected_avg = (transactions[0].total_cost + transactions[1].total_cost)
+        / (transactions[0].quantity + transactions[1].quantity);
+    let expected_cost_basis = expected_avg * transactions[2].quantity;
+
+    assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(2800));
-    assert_eq!(sale_result.profit_loss, dec!(800));
+    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
 
     // Verify remaining quantity
-    assert_eq!(fifo.remaining_quantity(), dec!(70)); // 20 + 50
+    assert_eq!(avg.remaining_quantity(), dec!(70)); // 150 - 80
 
     Ok(())
 }
@@ -399,10 +402,10 @@ fn test_02_term_contract_lifecycle() -> Result<()> {
 
     // Test cost basis calculation
     // The liquidation should inherit cost from the term purchase
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&base_txs[0]); // Liquidation becomes a purchase
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&base_txs[0]); // Liquidation becomes a purchase
 
-    let sale_result = fifo.match_sale(&base_txs[1])?;
+    let sale_result = avg.match_sale(&base_txs[1])?;
 
     // Cost basis should be from term contract: 100 @ R$10.00 = R$1,000.00
     assert_eq!(sale_result.cost_basis, dec!(1000));
@@ -500,10 +503,10 @@ fn test_03_term_contract_sold_before_expiry() -> Result<()> {
     assert_eq!(transactions.len(), 2, "Should have buy and sell");
 
     // Test cost basis - term contracts can be traded like regular stocks
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&transactions[0]);
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&transactions[0]);
 
-    let sale_result = fifo.match_sale(&transactions[1])?;
+    let sale_result = avg.match_sale(&transactions[1])?;
 
     assert_eq!(sale_result.cost_basis, dec!(1200));
     assert_eq!(sale_result.sale_total, dec!(1350));
@@ -565,19 +568,23 @@ fn test_04_stock_split() -> Result<()> {
     assert_eq!(adjusted_txs[1].price_per_unit, dec!(42));
 
     // Test cost basis with adjusted quantities
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&adjusted_txs[0]);
-    fifo.add_purchase(&adjusted_txs[1]);
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&adjusted_txs[0]);
+    avg.add_purchase(&adjusted_txs[1]);
 
-    let sale_result = fifo.match_sale(&adjusted_txs[2])?;
+    let sale_result = avg.match_sale(&adjusted_txs[2])?;
 
-    // FIFO: 150 from first lot @ R$40.00 = R$6,000.00
-    assert_eq!(sale_result.cost_basis, dec!(6000));
+    let expected_avg =
+        (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
+        / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
+    let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
+
+    assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(6750));
-    assert_eq!(sale_result.profit_loss, dec!(750));
+    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
 
-    // Remaining: 50 from first lot + 50 from second lot
-    assert_eq!(fifo.remaining_quantity(), dec!(100));
+    // Remaining quantity
+    assert_eq!(avg.remaining_quantity(), dec!(100));
 
     Ok(())
 }
@@ -619,10 +626,10 @@ fn test_05_reverse_split() -> Result<()> {
     assert_eq!(adjusted_txs[0].price_per_unit, dec!(20));
 
     // Test cost basis
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&adjusted_txs[0]);
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&adjusted_txs[0]);
 
-    let sale_result = fifo.match_sale(&adjusted_txs[1])?;
+    let sale_result = avg.match_sale(&adjusted_txs[1])?;
 
     assert_eq!(sale_result.cost_basis, dec!(1000)); // 50 @ R$20
     assert_eq!(sale_result.sale_total, dec!(1100)); // 50 @ R$22
@@ -684,17 +691,21 @@ fn test_06_multiple_splits() -> Result<()> {
     assert_eq!(adjusted_txs[1].price_per_unit, dec!(2.75));
 
     // Test cost basis
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&adjusted_txs[0]);
-    fifo.add_purchase(&adjusted_txs[1]);
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&adjusted_txs[0]);
+    avg.add_purchase(&adjusted_txs[1]);
 
-    let sale_result = fifo.match_sale(&adjusted_txs[2])?;
+    let sale_result = avg.match_sale(&adjusted_txs[2])?;
 
-    // FIFO: all 200 from first lot @ R$2.50 = R$500.00
-    assert_eq!(sale_result.cost_basis, dec!(500));
-    assert_eq!(sale_result.profit_loss, dec!(100)); // 600 - 500
+    let expected_avg =
+        (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
+        / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
+    let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
 
-    assert_eq!(fifo.remaining_quantity(), dec!(50)); // All from second lot
+    assert_eq!(sale_result.cost_basis, expected_cost_basis);
+    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
+
+    assert_eq!(avg.remaining_quantity(), dec!(50));
 
     Ok(())
 }
@@ -752,33 +763,34 @@ fn test_08_complex_scenario() -> Result<()> {
     assert_eq!(adjusted_txs[1].price_per_unit, dec!(21)); // 42 -> 21
 
     // Calculate final position and verify cost basis for final sale
-    let mut fifo = FifoMatcher::new();
+    let mut avg = AverageCostMatcher::new();
 
     // Add purchases and process sales in order
-    fifo.add_purchase(&adjusted_txs[0]); // 400 @ 20
-    fifo.add_purchase(&adjusted_txs[1]); // 200 @ 21
+    avg.add_purchase(&adjusted_txs[0]); // 400 @ 20
+    avg.add_purchase(&adjusted_txs[1]); // 200 @ 21
 
-    // First sale: 300 shares
-    let _sale1 = fifo.match_sale(&adjusted_txs[2])?; // Sells 300 @ 22
-
-    // After first sale, remaining: 100 @ 20, 200 @ 21 = 300 shares total
+    let avg_before_sale1 = avg.average_cost();
+    let _sale1 = avg.match_sale(&adjusted_txs[2])?; // Sells 300 @ 22
+    let tolerance = dec!(0.0000000001);
+    assert!((avg.average_cost() - avg_before_sale1).abs() <= tolerance);
 
     // Third purchase (after first sale)
-    fifo.add_purchase(&adjusted_txs[3]); // 150 @ 23
+    avg.add_purchase(&adjusted_txs[3]); // 150 @ 23
 
     // Term liquidation adds shares
-    fifo.add_purchase(&adjusted_txs[4]); // 200 @ 24
+    avg.add_purchase(&adjusted_txs[4]); // 200 @ 24
 
     // Final sale: 400 shares
-    let sale2 = fifo.match_sale(&adjusted_txs[5])?;
+    let avg_before_sale2 = avg.average_cost();
+    let sale2 = avg.match_sale(&adjusted_txs[5])?;
 
-    // FIFO: 100 @ 20 + 200 @ 21 + 100 @ 23 = 2000 + 4200 + 2300 = 8500
-    assert_eq!(sale2.cost_basis, dec!(8500));
+    assert_eq!(sale2.cost_basis, avg_before_sale2 * adjusted_txs[5].quantity);
     assert_eq!(sale2.sale_total, dec!(10400));
-    assert_eq!(sale2.profit_loss, dec!(1900));
+    assert_eq!(sale2.profit_loss, sale2.sale_total - sale2.cost_basis);
+    assert!((avg.average_cost() - avg_before_sale2).abs() <= tolerance);
 
-    // Remaining: 50 @ 23 + 200 @ 24 = 250 shares
-    assert_eq!(fifo.remaining_quantity(), dec!(250));
+    // Remaining quantity
+    assert_eq!(avg.remaining_quantity(), dec!(250));
 
     Ok(())
 }
@@ -911,20 +923,23 @@ fn test_07_capital_return() -> Result<()> {
     assert_eq!(adjusted_txs[1].quantity, dec!(50));
     assert_eq!(adjusted_txs[1].price_per_unit, dec!(10.5));
 
-    // Test cost basis with FIFO
-    let mut fifo = FifoMatcher::new();
-    fifo.add_purchase(&adjusted_txs[0]); // 100 @ 9.00
-    fifo.add_purchase(&adjusted_txs[1]); // 50 @ 10.50
+    // Test cost basis with average cost
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&adjusted_txs[0]); // 100 @ 9.00
+    avg.add_purchase(&adjusted_txs[1]); // 50 @ 10.50
 
-    let sale_result = fifo.match_sale(&adjusted_txs[2])?; // Sell 120
+    let sale_result = avg.match_sale(&adjusted_txs[2])?; // Sell 120
 
-    // FIFO: 100 @ 9.00 + 20 @ 10.50 = 900 + 210 = 1110
-    assert_eq!(sale_result.cost_basis, dec!(1110));
-    assert_eq!(sale_result.sale_total, dec!(1320)); // 120 @ 11.00
-    assert_eq!(sale_result.profit_loss, dec!(210)); // 1320 - 1110
+    let expected_avg =
+        (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
+        / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
+    let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
 
-    // Remaining: 30 shares @ 10.50
-    assert_eq!(fifo.remaining_quantity(), dec!(30));
+    assert_eq!(sale_result.cost_basis, expected_cost_basis);
+    assert_eq!(sale_result.sale_total, dec!(1320));
+    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
+
+    assert_eq!(avg.remaining_quantity(), dec!(30));
 
     Ok(())
 }
