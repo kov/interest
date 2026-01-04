@@ -618,4 +618,4 @@ MIT
 
 ## Credits
 
-Built with Claude Code (Anthropic).
+Built with Claude Code (Anthropic) and OpenAI Codex.
