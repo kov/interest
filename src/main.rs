@@ -229,14 +229,15 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 }
 
                 // Detect asset type from ticker
-                let asset_type = db::AssetType::detect_from_ticker(&raw_tx.ticker)
+                let normalized_ticker = raw_tx.normalized_ticker();
+                let asset_type = db::AssetType::detect_from_ticker(&normalized_ticker)
                     .unwrap_or(db::AssetType::Stock);
 
                 // Upsert asset
-                let asset_id = match db::upsert_asset(&conn, &raw_tx.ticker, &asset_type, None) {
+                let asset_id = match db::upsert_asset(&conn, &normalized_ticker, &asset_type, None) {
                     Ok(id) => id,
                     Err(e) => {
-                        eprintln!("Error upserting asset {}: {}", raw_tx.ticker, e);
+                        eprintln!("Error upserting asset {}: {}", normalized_ticker, e);
                         errors += 1;
                         continue;
                     }

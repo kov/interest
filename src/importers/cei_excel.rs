@@ -22,6 +22,20 @@ pub struct RawTransaction {
 }
 
 impl RawTransaction {
+    /// Normalize ticker for fractional market (e.g., AMBP3F -> AMBP3)
+    pub fn normalized_ticker(&self) -> String {
+        let is_fractional = self.market
+            .as_deref()
+            .map(|m| m.to_uppercase().contains("FRACION"))
+            .unwrap_or(false);
+
+        if is_fractional && self.ticker.ends_with('F') && self.ticker.len() > 1 {
+            self.ticker[..self.ticker.len() - 1].to_string()
+        } else {
+            self.ticker.clone()
+        }
+    }
+
     /// Convert to Transaction model with asset type detection
     pub fn to_transaction(&self, asset_id: i64) -> Result<Transaction> {
         let transaction_type = TransactionType::from_str(&self.transaction_type)
@@ -361,6 +375,38 @@ fn parse_decimal(cell: &Data) -> Result<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalized_ticker_fractional() {
+        let tx = RawTransaction {
+            ticker: "AMBP3F".to_string(),
+            transaction_type: "C".to_string(),
+            trade_date: NaiveDate::from_ymd_opt(2024, 7, 22).unwrap(),
+            quantity: Decimal::from(10),
+            price: Decimal::from(1),
+            fees: Decimal::ZERO,
+            total: Decimal::from(10),
+            market: Some("Mercado Fracionário".to_string()),
+        };
+
+        assert_eq!(tx.normalized_ticker(), "AMBP3");
+    }
+
+    #[test]
+    fn test_normalized_ticker_non_fractional() {
+        let tx = RawTransaction {
+            ticker: "AMBP3F".to_string(),
+            transaction_type: "C".to_string(),
+            trade_date: NaiveDate::from_ymd_opt(2024, 7, 22).unwrap(),
+            quantity: Decimal::from(10),
+            price: Decimal::from(1),
+            fees: Decimal::ZERO,
+            total: Decimal::from(10),
+            market: Some("Mercado à Vista".to_string()),
+        };
+
+        assert_eq!(tx.normalized_ticker(), "AMBP3F");
+    }
 
     #[test]
     fn test_parse_decimal_brazilian_format() {
