@@ -22,8 +22,21 @@ pub struct RawTransaction {
 }
 
 impl RawTransaction {
-    /// Normalize ticker for fractional market (e.g., AMBP3F -> AMBP3)
+    /// Normalize ticker for fractional and term markets.
     pub fn normalized_ticker(&self) -> String {
+        let is_term = self.market
+            .as_deref()
+            .map(|m| m.to_uppercase().contains("TERMO"))
+            .unwrap_or(false);
+        let is_buy = {
+            let tx_type = self.transaction_type.to_uppercase();
+            tx_type == "C" || tx_type.contains("COMPRA") || tx_type == "BUY"
+        };
+
+        if is_term && is_buy && self.ticker.ends_with('T') && self.ticker.len() > 1 {
+            return self.ticker[..self.ticker.len() - 1].to_string();
+        }
+
         let is_fractional = self.market
             .as_deref()
             .map(|m| m.to_uppercase().contains("FRACION"))
@@ -406,6 +419,38 @@ mod tests {
         };
 
         assert_eq!(tx.normalized_ticker(), "AMBP3F");
+    }
+
+    #[test]
+    fn test_normalized_ticker_term_buy() {
+        let tx = RawTransaction {
+            ticker: "CSED3T".to_string(),
+            transaction_type: "Compra".to_string(),
+            trade_date: NaiveDate::from_ymd_opt(2023, 3, 23).unwrap(),
+            quantity: Decimal::from(100),
+            price: Decimal::from(3),
+            fees: Decimal::ZERO,
+            total: Decimal::from(300),
+            market: Some("Termo de Ação".to_string()),
+        };
+
+        assert_eq!(tx.normalized_ticker(), "CSED3");
+    }
+
+    #[test]
+    fn test_normalized_ticker_term_sell_kept() {
+        let tx = RawTransaction {
+            ticker: "CSED3T".to_string(),
+            transaction_type: "Venda".to_string(),
+            trade_date: NaiveDate::from_ymd_opt(2023, 3, 23).unwrap(),
+            quantity: Decimal::from(100),
+            price: Decimal::from(3),
+            fees: Decimal::ZERO,
+            total: Decimal::from(300),
+            market: Some("Termo de Ação".to_string()),
+        };
+
+        assert_eq!(tx.normalized_ticker(), "CSED3T");
     }
 
     #[test]
