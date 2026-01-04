@@ -12,7 +12,7 @@ mod term_contracts;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands, ActionCommands, TransactionCommands};
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,8 +22,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Import { file, dry_run, movimentacao } => {
-            handle_import(&file, dry_run, movimentacao).await
+        Commands::Import { file, dry_run } => {
+            handle_import(&file, dry_run).await
+        }
+
+        Commands::ImportIrpf { file, year, dry_run } => {
+            handle_irpf_import(&file, year, dry_run).await
         }
 
         Commands::Portfolio { action } => match action {
@@ -143,235 +147,536 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Handle import command
-async fn handle_import(file_path: &str, dry_run: bool, movimentacao: bool) -> Result<()> {
-    if movimentacao {
-        return handle_movimentacao_import(file_path, dry_run).await;
-    }
+/// Handle import command with automatic format detection
+async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
+    use colored::Colorize;
+    use tabled::{Table, Tabled, settings::Style};
+    use tracing::warn;
 
+    info!("Importing from: {}", file_path);
+
+    // Auto-detect file type and parse
+    let import_result = importers::import_file_auto(file_path)?;
+
+    match import_result {
+        importers::ImportResult::Cei(raw_transactions) => {
+            // Handle CEI format
+            info!("Detected CEI format");
+            println!("\n{} Found {} transactions\n", "✓".green().bold(), raw_transactions.len());
+
+            // Display preview
+            #[derive(Tabled)]
+            struct TransactionPreview {
+                #[tabled(rename = "Date")]
+                date: String,
+                #[tabled(rename = "Ticker")]
+                ticker: String,
+                #[tabled(rename = "Type")]
+                tx_type: String,
+                #[tabled(rename = "Quantity")]
+                quantity: String,
+                #[tabled(rename = "Price")]
+                price: String,
+                #[tabled(rename = "Total")]
+                total: String,
+            }
+
+            let preview: Vec<TransactionPreview> = raw_transactions
+                .iter()
+                .take(10)
+                .map(|tx| TransactionPreview {
+                    date: tx.trade_date.format("%d/%m/%Y").to_string(),
+                    ticker: tx.ticker.clone(),
+                    tx_type: tx.transaction_type.clone(),
+                    quantity: tx.quantity.to_string(),
+                    price: format!("R$ {}", tx.price),
+                    total: format!("R$ {}", tx.total),
+                })
+                .collect();
+
+            let table = Table::new(preview).with(Style::rounded()).to_string();
+            println!("{}", table);
+
+            if raw_transactions.len() > 10 {
+                println!("\n... and {} more transactions", raw_transactions.len() - 10);
+            }
+
+            if dry_run {
+                println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
+                return Ok(());
+            }
+
+            // Initialize database if needed
+            db::init_database(None)?;
+
+            // Open connection
+            let conn = db::open_db(None)?;
+
+            // Import transactions
+            let mut imported = 0;
+            let mut skipped_old = 0;
+            let mut errors = 0;
+            let mut max_imported_date: Option<chrono::NaiveDate> = None;
+
+            let last_import_date = db::get_last_import_date(&conn, "CEI", "trades")?;
+
+            for raw_tx in &raw_transactions {
+                if let Some(last_date) = last_import_date {
+                    if raw_tx.trade_date <= last_date {
+                        skipped_old += 1;
+                        continue;
+                    }
+                }
+
+                // Detect asset type from ticker
+                let asset_type = db::AssetType::detect_from_ticker(&raw_tx.ticker)
+                    .unwrap_or(db::AssetType::Stock);
+
+                // Upsert asset
+                let asset_id = match db::upsert_asset(&conn, &raw_tx.ticker, &asset_type, None) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("Error upserting asset {}: {}", raw_tx.ticker, e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                // Convert to Transaction model
+                let transaction = match raw_tx.to_transaction(asset_id) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        eprintln!("Error converting transaction for {}: {}", raw_tx.ticker, e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                // Insert transaction
+                match db::insert_transaction(&conn, &transaction) {
+                    Ok(_) => {
+                        imported += 1;
+                        max_imported_date = Some(match max_imported_date {
+                            Some(current) if current >= transaction.trade_date => current,
+                            _ => transaction.trade_date,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Error inserting transaction: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            if let Some(last_date) = max_imported_date {
+                db::set_last_import_date(&conn, "CEI", "trades", last_date)?;
+            }
+
+            println!("\n{} Import complete!", "✓".green().bold());
+            println!("  Imported: {}", imported.to_string().green());
+            if skipped_old > 0 {
+                println!(
+                    "  Skipped (before last import date): {}",
+                    skipped_old.to_string().yellow()
+                );
+            }
+            if errors > 0 {
+                println!("  Errors: {}", errors.to_string().red());
+            }
+
+            Ok(())
+        }
+
+        importers::ImportResult::Movimentacao(entries) => {
+            // Handle Movimentacao format
+            info!("Detected Movimentacao format");
+            println!("\n{} Found {} movimentacao entries\n", "✓".green().bold(), entries.len());
+
+            // Categorize entries
+            let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
+            let corporate_actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+            let income_events: Vec<_> = entries.iter().filter(|e| e.is_income_event()).collect();
+            let other: Vec<_> = entries.iter()
+                .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
+                .collect();
+
+            println!("{} Summary:", "📊".cyan().bold());
+            println!("  {} Trades (buy/sell/term)", trades.len().to_string().green());
+            println!("  {} Corporate actions (splits, bonuses, mergers)", corporate_actions.len().to_string().yellow());
+            println!("  {} Income events (dividends, yields, amortization)", income_events.len().to_string().cyan());
+            println!("  {} Other movements", other.len().to_string().dimmed());
+            println!();
+
+            // Show preview of trades
+            if !trades.is_empty() {
+                println!("{} Sample trades:", "💰".cyan().bold());
+
+                #[derive(Tabled)]
+                struct TradePreview {
+                    #[tabled(rename = "Date")]
+                    date: String,
+                    #[tabled(rename = "Type")]
+                    movement_type: String,
+                    #[tabled(rename = "Ticker")]
+                    ticker: String,
+                    #[tabled(rename = "Qty")]
+                    quantity: String,
+                    #[tabled(rename = "Price")]
+                    price: String,
+                }
+
+                let preview: Vec<TradePreview> = trades
+                    .iter()
+                    .take(5)
+                    .map(|e| TradePreview {
+                        date: e.date.format("%d/%m/%Y").to_string(),
+                        movement_type: e.movement_type.clone(),
+                        ticker: e.ticker.clone().unwrap_or_else(|| "?".to_string()),
+                        quantity: e.quantity.map(|q| q.to_string()).unwrap_or_else(|| "-".to_string()),
+                        price: e.unit_price.map(|p| format!("R$ {:.2}", p)).unwrap_or_else(|| "-".to_string()),
+                    })
+                    .collect();
+
+                let table = Table::new(preview).with(Style::rounded()).to_string();
+                println!("{}\n", table);
+            }
+
+            // Show preview of corporate actions
+            if !corporate_actions.is_empty() {
+                println!("{} Corporate actions:", "🏢".cyan().bold());
+
+                for action in corporate_actions.iter().take(5) {
+                    println!("  {} {} - {}",
+                        action.date.format("%d/%m/%Y").to_string().dimmed(),
+                        action.movement_type.yellow(),
+                        action.ticker.as_ref().unwrap_or(&action.product)
+                    );
+                }
+                println!();
+            }
+
+            // Show preview of income events
+            if !income_events.is_empty() {
+                println!("{} Income events:", "💵".cyan().bold());
+
+                for event in income_events.iter().take(5) {
+                    let value = event.operation_value
+                        .map(|v| format!("R$ {:.2}", v))
+                        .unwrap_or_else(|| "-".to_string());
+
+                    println!("  {} {} - {} {}",
+                        event.date.format("%d/%m/%Y").to_string().dimmed(),
+                        event.movement_type.cyan(),
+                        event.ticker.as_ref().unwrap_or(&event.product),
+                        value.green()
+                    );
+                }
+                println!();
+            }
+
+            if dry_run {
+                println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
+                println!("\n{} What would be imported:", "📝".cyan().bold());
+                println!("  • {} trade transactions", trades.len());
+                println!("  • {} corporate actions", corporate_actions.len());
+                println!("  • {} income events (not yet implemented)", income_events.len());
+                return Ok(());
+            }
+
+            // Initialize database
+            db::init_database(None)?;
+            let conn = db::open_db(None)?;
+
+            // Import trades
+            let mut imported_trades = 0;
+            let mut skipped_trades = 0;
+            let mut skipped_trades_old = 0;
+            let mut errors = 0;
+            let mut max_trade_date: Option<chrono::NaiveDate> = None;
+
+            let last_trade_import_date =
+                db::get_last_import_date(&conn, "MOVIMENTACAO", "trades")?;
+
+            println!("{} Importing trades...", "⏳".cyan().bold());
+
+            for entry in trades {
+                if entry.ticker.is_none() {
+                    warn!("Skipping trade with no ticker: {:?}", entry.product);
+                    skipped_trades += 1;
+                    continue;
+                }
+
+                let ticker = entry.ticker.as_ref().unwrap();
+                let asset_type = db::AssetType::detect_from_ticker(ticker)
+                    .unwrap_or(db::AssetType::Stock);
+
+                // Upsert asset
+                let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("Error upserting asset {}: {}", ticker, e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                // Convert to transaction
+                let transaction = match entry.to_transaction(asset_id) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        warn!("Failed to convert entry to transaction: {}", e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                if let Some(last_date) = last_trade_import_date {
+                    if transaction.trade_date <= last_date {
+                        skipped_trades_old += 1;
+                        continue;
+                    }
+                }
+
+                // Insert transaction
+                match db::insert_transaction(&conn, &transaction) {
+                    Ok(_) => {
+                        imported_trades += 1;
+                        max_trade_date = Some(match max_trade_date {
+                            Some(current) if current >= transaction.trade_date => current,
+                            _ => transaction.trade_date,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Error inserting transaction: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            if let Some(last_date) = max_trade_date {
+                db::set_last_import_date(&conn, "MOVIMENTACAO", "trades", last_date)?;
+            }
+
+            // Import corporate actions
+            let mut imported_actions = 0;
+            let mut skipped_actions = 0;
+            let mut skipped_actions_old = 0;
+            let mut max_action_date: Option<chrono::NaiveDate> = None;
+
+            let last_action_import_date =
+                db::get_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions")?;
+
+            println!("{} Importing corporate actions...", "⏳".cyan().bold());
+
+            for entry in corporate_actions {
+                if entry.ticker.is_none() {
+                    warn!("Skipping corporate action with no ticker: {:?}", entry.product);
+                    skipped_actions += 1;
+                    continue;
+                }
+
+                let ticker = entry.ticker.as_ref().unwrap();
+                let asset_type = db::AssetType::detect_from_ticker(ticker)
+                    .unwrap_or(db::AssetType::Stock);
+
+                // Upsert asset
+                let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("Error upserting asset {}: {}", ticker, e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                // Convert to corporate action
+                let mut action = match entry.to_corporate_action(asset_id) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("Failed to convert entry to corporate action: {}", e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+
+                if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
+                    if let Some((ratio_from, ratio_to)) =
+                        infer_split_ratio_from_credit(&conn, asset_id, entry)?
+                    {
+                        action.ratio_from = ratio_from;
+                        action.ratio_to = ratio_to;
+                        let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
+                        action.notes = Some(match action.notes.take() {
+                            Some(existing) if !existing.is_empty() => {
+                                format!("{} | {}", existing, note_suffix)
+                            }
+                            _ => note_suffix,
+                        });
+                    }
+                }
+                if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
+                    warn!(
+                        "Desdobro ratio unknown for {} on {}; defaulting to 1:1",
+                        ticker,
+                        entry.date
+                    );
+                }
+
+                if let Some(last_date) = last_action_import_date {
+                    if action.event_date <= last_date {
+                        skipped_actions_old += 1;
+                        continue;
+                    }
+                }
+
+                // Insert corporate action (no duplicate check for now - user can manage manually)
+                match db::insert_corporate_action(&conn, &action) {
+                    Ok(action_id) => {
+                        imported_actions += 1;
+                        max_action_date = Some(match max_action_date {
+                            Some(current) if current >= action.event_date => current,
+                            _ => action.event_date,
+                        });
+                        action.id = Some(action_id);
+                        if action.ratio_from != action.ratio_to {
+                            let asset = db::Asset {
+                                id: Some(asset_id),
+                                ticker: ticker.to_string(),
+                                asset_type,
+                                name: None,
+                                created_at: chrono::Utc::now(),
+                                updated_at: chrono::Utc::now(),
+                            };
+                            match corporate_actions::apply_corporate_action(&conn, &action, &asset) {
+                                Ok(adjusted) => {
+                                    if adjusted > 0 {
+                                        println!("    {} Auto-applied to {} transaction(s)", "↳".blue(), adjusted);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to auto-apply corporate action for {} on {}: {}",
+                                        ticker,
+                                        action.event_date,
+                                        e
+                                    );
+                                }
+                            }
+                        } else {
+                            warn!(
+                                "Skipping auto-apply for {} on {} (ratio 1:1)",
+                                ticker,
+                                action.event_date
+                            );
+                        }
+                        println!("  {} Added {} for {} on {}",
+                            "✓".green(),
+                            action.action_type.as_str().yellow(),
+                            ticker.cyan(),
+                            action.event_date
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Error inserting corporate action: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            println!("\n{} Import complete!", "✓".green().bold());
+            println!("  {} Trades:", "💰".cyan());
+            println!("    Imported: {}", imported_trades.to_string().green());
+            if skipped_trades_old > 0 {
+                println!(
+                    "    Skipped (before last import date): {}",
+                    skipped_trades_old.to_string().yellow()
+                );
+            }
+            if skipped_trades > 0 {
+                println!("    Skipped: {}", skipped_trades.to_string().yellow());
+            }
+            println!("  {} Corporate actions:", "🏢".cyan());
+            println!("    Imported: {}", imported_actions.to_string().green());
+            if skipped_actions_old > 0 {
+                println!(
+                    "    Skipped (before last import date): {}",
+                    skipped_actions_old.to_string().yellow()
+                );
+            }
+            if skipped_actions > 0 {
+                println!("    Skipped: {}", skipped_actions.to_string().yellow());
+            }
+            if errors > 0 {
+                println!("  {} Errors: {}", "❌".red(), errors.to_string().red());
+            }
+            if let Some(last_date) = max_action_date {
+                db::set_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions", last_date)?;
+            }
+            println!("\n{} Income events not yet implemented - coming soon!", "ℹ".blue().bold());
+
+            Ok(())
+        }
+
+        importers::ImportResult::IrpfPositions(_) => {
+            // This should never happen - IRPF imports use handle_irpf_import directly
+            unreachable!("IrpfPositions should not be returned by import_file_auto")
+        }
+    }
+}
+
+/// Handle IRPF PDF import command
+async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result<()> {
     use colored::Colorize;
     use tabled::{Table, Tabled, settings::Style};
 
-    info!("Importing transactions from: {}", file_path);
+    info!("Importing IRPF positions from: {} for year {}", file_path, year);
 
-    // Parse the file
-    let raw_transactions = importers::import_file(file_path)?;
+    // Parse IRPF PDF
+    let positions = importers::irpf_pdf::parse_irpf_pdf(file_path, year)?;
 
-    println!("\n{} Found {} transactions\n", "✓".green().bold(), raw_transactions.len());
+    if positions.is_empty() {
+        println!("\n{} No positions found for year {}", "ℹ".yellow().bold(), year);
+        println!("Check that the PDF contains 'DECLARAÇÃO DE BENS E DIREITOS' section with Code 31 entries.");
+        return Ok(());
+    }
+
+    println!("\n{} Found {} opening position(s) from IRPF {}\n",
+        "✓".green().bold(), positions.len(), year);
 
     // Display preview
     #[derive(Tabled)]
-    struct TransactionPreview {
-        #[tabled(rename = "Date")]
-        date: String,
+    struct PositionPreview {
         #[tabled(rename = "Ticker")]
         ticker: String,
-        #[tabled(rename = "Type")]
-        tx_type: String,
         #[tabled(rename = "Quantity")]
         quantity: String,
-        #[tabled(rename = "Price")]
-        price: String,
-        #[tabled(rename = "Total")]
-        total: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Avg Cost")]
+        avg_cost: String,
+        #[tabled(rename = "Date")]
+        date: String,
     }
 
-    let preview: Vec<TransactionPreview> = raw_transactions
+    let preview: Vec<PositionPreview> = positions
         .iter()
-        .take(10)
-        .map(|tx| TransactionPreview {
-            date: tx.trade_date.format("%d/%m/%Y").to_string(),
-            ticker: tx.ticker.clone(),
-            tx_type: tx.transaction_type.clone(),
-            quantity: tx.quantity.to_string(),
-            price: format!("R$ {}", tx.price),
-            total: format!("R$ {}", tx.total),
+        .map(|pos| PositionPreview {
+            ticker: pos.ticker.clone(),
+            quantity: pos.quantity.to_string(),
+            total_cost: format!("R$ {:.2}", pos.total_cost),
+            avg_cost: format!("R$ {:.2}", pos.average_cost),
+            date: format!("31/12/{}", pos.year),
         })
         .collect();
 
     let table = Table::new(preview).with(Style::rounded()).to_string();
     println!("{}", table);
 
-    if raw_transactions.len() > 10 {
-        println!("\n... and {} more transactions", raw_transactions.len() - 10);
-    }
-
-    if dry_run {
-        println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    // Initialize database if needed
-    db::init_database(None)?;
-
-    // Open connection
-    let conn = db::open_db(None)?;
-
-    // Import transactions
-    let mut imported = 0;
-    let mut skipped = 0;
-    let mut errors = 0;
-
-    for raw_tx in &raw_transactions {
-        // Detect asset type from ticker
-        let asset_type = db::AssetType::detect_from_ticker(&raw_tx.ticker)
-            .unwrap_or(db::AssetType::Stock);
-
-        // Upsert asset
-        let asset_id = match db::upsert_asset(&conn, &raw_tx.ticker, &asset_type, None) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("Error upserting asset {}: {}", raw_tx.ticker, e);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Convert to Transaction model
-        let transaction = match raw_tx.to_transaction(asset_id) {
-            Ok(tx) => tx,
-            Err(e) => {
-                eprintln!("Error converting transaction for {}: {}", raw_tx.ticker, e);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Check for duplicates
-        if db::transaction_exists(
-            &conn,
-            asset_id,
-            &transaction.trade_date,
-            &transaction.transaction_type,
-            &transaction.quantity,
-        )? {
-            skipped += 1;
-            continue;
-        }
-
-        // Insert transaction
-        match db::insert_transaction(&conn, &transaction) {
-            Ok(_) => imported += 1,
-            Err(e) => {
-                eprintln!("Error inserting transaction: {}", e);
-                errors += 1;
-            }
-        }
-    }
-
-    println!("\n{} Import complete!", "✓".green().bold());
-    println!("  Imported: {}", imported.to_string().green());
-    if skipped > 0 {
-        println!("  Skipped (duplicates): {}", skipped.to_string().yellow());
-    }
-    if errors > 0 {
-        println!("  Errors: {}", errors.to_string().red());
-    }
-
-    Ok(())
-}
-
-/// Handle movimentacao import command
-async fn handle_movimentacao_import(file_path: &str, dry_run: bool) -> Result<()> {
-    use colored::Colorize;
-    use tabled::{Table, Tabled, settings::Style};
-    use tracing::warn;
-
-    info!("Importing movimentacao from: {}", file_path);
-
-    // Parse the movimentacao file
-    let entries = importers::movimentacao_excel::parse_movimentacao_excel(file_path)?;
-
-    println!("\n{} Found {} movimentacao entries\n", "✓".green().bold(), entries.len());
-
-    // Categorize entries
-    let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
-    let corporate_actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
-    let income_events: Vec<_> = entries.iter().filter(|e| e.is_income_event()).collect();
-    let other: Vec<_> = entries.iter()
-        .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
-        .collect();
-
-    println!("{} Summary:", "📊".cyan().bold());
-    println!("  {} Trades (buy/sell/term)", trades.len().to_string().green());
-    println!("  {} Corporate actions (splits, bonuses, mergers)", corporate_actions.len().to_string().yellow());
-    println!("  {} Income events (dividends, yields, amortization)", income_events.len().to_string().cyan());
-    println!("  {} Other movements", other.len().to_string().dimmed());
-    println!();
-
-    // Show preview of trades
-    if !trades.is_empty() {
-        println!("{} Sample trades:", "💰".cyan().bold());
-
-        #[derive(Tabled)]
-        struct TradePreview {
-            #[tabled(rename = "Date")]
-            date: String,
-            #[tabled(rename = "Type")]
-            movement_type: String,
-            #[tabled(rename = "Ticker")]
-            ticker: String,
-            #[tabled(rename = "Qty")]
-            quantity: String,
-            #[tabled(rename = "Price")]
-            price: String,
-        }
-
-        let preview: Vec<TradePreview> = trades
-            .iter()
-            .take(5)
-            .map(|e| TradePreview {
-                date: e.date.format("%d/%m/%Y").to_string(),
-                movement_type: e.movement_type.clone(),
-                ticker: e.ticker.clone().unwrap_or_else(|| "?".to_string()),
-                quantity: e.quantity.map(|q| q.to_string()).unwrap_or_else(|| "-".to_string()),
-                price: e.unit_price.map(|p| format!("R$ {:.2}", p)).unwrap_or_else(|| "-".to_string()),
-            })
-            .collect();
-
-        let table = Table::new(preview).with(Style::rounded()).to_string();
-        println!("{}\n", table);
-    }
-
-    // Show preview of corporate actions
-    if !corporate_actions.is_empty() {
-        println!("{} Corporate actions:", "🏢".cyan().bold());
-
-        for action in corporate_actions.iter().take(5) {
-            println!("  {} {} - {}",
-                action.date.format("%d/%m/%Y").to_string().dimmed(),
-                action.movement_type.yellow(),
-                action.ticker.as_ref().unwrap_or(&action.product)
-            );
-        }
-        println!();
-    }
-
-    // Show preview of income events
-    if !income_events.is_empty() {
-        println!("{} Income events:", "💵".cyan().bold());
-
-        for event in income_events.iter().take(5) {
-            let value = event.operation_value
-                .map(|v| format!("R$ {:.2}", v))
-                .unwrap_or_else(|| "-".to_string());
-
-            println!("  {} {} - {} {}",
-                event.date.format("%d/%m/%Y").to_string().dimmed(),
-                event.movement_type.cyan(),
-                event.ticker.as_ref().unwrap_or(&event.product),
-                value.green()
-            );
-        }
-        println!();
-    }
-
     if dry_run {
         println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
         println!("\n{} What would be imported:", "📝".cyan().bold());
-        println!("  • {} trade transactions", trades.len());
-        println!("  • {} corporate actions", corporate_actions.len());
-        println!("  • {} income events (not yet implemented)", income_events.len());
+        println!("  • {} opening BUY transactions dated {}-12-31", positions.len(), year);
+        println!("  • Previous IRPF opening positions for these tickers would be deleted");
         return Ok(());
     }
 
@@ -379,136 +684,80 @@ async fn handle_movimentacao_import(file_path: &str, dry_run: bool) -> Result<()
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Import trades
-    let mut imported_trades = 0;
-    let mut skipped_trades = 0;
-    let mut errors = 0;
+    // Import positions
+    let mut imported = 0;
+    let mut replaced = 0;
 
-    println!("{} Importing trades...", "⏳".cyan().bold());
+    println!("\n{} Importing opening positions...\n", "⏳".cyan().bold());
 
-    for entry in trades {
-        if entry.ticker.is_none() {
-            warn!("Skipping trade with no ticker: {:?}", entry.product);
-            skipped_trades += 1;
-            continue;
-        }
-
-        let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = db::AssetType::detect_from_ticker(ticker)
+    for position in positions {
+        // Detect asset type from ticker
+        let asset_type = db::AssetType::detect_from_ticker(&position.ticker)
             .unwrap_or(db::AssetType::Stock);
 
         // Upsert asset
-        let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
+        let asset_id = match db::upsert_asset(&conn, &position.ticker, &asset_type, None) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("Error upserting asset {}: {}", ticker, e);
-                errors += 1;
+                eprintln!("{} Error upserting asset {}: {}",
+                    "✗".red(), position.ticker, e);
                 continue;
             }
         };
 
-        // Convert to transaction
-        let transaction = match entry.to_transaction(asset_id) {
+        // Check if there are existing IRPF opening positions for this ticker
+        let existing_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM transactions WHERE asset_id = ?1 AND source = 'IRPF_PDF'",
+            rusqlite::params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        // Delete existing IRPF opening positions for this ticker
+        if existing_count > 0 {
+            conn.execute(
+                "DELETE FROM transactions WHERE asset_id = ?1 AND source = 'IRPF_PDF'",
+                rusqlite::params![asset_id],
+            )?;
+            replaced += 1;
+            println!("  {} Replaced {} existing IRPF position(s) for {}",
+                "↻".yellow(), existing_count, position.ticker.cyan());
+        }
+
+        // Convert to opening transaction
+        let transaction = match position.to_opening_transaction(asset_id) {
             Ok(tx) => tx,
             Err(e) => {
-                warn!("Failed to convert entry to transaction: {}", e);
-                errors += 1;
+                eprintln!("{} Error converting position for {}: {}",
+                    "✗".red(), position.ticker, e);
                 continue;
             }
         };
 
-        // Check for duplicates
-        if db::transaction_exists(
-            &conn,
-            asset_id,
-            &transaction.trade_date,
-            &transaction.transaction_type,
-            &transaction.quantity,
-        )? {
-            skipped_trades += 1;
-            continue;
-        }
-
-        // Insert transaction
+        // Insert opening transaction
         match db::insert_transaction(&conn, &transaction) {
-            Ok(_) => imported_trades += 1,
-            Err(e) => {
-                eprintln!("Error inserting transaction: {}", e);
-                errors += 1;
-            }
-        }
-    }
-
-    // Import corporate actions
-    let mut imported_actions = 0;
-    let mut skipped_actions = 0;
-
-    println!("{} Importing corporate actions...", "⏳".cyan().bold());
-
-    for entry in corporate_actions {
-        if entry.ticker.is_none() {
-            warn!("Skipping corporate action with no ticker: {:?}", entry.product);
-            skipped_actions += 1;
-            continue;
-        }
-
-        let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = db::AssetType::detect_from_ticker(ticker)
-            .unwrap_or(db::AssetType::Stock);
-
-        // Upsert asset
-        let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("Error upserting asset {}: {}", ticker, e);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Convert to corporate action
-        let action = match entry.to_corporate_action(asset_id) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!("Failed to convert entry to corporate action: {}", e);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Insert corporate action (no duplicate check for now - user can manage manually)
-        match db::insert_corporate_action(&conn, &action) {
             Ok(_) => {
-                imported_actions += 1;
-                println!("  {} Added {} for {} on {}",
+                println!("  {} Added opening position: {} {} @ R$ {:.2}",
                     "✓".green(),
-                    action.action_type.as_str().yellow(),
-                    ticker.cyan(),
-                    action.event_date
+                    position.quantity,
+                    position.ticker.cyan(),
+                    position.average_cost
                 );
+                imported += 1;
             }
             Err(e) => {
-                eprintln!("Error inserting corporate action: {}", e);
-                errors += 1;
+                eprintln!("{} Error inserting transaction for {}: {}",
+                    "✗".red(), position.ticker, e);
             }
         }
     }
 
     println!("\n{} Import complete!", "✓".green().bold());
-    println!("  {} Trades:", "💰".cyan());
-    println!("    Imported: {}", imported_trades.to_string().green());
-    if skipped_trades > 0 {
-        println!("    Skipped: {}", skipped_trades.to_string().yellow());
+    println!("  Imported: {}", imported.to_string().green());
+    if replaced > 0 {
+        println!("  Replaced: {} (previous IRPF positions)", replaced.to_string().yellow());
     }
-    println!("  {} Corporate actions:", "🏢".cyan());
-    println!("    Imported: {}", imported_actions.to_string().green());
-    if skipped_actions > 0 {
-        println!("    Skipped: {}", skipped_actions.to_string().yellow());
-    }
-    if errors > 0 {
-        println!("  {} Errors: {}", "❌".red(), errors.to_string().red());
-    }
-    println!("\n{} Income events not yet implemented - coming soon!", "ℹ".blue().bold());
+    println!("\n{} These opening positions will be used for cost basis calculations", "ℹ".blue().bold());
+    println!("  Run 'interest tax calculate <month>' to see tax calculations with these cost bases\n");
 
     Ok(())
 }
@@ -845,6 +1094,7 @@ async fn handle_action_add(
             db::CorporateActionType::Split => format!("each share becomes {}", ratio_to as f64 / ratio_from as f64),
             db::CorporateActionType::ReverseSplit => format!("{} shares become 1", ratio_from as f64 / ratio_to as f64),
             db::CorporateActionType::Bonus => format!("{}% bonus", ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0),
+            db::CorporateActionType::CapitalReturn => format!("R$ {:.2} per share", ratio_from as f64 / 100.0),
         }
     );
     println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
@@ -972,6 +1222,7 @@ async fn handle_action_scrape(
                 db::CorporateActionType::Split => "📈",
                 db::CorporateActionType::ReverseSplit => "📉",
                 db::CorporateActionType::Bonus => "🎁",
+                db::CorporateActionType::CapitalReturn => "💰",
             },
             action.action_type.as_str().cyan(),
             action.ratio_from,
@@ -1284,6 +1535,70 @@ async fn handle_action_edit(
     Ok(())
 }
 
+fn infer_split_ratio_from_credit(
+    conn: &rusqlite::Connection,
+    asset_id: i64,
+    entry: &importers::MovimentacaoEntry,
+) -> Result<Option<(i32, i32)>> {
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+
+    if entry.movement_type != "Desdobro" {
+        return Ok(None);
+    }
+
+    let credit_qty = match entry.quantity {
+        Some(qty) if qty > Decimal::ZERO => qty,
+        _ => return Ok(None),
+    };
+
+    let old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
+    if old_qty <= Decimal::ZERO {
+        warn!(
+            "Cannot infer split ratio for {} on {}: position before date is {}",
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date,
+            old_qty
+        );
+        return Ok(None);
+    }
+
+    // Movimentacao "Credito" entries represent additional shares credited.
+    let new_qty = old_qty + credit_qty;
+    if new_qty <= old_qty {
+        warn!(
+            "Cannot infer split ratio for {} on {}: credited qty {} does not increase position {}",
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date,
+            credit_qty,
+            old_qty
+        );
+        return Ok(None);
+    }
+
+    let ratio = new_qty / old_qty;
+    let ratio_i32 = ratio.to_i32().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Split ratio {} is not an integer for {} on {}",
+            ratio,
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date
+        )
+    })?;
+
+    if Decimal::from(ratio_i32) != ratio || ratio_i32 <= 1 {
+        warn!(
+            "Cannot infer split ratio for {} on {}: computed ratio {}",
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date,
+            ratio
+        );
+        return Ok(None);
+    }
+
+    Ok(Some((1, ratio_i32)))
+}
+
 /// Handle portfolio show command
 async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
     use colored::Colorize;
@@ -1465,9 +1780,9 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
 
     println!("\n{} Swing Trade Tax Calculation - {}/{}\n", "💰".cyan().bold(), month, year);
 
-    // Display results by asset type
+    // Display results by tax category
     for calc in &calculations {
-        println!("{} {}", "Asset Type:".bold(), calc.asset_type.as_str().to_uppercase());
+        println!("{} {}", "Tax Category:".bold(), calc.category.display_name());
         println!("  Total Sales:      {}", format!("R$ {:.2}", calc.total_sales).cyan());
         println!("  Total Cost Basis: {}", format!("R$ {:.2}", calc.total_cost_basis).cyan());
         println!("  Gross Profit:     {}", format!("R$ {:.2}", calc.total_profit).green());
@@ -1480,6 +1795,16 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
         };
         println!("  Net P&L:          {}", net_str);
 
+        // Show loss offset if applied
+        if calc.loss_offset_applied > rust_decimal::Decimal::ZERO {
+            println!("  Loss Offset:      {} (from previous months)",
+                format!("R$ {:.2}", calc.loss_offset_applied).cyan()
+            );
+            println!("  After Loss Offset: {}",
+                format!("R$ {:.2}", calc.profit_after_loss_offset).green()
+            );
+        }
+
         if calc.exemption_applied > rust_decimal::Decimal::ZERO {
             println!("  Exemption:        {} (sales under R$20,000)",
                 format!("R$ {:.2}", calc.exemption_applied).yellow().bold()
@@ -1488,12 +1813,13 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
 
         if calc.taxable_amount > rust_decimal::Decimal::ZERO {
             println!("  Taxable Amount:   {}", format!("R$ {:.2}", calc.taxable_amount).yellow());
-            println!("  Tax Rate:         {}", "15%".yellow());
+            let tax_rate_pct = calc.tax_rate * rust_decimal::Decimal::from(100);
+            println!("  Tax Rate:         {}", format!("{:.0}%", tax_rate_pct).yellow());
             println!("  {} {}",
                 "Tax Due:".bold(),
                 format!("R$ {:.2}", calc.tax_due).red().bold()
             );
-        } else if calc.net_profit < rust_decimal::Decimal::ZERO {
+        } else if calc.profit_after_loss_offset < rust_decimal::Decimal::ZERO {
             println!("  {} Loss to carry forward",
                 format!("R$ {:.2}", calc.net_profit.abs()).yellow().bold()
             );
@@ -1516,11 +1842,29 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
             year,
             format!("R$ {:.2}", total_tax).red().bold()
         );
-        println!("{} Payment due by last business day of {}/{}\n",
-            "⏰".yellow(),
-            if month == 12 { 1 } else { month + 1 },
-            if month == 12 { year + 1 } else { year }
-        );
+
+        // Generate DARF payments
+        let darf_payments = tax::generate_darf_payments(calculations, year, month)?;
+
+        if !darf_payments.is_empty() {
+            println!("{} DARF Payments:\n", "💳".cyan().bold());
+
+            for payment in &darf_payments {
+                println!("  {} Code {}: {}",
+                    "DARF".yellow().bold(),
+                    payment.darf_code,
+                    payment.description
+                );
+                println!("    Amount:   {}", format!("R$ {:.2}", payment.tax_due).red());
+                println!("    Due Date: {}", payment.due_date.format("%d/%m/%Y").to_string().yellow());
+                println!();
+            }
+
+            println!("{} Payment due by {}\n",
+                "⏰".yellow(),
+                darf_payments[0].due_date.format("%d/%m/%Y")
+            );
+        }
     }
 
     Ok(())
@@ -1569,9 +1913,9 @@ async fn handle_tax_report(year: i32) -> Result<()> {
     // Losses to carry forward
     if !report.losses_to_carry_forward.is_empty() {
         println!("{} Losses to Carry Forward:", "📋".yellow().bold());
-        for (asset_type, loss) in &report.losses_to_carry_forward {
+        for (category, loss) in &report.losses_to_carry_forward {
             println!("  {}: {}",
-                asset_type.as_str().to_uppercase(),
+                category.display_name(),
                 format!("R$ {:.2}", loss).yellow()
             );
         }

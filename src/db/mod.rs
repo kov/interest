@@ -114,6 +114,41 @@ pub fn insert_transaction(conn: &Connection, tx: &Transaction) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// Get position quantity for an asset before a given date
+pub fn get_asset_position_before_date(
+    conn: &Connection,
+    asset_id: i64,
+    before_date: chrono::NaiveDate,
+) -> Result<Decimal> {
+    let mut stmt = conn.prepare(
+        "SELECT transaction_type, quantity
+         FROM transactions
+         WHERE asset_id = ?1 AND trade_date < ?2
+         ORDER BY trade_date ASC, id ASC",
+    )?;
+
+    let mut rows = stmt.query(params![asset_id, before_date])?;
+    let mut position = Decimal::ZERO;
+
+    while let Some(row) = rows.next()? {
+        let tx_type: String = row.get(0)?;
+        let quantity = get_decimal_value(row, 1)
+            .context("Failed to parse transaction quantity")?;
+        match TransactionType::from_str(&tx_type) {
+            Some(TransactionType::Buy) => position += quantity,
+            Some(TransactionType::Sell) => position -= quantity,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Unknown transaction type '{}' while computing position",
+                    tx_type
+                ));
+            }
+        }
+    }
+
+    Ok(position)
+}
+
 /// Check if a transaction already exists (duplicate detection)
 pub fn transaction_exists(
     conn: &Connection,
@@ -139,6 +174,65 @@ pub fn transaction_exists(
     )?;
 
     Ok(count > 0)
+}
+
+/// Get last imported date for a source and entry type
+pub fn get_last_import_date(
+    conn: &Connection,
+    source: &str,
+    entry_type: &str,
+) -> Result<Option<chrono::NaiveDate>> {
+    let mut stmt = conn.prepare(
+        "SELECT last_date FROM import_state
+         WHERE source = ?1 AND entry_type = ?2",
+    )?;
+
+    let date: Option<chrono::NaiveDate> = stmt
+        .query_row(params![source, entry_type], |row| row.get(0))
+        .optional()?;
+
+    if date.is_some() {
+        return Ok(date);
+    }
+
+    // Fallback: derive last date from existing data if import_state is empty.
+    match entry_type {
+        "trades" => {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(MAX(trade_date), '') FROM transactions WHERE source = ?1",
+            )?;
+            let max_date_str: String = stmt.query_row(params![source], |row| row.get(0))?;
+            Ok((!max_date_str.is_empty())
+                .then(|| chrono::NaiveDate::parse_from_str(&max_date_str, "%Y-%m-%d").ok())
+                .flatten())
+        }
+        "corporate_actions" => {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(MAX(event_date), '') FROM corporate_actions WHERE source = ?1",
+            )?;
+            let max_date_str: String = stmt.query_row(params![source], |row| row.get(0))?;
+            Ok((!max_date_str.is_empty())
+                .then(|| chrono::NaiveDate::parse_from_str(&max_date_str, "%Y-%m-%d").ok())
+                .flatten())
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Update last imported date for a source and entry type
+pub fn set_last_import_date(
+    conn: &Connection,
+    source: &str,
+    entry_type: &str,
+    last_date: chrono::NaiveDate,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO import_state (source, entry_type, last_date)
+         VALUES (?1, ?2, ?3)",
+        params![source, entry_type, last_date],
+    )?;
+
+    Ok(())
 }
 
 /// Insert price history

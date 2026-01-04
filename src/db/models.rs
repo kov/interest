@@ -119,6 +119,7 @@ pub enum CorporateActionType {
     Split,         // Stock split (desdobramento)
     ReverseSplit,  // Reverse split (grupamento)
     Bonus,         // Bonus shares (bonificação)
+    CapitalReturn, // Capital return / Amortization (amortização)
 }
 
 impl CorporateActionType {
@@ -127,6 +128,7 @@ impl CorporateActionType {
             CorporateActionType::Split => "SPLIT",
             CorporateActionType::ReverseSplit => "REVERSE_SPLIT",
             CorporateActionType::Bonus => "BONUS",
+            CorporateActionType::CapitalReturn => "CAPITAL_RETURN",
         }
     }
 
@@ -136,6 +138,7 @@ impl CorporateActionType {
             "SPLIT" | "DESDOBRAMENTO" => Some(CorporateActionType::Split),
             "REVERSE_SPLIT" | "GRUPAMENTO" => Some(CorporateActionType::ReverseSplit),
             "BONUS" | "BONIFICAÇÃO" | "BONIFICACAO" => Some(CorporateActionType::Bonus),
+            "CAPITAL_RETURN" | "AMORTIZAÇÃO" | "AMORTIZACAO" => Some(CorporateActionType::CapitalReturn),
             _ => None,
         }
     }
@@ -246,4 +249,117 @@ pub struct TaxEvent {
     pub tax_due: Decimal,
     pub is_exempt: bool,
     pub created_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_asset_type_conversions() {
+        // Test to_str and from_str roundtrip
+        assert_eq!(AssetType::Stock.as_str(), "STOCK");
+        assert_eq!(AssetType::Fii.as_str(), "FII");
+        assert_eq!(AssetType::Fiagro.as_str(), "FIAGRO");
+        assert_eq!(AssetType::FiInfra.as_str(), "FI_INFRA");
+        assert_eq!(AssetType::Bond.as_str(), "BOND");
+        assert_eq!(AssetType::GovBond.as_str(), "GOV_BOND");
+
+        assert_eq!(AssetType::from_str("STOCK"), Some(AssetType::Stock));
+        assert_eq!(AssetType::from_str("stock"), Some(AssetType::Stock));
+        assert_eq!(AssetType::from_str("FII"), Some(AssetType::Fii));
+        assert_eq!(AssetType::from_str("FIAGRO"), Some(AssetType::Fiagro));
+        assert_eq!(AssetType::from_str("FI_INFRA"), Some(AssetType::FiInfra));
+        assert_eq!(AssetType::from_str("BOND"), Some(AssetType::Bond));
+        assert_eq!(AssetType::from_str("GOV_BOND"), Some(AssetType::GovBond));
+        assert_eq!(AssetType::from_str("INVALID"), None);
+    }
+
+    #[test]
+    fn test_asset_type_detect_from_ticker() {
+        // Stock patterns
+        assert_eq!(AssetType::detect_from_ticker("PETR4"), Some(AssetType::Stock));
+        assert_eq!(AssetType::detect_from_ticker("VALE3"), Some(AssetType::Stock));
+        assert_eq!(AssetType::detect_from_ticker("ITSA4"), Some(AssetType::Stock));
+        assert_eq!(AssetType::detect_from_ticker("BBDC3"), Some(AssetType::Stock));
+        assert_eq!(AssetType::detect_from_ticker("MGLU3"), Some(AssetType::Stock));
+
+        // FII patterns (ending in 11)
+        assert_eq!(AssetType::detect_from_ticker("MXRF11"), Some(AssetType::Fii));
+        assert_eq!(AssetType::detect_from_ticker("HGLG11"), Some(AssetType::Fii));
+
+        // FIAGRO patterns
+        assert_eq!(AssetType::detect_from_ticker("TEST32"), Some(AssetType::Fiagro));
+        assert_eq!(AssetType::detect_from_ticker("TEST33"), Some(AssetType::Fiagro));
+        assert_eq!(AssetType::detect_from_ticker("TEST34"), Some(AssetType::Fiagro));
+
+        // Unknown patterns
+        assert_eq!(AssetType::detect_from_ticker("SHORT"), None);
+        assert_eq!(AssetType::detect_from_ticker("TEST99"), None);
+    }
+
+    #[test]
+    fn test_transaction_type_conversions() {
+        assert_eq!(TransactionType::Buy.as_str(), "BUY");
+        assert_eq!(TransactionType::Sell.as_str(), "SELL");
+
+        // Test various input formats
+        assert_eq!(TransactionType::from_str("BUY"), Some(TransactionType::Buy));
+        assert_eq!(TransactionType::from_str("buy"), Some(TransactionType::Buy));
+        assert_eq!(TransactionType::from_str("COMPRA"), Some(TransactionType::Buy));
+        assert_eq!(TransactionType::from_str("C"), Some(TransactionType::Buy));
+
+        assert_eq!(TransactionType::from_str("SELL"), Some(TransactionType::Sell));
+        assert_eq!(TransactionType::from_str("sell"), Some(TransactionType::Sell));
+        assert_eq!(TransactionType::from_str("VENDA"), Some(TransactionType::Sell));
+        assert_eq!(TransactionType::from_str("V"), Some(TransactionType::Sell));
+
+        assert_eq!(TransactionType::from_str("INVALID"), None);
+    }
+
+    #[test]
+    fn test_corporate_action_type_conversions() {
+        assert_eq!(CorporateActionType::Split.as_str(), "SPLIT");
+        assert_eq!(CorporateActionType::ReverseSplit.as_str(), "REVERSE_SPLIT");
+        assert_eq!(CorporateActionType::Bonus.as_str(), "BONUS");
+        assert_eq!(CorporateActionType::CapitalReturn.as_str(), "CAPITAL_RETURN");
+
+        // Test English inputs
+        assert_eq!(CorporateActionType::from_str("SPLIT"), Some(CorporateActionType::Split));
+        assert_eq!(CorporateActionType::from_str("split"), Some(CorporateActionType::Split));
+        assert_eq!(CorporateActionType::from_str("REVERSE_SPLIT"), Some(CorporateActionType::ReverseSplit));
+        assert_eq!(CorporateActionType::from_str("BONUS"), Some(CorporateActionType::Bonus));
+        assert_eq!(CorporateActionType::from_str("CAPITAL_RETURN"), Some(CorporateActionType::CapitalReturn));
+
+        // Test Portuguese inputs
+        assert_eq!(CorporateActionType::from_str("DESDOBRAMENTO"), Some(CorporateActionType::Split));
+        assert_eq!(CorporateActionType::from_str("GRUPAMENTO"), Some(CorporateActionType::ReverseSplit));
+        assert_eq!(CorporateActionType::from_str("BONIFICAÇÃO"), Some(CorporateActionType::Bonus));
+        assert_eq!(CorporateActionType::from_str("BONIFICACAO"), Some(CorporateActionType::Bonus));
+        assert_eq!(CorporateActionType::from_str("AMORTIZAÇÃO"), Some(CorporateActionType::CapitalReturn));
+        assert_eq!(CorporateActionType::from_str("AMORTIZACAO"), Some(CorporateActionType::CapitalReturn));
+
+        assert_eq!(CorporateActionType::from_str("INVALID"), None);
+    }
+
+    #[test]
+    fn test_income_event_type_conversions() {
+        assert_eq!(IncomeEventType::Dividend.as_str(), "DIVIDEND");
+        assert_eq!(IncomeEventType::Amortization.as_str(), "AMORTIZATION");
+        assert_eq!(IncomeEventType::Jcp.as_str(), "JCP");
+
+        // Test English inputs
+        assert_eq!(IncomeEventType::from_str("DIVIDEND"), Some(IncomeEventType::Dividend));
+        assert_eq!(IncomeEventType::from_str("dividend"), Some(IncomeEventType::Dividend));
+        assert_eq!(IncomeEventType::from_str("AMORTIZATION"), Some(IncomeEventType::Amortization));
+        assert_eq!(IncomeEventType::from_str("JCP"), Some(IncomeEventType::Jcp));
+
+        // Test Portuguese inputs
+        assert_eq!(IncomeEventType::from_str("DIVIDENDO"), Some(IncomeEventType::Dividend));
+        assert_eq!(IncomeEventType::from_str("RENDIMENTO"), Some(IncomeEventType::Dividend));
+        assert_eq!(IncomeEventType::from_str("AMORTIZAÇÃO"), Some(IncomeEventType::Amortization));
+        assert_eq!(IncomeEventType::from_str("AMORTIZACAO"), Some(IncomeEventType::Amortization));
+
+        assert_eq!(IncomeEventType::from_str("INVALID"), None);
+    }
 }

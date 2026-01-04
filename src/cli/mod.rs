@@ -11,7 +11,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Import transactions from B3/CEI exports (Excel or CSV)
+    /// Import transactions from B3/CEI or Movimentação files (auto-detects format)
     Import {
         /// Path to the Excel or CSV file
         file: String,
@@ -19,10 +19,19 @@ pub enum Commands {
         /// Preview only, don't save to database
         #[arg(short, long)]
         dry_run: bool,
+    },
 
-        /// Import from Movimentação file (includes corporate actions, dividends, etc.)
+    /// Import opening positions from IRPF tax declaration PDF
+    ImportIrpf {
+        /// Path to the IRPF PDF file
+        file: String,
+
+        /// IRPF year (e.g., 2018 for declaration filed in 2019 about 2018)
+        year: i32,
+
+        /// Preview only, don't save to database
         #[arg(short, long)]
-        movimentacao: bool,
+        dry_run: bool,
     },
 
     /// Portfolio management and viewing

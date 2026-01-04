@@ -281,7 +281,6 @@ pub fn calculate_allocation(report: &PortfolioReport) -> HashMap<AssetType, (Dec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     #[test]
     fn test_fifo_position_buy_and_sell() {
@@ -303,11 +302,12 @@ mod tests {
         assert!(avg > Decimal::from(11) && avg < Decimal::from(12));
 
         // Sell 75 units
-        let cost_basis = position.remove_sell(Decimal::from(75)).unwrap();
+        let cost_basis = position.remove_sell(Decimal::from(75), "TEST").unwrap();
         assert_eq!(position.quantity, Decimal::from(75));
 
         // Cost basis for sold units should be 75 * avg_cost
-        assert!(cost_basis > Decimal::from(875) && cost_basis < Decimal::from(876));
+        // With 1750/150 = 11.666... * 75 = 875
+        assert_eq!(cost_basis, Decimal::from(875));
     }
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
         position.add_buy(Decimal::from(100), Decimal::from(1000));
 
         // Try to sell more than we have
-        let result = position.remove_sell(Decimal::from(150));
+        let result = position.remove_sell(Decimal::from(150), "TEST");
         assert!(result.is_err());
     }
 }

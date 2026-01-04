@@ -7,13 +7,36 @@
 //!
 //! This module handles matching liquidations to purchases and tracking the cost basis transfer.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rusqlite::Connection;
+use std::str::FromStr;
 use tracing::{info, warn};
 
 use crate::db::models::{Transaction, TransactionType};
+
+/// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
+fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+    use rusqlite::types::ValueRef;
+
+    match row.get_ref(idx)? {
+        ValueRef::Text(bytes) => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            Decimal::from_str(s)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
+        ValueRef::Integer(i) => Ok(Decimal::from(i)),
+        ValueRef::Real(f) => Decimal::try_from(f)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "decimal".to_string(),
+            rusqlite::types::Type::Null,
+        )),
+    }
+}
 
 /// Check if a ticker is a term contract (ends with 'T')
 pub fn is_term_contract(ticker: &str) -> bool {
@@ -77,39 +100,24 @@ pub fn match_liquidation_to_purchases(
          ORDER BY trade_date ASC",
     )?;
 
-    let liquidation_date_str = liquidation_date.format("%Y-%m-%d").to_string();
-
     let transactions = stmt
-        .query_map(rusqlite::params![term_asset_id, &liquidation_date_str], |row| {
+        .query_map(rusqlite::params![term_asset_id, liquidation_date], |row| {
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
                 transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
                     .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
-                trade_date: NaiveDate::parse_from_str(&row.get::<_, String>(3)?, "%Y-%m-%d")
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                settlement_date: row.get::<_, Option<String>>(4)?
-                    .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
-                quantity: row.get::<_, String>(5)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                price_per_unit: row.get::<_, String>(6)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                total_cost: row.get::<_, String>(7)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                fees: row.get::<_, String>(8)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                trade_date: row.get(3)?,
+                settlement_date: row.get(4)?,
+                quantity: get_decimal_value(row, 5)?,
+                price_per_unit: get_decimal_value(row, 6)?,
+                total_cost: get_decimal_value(row, 7)?,
+                fees: get_decimal_value(row, 8)?,
                 is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get::<_, Option<String>>(10)?
-                    .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
+                quota_issuance_date: row.get(10)?,
                 notes: row.get(11)?,
                 source: row.get(12)?,
-                created_at: row.get::<_, String>(13)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                created_at: row.get(13)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -164,14 +172,9 @@ pub fn process_term_liquidations(conn: &Connection) -> Result<usize> {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
-                NaiveDate::parse_from_str(&row.get::<_, String>(2)?, "%Y-%m-%d")
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                row.get::<_, String>(3)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                row.get::<_, String>(4)?
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                row.get(2)?,
+                get_decimal_value(row, 3)?,
+                get_decimal_value(row, 4)?,
                 row.get(5)?,
             ))
         })?

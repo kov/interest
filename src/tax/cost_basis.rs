@@ -165,7 +165,7 @@ mod tests {
             asset_id: 1,
             transaction_type: TransactionType::Buy,
             trade_date: date,
-            settlement_date: date,
+            settlement_date: Some(date),
             quantity: qty_dec,
             price_per_unit: price_dec,
             total_cost: qty_dec * price_dec,
@@ -186,7 +186,7 @@ mod tests {
             asset_id: 1,
             transaction_type: TransactionType::Sell,
             trade_date: date,
-            settlement_date: date,
+            settlement_date: Some(date),
             quantity: qty_dec,
             price_per_unit: price_dec,
             total_cost: qty_dec * price_dec,
@@ -286,5 +286,179 @@ mod tests {
         let result = matcher.match_sale(&sell1);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fifo_exact_lot_match() {
+        let mut matcher = FifoMatcher::new();
+
+        // Buy 100 @ R$10
+        let buy1 = make_buy(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            100,
+            10
+        );
+        matcher.add_purchase(&buy1);
+
+        // Sell exactly 100 (entire lot)
+        let sell1 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            100,
+            15
+        );
+        let result = matcher.match_sale(&sell1).unwrap();
+
+        assert_eq!(result.quantity, Decimal::from(100));
+        assert_eq!(result.cost_basis, Decimal::from(1000));
+        assert_eq!(result.sale_total, Decimal::from(1500));
+        assert_eq!(result.profit_loss, Decimal::from(500));
+        assert_eq!(matcher.remaining_quantity(), Decimal::ZERO);
+        assert_eq!(result.matched_lots.len(), 1);
+    }
+
+    #[test]
+    fn test_fifo_with_fees() {
+        let mut matcher = FifoMatcher::new();
+
+        // Buy 100 @ R$10
+        let buy1 = make_buy(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            100,
+            10
+        );
+        matcher.add_purchase(&buy1);
+
+        // Sell 50 @ R$15 with R$10 fees
+        let mut sell1 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            50,
+            15
+        );
+        sell1.fees = Decimal::from(10);
+
+        let result = matcher.match_sale(&sell1).unwrap();
+
+        assert_eq!(result.cost_basis, Decimal::from(500)); // 50 * 10
+        assert_eq!(result.sale_total, Decimal::from(750)); // 50 * 15
+        // Profit = 750 - 500 - 10 fees = 240
+        assert_eq!(result.profit_loss, Decimal::from(240));
+    }
+
+    #[test]
+    fn test_fifo_multiple_sequential_sales() {
+        let mut matcher = FifoMatcher::new();
+
+        // Buy 100 @ R$10
+        let buy1 = make_buy(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            100,
+            10
+        );
+        matcher.add_purchase(&buy1);
+
+        // First sale: 30 shares
+        let sell1 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            30,
+            15
+        );
+        let result1 = matcher.match_sale(&sell1).unwrap();
+        assert_eq!(result1.cost_basis, Decimal::from(300));
+        assert_eq!(matcher.remaining_quantity(), Decimal::from(70));
+
+        // Second sale: 40 shares
+        let sell2 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            40,
+            20
+        );
+        let result2 = matcher.match_sale(&sell2).unwrap();
+        assert_eq!(result2.cost_basis, Decimal::from(400));
+        assert_eq!(matcher.remaining_quantity(), Decimal::from(30));
+
+        // Third sale: remaining 30 shares
+        let sell3 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
+            30,
+            25
+        );
+        let result3 = matcher.match_sale(&sell3).unwrap();
+        assert_eq!(result3.cost_basis, Decimal::from(300));
+        assert_eq!(matcher.remaining_quantity(), Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_fifo_fractional_shares() {
+        use rust_decimal_macros::dec;
+
+        let mut matcher = FifoMatcher::new();
+
+        // Buy 100.5 @ R$10.50
+        let mut buy1 = make_buy(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            100,
+            10
+        );
+        buy1.quantity = dec!(100.5);
+        buy1.price_per_unit = dec!(10.50);
+        buy1.total_cost = dec!(100.5) * dec!(10.50); // 1055.25
+
+        matcher.add_purchase(&buy1);
+
+        // Sell 50.25 shares
+        let mut sell1 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            50,
+            15
+        );
+        sell1.quantity = dec!(50.25);
+        sell1.price_per_unit = dec!(15.00);
+        sell1.total_cost = dec!(50.25) * dec!(15.00); // 753.75
+
+        let result = matcher.match_sale(&sell1).unwrap();
+
+        // Cost basis = 50.25 * 10.50 = 527.625
+        assert_eq!(result.cost_basis, dec!(527.625));
+        assert_eq!(result.sale_total, dec!(753.75));
+        assert_eq!(matcher.remaining_quantity(), dec!(50.25));
+    }
+
+    #[test]
+    fn test_fifo_three_lots_partial_consumption() {
+        let mut matcher = FifoMatcher::new();
+
+        // Buy 100 @ R$10
+        matcher.add_purchase(&make_buy(
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            100,
+            10
+        ));
+
+        // Buy 50 @ R$12
+        matcher.add_purchase(&make_buy(
+            NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+            50,
+            12
+        ));
+
+        // Buy 75 @ R$15
+        matcher.add_purchase(&make_buy(
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+            75,
+            15
+        ));
+
+        // Sell 130 shares (consumes first lot entirely, second lot partially)
+        let sell1 = make_sell(
+            NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+            130,
+            20
+        );
+        let result = matcher.match_sale(&sell1).unwrap();
+
+        // Cost basis: 100*10 + 30*12 = 1000 + 360 = 1360
+        assert_eq!(result.cost_basis, Decimal::from(1360));
+        assert_eq!(result.matched_lots.len(), 2);
+        assert_eq!(matcher.remaining_quantity(), Decimal::from(95)); // 225 - 130 = 95
     }
 }

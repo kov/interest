@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use tracing::info;
 
-use crate::db::{Asset, CorporateAction, Transaction, TransactionType};
+use crate::db::{Asset, CorporateAction, CorporateActionType, Transaction, TransactionType};
 
 /// Get unapplied corporate actions for an asset (or all assets if None)
 pub fn get_unapplied_actions(
@@ -148,33 +148,57 @@ pub fn apply_corporate_action(
 
         let old_quantity = tx.quantity;
         let old_price = tx.price_per_unit;
-        let new_quantity = old_quantity * ratio_to / ratio_from;
-        let new_price = old_price * ratio_from / ratio_to;
+        let old_total = tx.total_cost;
 
-        // Verify total cost remains unchanged (within rounding tolerance)
-        let old_total = old_quantity * old_price;
-        let new_total = new_quantity * new_price;
-        let diff = (new_total - old_total).abs();
-        let tolerance = Decimal::from_str("0.01").unwrap(); // 1 cent tolerance
+        let (new_quantity, new_price, new_total) = match action.action_type {
+            CorporateActionType::CapitalReturn => {
+                // Capital return: reduce cost basis by amount_per_share * quantity
+                // ratio_from stores the amount in cents (e.g., 100 for R$1.00)
+                let amount_per_share = ratio_from / Decimal::from(100); // Convert cents to reais
+                let reduction = amount_per_share * old_quantity;
+                let new_total_cost = (old_total - reduction).max(Decimal::ZERO); // Don't go negative
+                let new_price_per_unit = if old_quantity > Decimal::ZERO {
+                    new_total_cost / old_quantity
+                } else {
+                    Decimal::ZERO
+                };
+                (old_quantity, new_price_per_unit, new_total_cost)
+            }
+            _ => {
+                // Split/Reverse split/Bonus: adjust quantity and price, keep total unchanged
+                let new_qty = old_quantity * ratio_to / ratio_from;
+                let new_pr = old_price * ratio_from / ratio_to;
+                (new_qty, new_pr, old_total)
+            }
+        };
 
-        if diff > tolerance {
-            tracing::warn!(
-                "Total cost changed for transaction {}: {} -> {} (diff: {})",
-                tx_id,
-                old_total,
-                new_total,
-                diff
-            );
+        // Verify adjustments (for splits, total cost should remain unchanged)
+        if action.action_type != CorporateActionType::CapitalReturn {
+            let expected_total = old_quantity * old_price;
+            let actual_total = new_quantity * new_price;
+            let diff = (actual_total - expected_total).abs();
+            let tolerance = Decimal::from_str("0.01").unwrap(); // 1 cent tolerance
+
+            if diff > tolerance {
+                tracing::warn!(
+                    "Total cost changed for transaction {}: {} -> {} (diff: {})",
+                    tx_id,
+                    expected_total,
+                    actual_total,
+                    diff
+                );
+            }
         }
 
         // Update transaction in database
         conn.execute(
             "UPDATE transactions
-             SET quantity = ?1, price_per_unit = ?2
-             WHERE id = ?3",
+             SET quantity = ?1, price_per_unit = ?2, total_cost = ?3
+             WHERE id = ?4",
             rusqlite::params![
                 new_quantity.to_string(),
                 new_price.to_string(),
+                new_total.to_string(),
                 tx_id
             ],
         )?;
@@ -410,5 +434,71 @@ mod tests {
         assert_eq!(new_qty, Decimal::from(10));
         assert_eq!(new_price, Decimal::from(500));
         assert_eq!(old_qty * old_price, new_qty * new_price); // Total cost unchanged
+    }
+
+    #[test]
+    fn test_capital_return_calculation() {
+        // Capital return of R$1.00 per share
+        let old_qty = Decimal::from(100);
+        let old_price = Decimal::from(10);
+        let old_total = old_qty * old_price; // 1000
+        let ratio_from = Decimal::from(100); // 1.00 in cents
+        let _ratio_to = Decimal::from(100); // Ignored for capital return
+
+        let amount_per_share = ratio_from / Decimal::from(100);
+        let reduction = amount_per_share * old_qty; // 1.00 * 100 = 100
+        let new_total = (old_total - reduction).max(Decimal::ZERO); // 1000 - 100 = 900
+        let new_price = new_total / old_qty; // 900 / 100 = 9
+
+        assert_eq!(new_total, Decimal::from(900));
+        assert_eq!(new_price, Decimal::from(9));
+        assert_eq!(old_qty, old_qty); // Quantity unchanged
+    }
+
+    #[test]
+    fn test_capital_return_exceeds_cost() {
+        // Capital return exceeds cost - should floor at zero
+        let old_qty = Decimal::from(100);
+        let old_price = Decimal::from(5);
+        let old_total = old_qty * old_price; // 500
+        let ratio_from = Decimal::from(1000); // 10.00 in cents
+
+        let amount_per_share = ratio_from / Decimal::from(100);
+        let reduction = amount_per_share * old_qty; // 10.00 * 100 = 1000
+        let new_total = (old_total - reduction).max(Decimal::ZERO); // Should be 0
+
+        assert_eq!(new_total, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_fractional_split() {
+        // 3:10 split (e.g., bonus shares)
+        let old_qty = Decimal::from(100);
+        let old_price = Decimal::from(30);
+        let ratio_from = Decimal::from(3);
+        let ratio_to = Decimal::from(10);
+
+        let new_qty = old_qty * ratio_to / ratio_from;
+        let new_price = old_price * ratio_from / ratio_to;
+
+        // 100 * 10 / 3 = 333.333...
+        assert!(new_qty > Decimal::from(333) && new_qty < Decimal::from(334));
+        // 30 * 3 / 10 = 9
+        assert_eq!(new_price, Decimal::from(9));
+    }
+
+    #[test]
+    fn test_zero_quantity_handling() {
+        // Edge case: zero quantity (shouldn't happen in practice)
+        let old_qty = Decimal::ZERO;
+        let old_price = Decimal::from(50);
+        let ratio_from = Decimal::from(1);
+        let ratio_to = Decimal::from(2);
+
+        let new_qty = old_qty * ratio_to / ratio_from;
+        let new_price = old_price * ratio_from / ratio_to;
+
+        assert_eq!(new_qty, Decimal::ZERO);
+        assert_eq!(new_price, Decimal::from(25));
     }
 }

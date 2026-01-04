@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE INDEX IF NOT EXISTS idx_positions_asset ON positions(asset_id);
 
+-- Import state (tracks last imported date per source/type)
+CREATE TABLE IF NOT EXISTS import_state (
+    source TEXT NOT NULL,
+    entry_type TEXT NOT NULL,
+    last_date DATE NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source, entry_type)
+);
+
 -- Tax events (monthly tracking for swing trade, day trade)
 CREATE TABLE IF NOT EXISTS tax_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,6 +158,21 @@ CREATE INDEX IF NOT EXISTS idx_income_events_asset ON income_events(asset_id);
 CREATE INDEX IF NOT EXISTS idx_income_events_date ON income_events(event_date);
 CREATE INDEX IF NOT EXISTS idx_income_events_type ON income_events(event_type);
 
+-- Loss carryforward tracking (prejuízos a compensar)
+CREATE TABLE IF NOT EXISTS loss_carryforward (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,              -- Month the loss occurred
+    tax_category TEXT NOT NULL,          -- 'STOCK_SWING', 'STOCK_DAY', 'FII_SWING', 'FII_DAY', 'FIAGRO_SWING', 'FIAGRO_DAY'
+    loss_amount DECIMAL(15,4) NOT NULL,  -- Amount of loss to carry forward
+    remaining_amount DECIMAL(15,4) NOT NULL,  -- Amount not yet offset
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_loss_carryforward_category ON loss_carryforward(tax_category);
+CREATE INDEX IF NOT EXISTS idx_loss_carryforward_date ON loss_carryforward(year, month);
+
 -- Metadata table for schema version and app settings
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
@@ -157,5 +181,5 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 
 -- Insert initial schema version
-INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '2');
 INSERT OR IGNORE INTO metadata (key, value) VALUES ('db_created_at', datetime('now'));

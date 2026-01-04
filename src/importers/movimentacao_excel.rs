@@ -297,8 +297,7 @@ impl MovimentacaoEntry {
         let (action_type, ratio_from, ratio_to) = match self.movement_type.as_str() {
             "Desdobro" => {
                 // Stock split - need to extract ratio from quantity or notes
-                // For now, mark as 1:1 and require manual update
-                warn!("Desdobro found but ratio unknown, defaulting to 1:1");
+                // For now, mark as 1:1; import flow may infer from holdings
                 (CorporateActionType::Split, 1, 1)
             }
             "Bonificação em Ativos" => {
@@ -420,6 +419,7 @@ mod tests {
 
     #[test]
     fn test_extract_ticker() {
+        // Standard stock tickers
         assert_eq!(
             MovimentacaoEntry::extract_ticker("PETR4 - PETROBRAS"),
             Some("PETR4".to_string())
@@ -433,6 +433,74 @@ mod tests {
         assert_eq!(
             MovimentacaoEntry::extract_ticker("LOGG3 - LOG COMMERCIAL PROPERTIES"),
             Some("LOGG3".to_string())
+        );
+
+        // Term contracts (with T suffix) - need special format
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("COMMON STOCK - PETR4T - PETROBRAS"),
+            Some("PETR4T".to_string())
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("Termo de Ação VALE3 - VALE3T - VALE"),
+            Some("VALE3T".to_string())
+        );
+
+        // Various formats
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("ITSA4-ITAUSA"),
+            Some("ITSA4".to_string())
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("BBDC3  -  BRADESCO"),
+            Some("BBDC3".to_string())
+        );
+
+        // FII with different patterns
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("HGLG11 - CSHG LOGISTICA FII"),
+            Some("HGLG11".to_string())
+        );
+
+        // FIAGRO
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("TEST32 - TEST FIAGRO"),
+            Some("TEST32".to_string())
+        );
+
+        // No separator
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("MGLU3"),
+            Some("MGLU3".to_string())
+        );
+
+        // Ticker only (no description)
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("WEGE3 "),
+            Some("WEGE3".to_string())
+        );
+
+        // Multiple spaces around separator (but not leading spaces)
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("VALE3   -   VALE"),
+            Some("VALE3".to_string())
+        );
+
+        // Empty or invalid inputs
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker(""),
+            None
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker(" - NO TICKER"),
+            None
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("INVALID"),
+            None  // Doesn't end in a digit (required for standard tickers)
         );
     }
 }
