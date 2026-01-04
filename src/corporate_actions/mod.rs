@@ -141,6 +141,63 @@ pub fn apply_corporate_action(
     let ratio_from = Decimal::from(action.ratio_from);
     let ratio_to = Decimal::from(action.ratio_to);
 
+    if action.action_type == crate::db::CorporateActionType::Bonus {
+        let total_old_qty: Decimal = transactions.iter().map(|tx| tx.quantity).sum();
+        let new_total_qty = total_old_qty * ratio_to / ratio_from;
+        let bonus_qty = new_total_qty - total_old_qty;
+
+        if bonus_qty > Decimal::ZERO {
+            let bonus_tx = Transaction {
+                id: None,
+                asset_id: action.asset_id,
+                transaction_type: TransactionType::Buy,
+                trade_date: action.ex_date,
+                settlement_date: Some(action.ex_date),
+                quantity: bonus_qty,
+                price_per_unit: Decimal::ZERO,
+                total_cost: Decimal::ZERO,
+                fees: Decimal::ZERO,
+                is_day_trade: false,
+                quota_issuance_date: None,
+                notes: Some(format!(
+                    "Bonus shares from {} (ratio {}:{})",
+                    action.action_type.as_str(),
+                    action.ratio_from,
+                    action.ratio_to
+                )),
+                source: "CORPORATE_ACTION".to_string(),
+                created_at: chrono::Utc::now(),
+            };
+            crate::db::insert_transaction(conn, &bonus_tx)?;
+        } else {
+            info!(
+                "Bonus action {} for {} resulted in zero bonus quantity",
+                action.id.unwrap_or(0),
+                asset.ticker
+            );
+        }
+
+        for tx in &transactions {
+            let tx_id = tx.id.ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
+            conn.execute(
+                "INSERT INTO corporate_action_adjustments
+                 (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    action_id,
+                    tx_id,
+                    tx.quantity.to_string(),
+                    tx.quantity.to_string(),
+                    tx.price_per_unit.to_string(),
+                    tx.price_per_unit.to_string()
+                ],
+            )?;
+        }
+
+        mark_action_as_applied(conn, action_id)?;
+        return Ok(transactions.len());
+    }
+
     // Adjust each transaction
     let mut adjusted_count = 0;
     for tx in transactions {
@@ -319,25 +376,72 @@ pub fn apply_actions_to_transaction(
         let ratio_from = Decimal::from(action.ratio_from);
         let ratio_to = Decimal::from(action.ratio_to);
 
-        quantity = quantity * ratio_to / ratio_from;
-        price = price * ratio_from / ratio_to;
+        if action.action_type == crate::db::CorporateActionType::Bonus {
+            let new_quantity = quantity * ratio_to / ratio_from;
+            let bonus_qty = new_quantity - quantity;
 
-        // Record the adjustment
-        conn.execute(
-            "INSERT INTO corporate_action_adjustments
-             (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                action_id,
-                transaction_id,
-                old_quantity.to_string(),
-                quantity.to_string(),
-                old_price.to_string(),
-                price.to_string()
-            ],
-        )?;
+            if bonus_qty > Decimal::ZERO {
+                let bonus_tx = Transaction {
+                    id: None,
+                    asset_id,
+                    transaction_type: TransactionType::Buy,
+                    trade_date: action.ex_date,
+                    settlement_date: Some(action.ex_date),
+                    quantity: bonus_qty,
+                    price_per_unit: Decimal::ZERO,
+                    total_cost: Decimal::ZERO,
+                    fees: Decimal::ZERO,
+                    is_day_trade: false,
+                    quota_issuance_date: None,
+                    notes: Some(format!(
+                        "Bonus shares from {} (ratio {}:{})",
+                        action.action_type.as_str(),
+                        action.ratio_from,
+                        action.ratio_to
+                    )),
+                    source: "CORPORATE_ACTION".to_string(),
+                    created_at: chrono::Utc::now(),
+                };
+                let bonus_id = crate::db::insert_transaction(conn, &bonus_tx)?;
+                apply_actions_to_transaction(conn, bonus_id)?;
+            }
 
-        applied_count += 1;
+            conn.execute(
+                "INSERT INTO corporate_action_adjustments
+                 (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    action_id,
+                    transaction_id,
+                    old_quantity.to_string(),
+                    old_quantity.to_string(),
+                    old_price.to_string(),
+                    old_price.to_string()
+                ],
+            )?;
+
+            applied_count += 1;
+        } else {
+            quantity = quantity * ratio_to / ratio_from;
+            price = price * ratio_from / ratio_to;
+
+            // Record the adjustment
+            conn.execute(
+                "INSERT INTO corporate_action_adjustments
+                 (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    action_id,
+                    transaction_id,
+                    old_quantity.to_string(),
+                    quantity.to_string(),
+                    old_price.to_string(),
+                    price.to_string()
+                ],
+            )?;
+
+            applied_count += 1;
+        }
 
         info!(
             "Auto-applied {} (ratio {}:{}) to transaction {}",

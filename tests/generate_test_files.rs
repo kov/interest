@@ -127,6 +127,44 @@ fn generate_12_desdobro_inference() {
 
 #[test]
 #[ignore]
+fn generate_14_atualizacao_inference() {
+    /*
+    Test Atualização ratio inference from credited quantity.
+
+    Scenario:
+    - Buy 378 BRCR11 @ R$10.00 on 2020-09-10
+    - Atualização credit of 22 shares on 2020-09-14
+      - Expected ratio: 378:400 (bonus-style adjustment)
+    */
+    let mut workbook = create_workbook_with_header();
+    let worksheet = workbook.worksheet_from_index(0).unwrap();
+
+    // Buy 378 BRCR11 @ R$10.00
+    worksheet.write_string(1, 0, "Credito").unwrap();
+    worksheet.write_string(1, 1, "10/09/2020").unwrap();
+    worksheet.write_string(1, 2, "Compra").unwrap();
+    worksheet.write_string(1, 3, "BRCR11 - BTG PACTUAL CORP. OFFICE FUND").unwrap();
+    worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
+    worksheet.write_number(1, 5, 378.0).unwrap();
+    worksheet.write_number(1, 6, 10.0).unwrap();
+    worksheet.write_number(1, 7, 3780.0).unwrap();
+
+    // Atualização credit of 22 shares
+    worksheet.write_string(2, 0, "Credito").unwrap();
+    worksheet.write_string(2, 1, "14/09/2020").unwrap();
+    worksheet.write_string(2, 2, "Atualização").unwrap();
+    worksheet.write_string(2, 3, "BRCR11 - BTG PACTUAL CORP. OFFICE FUND").unwrap();
+    worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
+    worksheet.write_number(2, 5, 22.0).unwrap();
+    worksheet.write_string(2, 6, "").unwrap();
+    worksheet.write_string(2, 7, "").unwrap();
+
+    workbook.save("tests/data/14_atualizacao_inference.xlsx").unwrap();
+    println!("✓ Created: 14_atualizacao_inference.xlsx");
+}
+
+#[test]
+#[ignore]
 fn generate_10_duplicate_trades() {
     /*
     Test duplicate trades (same date/qty/price) should both be imported.

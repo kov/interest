@@ -295,7 +295,8 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
 
             // Categorize entries
             let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
-            let corporate_actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+            let mut corporate_actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+            corporate_actions.sort_by_key(|e| e.date);
             let income_events: Vec<_> = entries.iter().filter(|e| e.is_income_event()).collect();
             let other: Vec<_> = entries.iter()
                 .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
@@ -518,6 +519,28 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
                     warn!(
                         "Desdobro ratio unknown for {} on {}; defaulting to 1:1",
+                        ticker,
+                        entry.date
+                    );
+                }
+                if entry.movement_type == "Atualização" && action.ratio_from == 1 && action.ratio_to == 1 {
+                    if let Some((ratio_from, ratio_to)) =
+                        infer_bonus_ratio_from_credit(&conn, asset_id, entry)?
+                    {
+                        action.ratio_from = ratio_from;
+                        action.ratio_to = ratio_to;
+                        let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
+                        action.notes = Some(match action.notes.take() {
+                            Some(existing) if !existing.is_empty() => {
+                                format!("{} | {}", existing, note_suffix)
+                            }
+                            _ => note_suffix,
+                        });
+                    }
+                }
+                if entry.movement_type == "Atualização" && action.ratio_from == 1 && action.ratio_to == 1 {
+                    warn!(
+                        "Atualização ratio unknown for {} on {}; defaulting to 1:1",
                         ticker,
                         entry.date
                     );
@@ -1714,6 +1737,65 @@ fn infer_split_ratio_from_credit(
     }
 
     Ok(Some((1, ratio_i32)))
+}
+
+fn infer_bonus_ratio_from_credit(
+    conn: &rusqlite::Connection,
+    asset_id: i64,
+    entry: &importers::MovimentacaoEntry,
+) -> Result<Option<(i32, i32)>> {
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+
+    if entry.movement_type != "Atualização" {
+        return Ok(None);
+    }
+
+    let credit_qty = match entry.quantity {
+        Some(qty) if qty > Decimal::ZERO => qty,
+        _ => return Ok(None),
+    };
+
+    let old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
+    if old_qty <= Decimal::ZERO {
+        warn!(
+            "Cannot infer bonus ratio for {} on {}: position before date is {}",
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date,
+            old_qty
+        );
+        return Ok(None);
+    }
+
+    let old_i32 = old_qty.to_i32();
+    let credit_i32 = credit_qty.to_i32();
+
+    if old_i32.is_none() || credit_i32.is_none() {
+        warn!(
+            "Cannot infer bonus ratio for {} on {}: non-integer quantities (old: {}, credit: {})",
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date,
+            old_qty,
+            credit_qty
+        );
+        return Ok(None);
+    }
+
+    let old_i32 = old_i32.unwrap();
+    let credit_i32 = credit_i32.unwrap();
+
+    if old_i32 <= 0 || credit_i32 <= 0 {
+        warn!(
+            "Cannot infer bonus ratio for {} on {}: invalid quantities (old: {}, credit: {})",
+            entry.ticker.as_deref().unwrap_or("?"),
+            entry.date,
+            old_i32,
+            credit_i32
+        );
+        return Ok(None);
+    }
+
+    Ok(Some((old_i32, old_i32 + credit_i32)))
 }
 
 /// Handle portfolio show command

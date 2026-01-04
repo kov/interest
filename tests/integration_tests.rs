@@ -93,7 +93,8 @@ fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<
     let entries = parse_movimentacao_excel(file_path)?;
 
     let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
-    let actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+    let mut actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+    actions.sort_by_key(|e| e.date);
 
     let mut imported_trades = 0;
     let mut skipped_trades_old = 0;
@@ -169,6 +170,19 @@ fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<
                         if ratio_i32 > 1 && Decimal::from(ratio_i32) == ratio {
                             action.ratio_from = 1;
                             action.ratio_to = ratio_i32;
+                        }
+                    }
+                }
+            }
+        }
+        if entry.movement_type == "Atualização" && action.ratio_from == 1 && action.ratio_to == 1 {
+            if let Some(qty) = entry.quantity {
+                let old_qty = get_asset_position_before_date(conn, asset_id, entry.date)?;
+                if old_qty > Decimal::ZERO {
+                    if let (Some(old_i32), Some(credit_i32)) = (old_qty.to_i32(), qty.to_i32()) {
+                        if old_i32 > 0 && credit_i32 > 0 {
+                            action.ratio_from = old_i32;
+                            action.ratio_to = old_i32 + credit_i32;
                         }
                     }
                 }
@@ -436,9 +450,10 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
     assert_eq!(stats.auto_applied_actions, 1);
 
     let transactions = get_transactions(&conn, "ITSA4")?;
-    assert_eq!(transactions.len(), 1);
-    assert_eq!(transactions[0].quantity, dec!(120));
-    assert_eq!(transactions[0].total_cost, dec!(1000));
+    assert_eq!(transactions.len(), 2);
+    let (qty, cost) = calculate_position(&transactions);
+    assert_eq!(qty, dec!(120));
+    assert_eq!(cost, dec!(1000));
     Ok(())
 }
 
@@ -455,6 +470,23 @@ fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0].quantity, dec!(640));
     assert_eq!(transactions[0].total_cost, dec!(800));
+    Ok(())
+}
+
+#[test]
+fn test_14_atualizacao_ratio_inference_auto_apply() -> Result<()> {
+    let (_temp_dir, conn) = create_test_db()?;
+
+    let stats = import_movimentacao_with_state(&conn, "tests/data/14_atualizacao_inference.xlsx")?;
+    assert_eq!(stats.imported_trades, 1);
+    assert_eq!(stats.imported_actions, 1);
+    assert_eq!(stats.auto_applied_actions, 1);
+
+    let transactions = get_transactions(&conn, "BRCR11")?;
+    assert_eq!(transactions.len(), 2);
+    let (qty, cost) = calculate_position(&transactions);
+    assert_eq!(qty, dec!(400));
+    assert_eq!(cost, dec!(3780));
     Ok(())
 }
 

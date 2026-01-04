@@ -1,37 +1,50 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-- `src/` holds the Rust CLI and core logic: `cli/` (clap commands), `db/` (SQLite models/schema), `importers/` (CEI/Movimentacao/IRPF PDF), `corporate_actions/`, `tax/`, `pricing/`, `reports/`, plus `main.rs`.
-- `tests/` contains integration tests, fixtures in `tests/data/`, and guidance in `tests/README.md`.
-- `target/` is Cargo output.
+## Project Overview
+Interest is a Rust CLI for tracking Brazilian B3 investments. It imports broker files, applies corporate actions, and calculates FIFO cost basis and tax (swing/day trade, FIIs, FIAGRO, FI-Infra), with DARF payment info.
 
-## Architecture & Functionality Overview
-- **Data flow**: Import file → parser → DB → reports/tax/portfolio. Corporate actions adjust transactions before ex-date and are tracked for idempotency.
-- **Key invariants**:
-  - Use `rust_decimal::Decimal` for all money/quantities (never `f64`).
-  - FIFO cost basis processes transactions in `trade_date ASC`.
-  - Corporate actions must preserve total cost (`qty × price`), and record adjustments in the junction table.
-  - Manual transactions are auto-adjusted for later corporate actions.
-- **Database**: SQLite at `~/.interest/data.db`. Schema in `src/db/schema.sql` with foreign keys enabled.
+## Architecture & Data Flow
+- **Import**: File → importer → normalized transactions in SQLite (`~/.interest/data.db`).
+- **Corporate actions**: Actions are applied to pre‑ex‑date transactions and tracked in a junction table to keep adjustments idempotent.
+- **Tax**: FIFO matcher computes cost basis, then tax rules and loss carryforward apply.
+
+## Project Structure & Module Organization
+- `src/cli/`: clap command definitions.
+- `src/db/`: schema, models, queries; decimals stored as TEXT.
+- `src/importers/`: CEI/Negociação, Movimentação, IRPF PDF, ofertas públicas.
+- `src/corporate_actions/`: split/bonus adjustment engine.
+- `src/tax/`: cost basis, swing/day trade rules, DARF, IRPF.
+- `src/reports/`: portfolio and performance reports.
+- `tests/`: integration tests and generated import fixtures.
 
 ## Build, Test, and Development Commands
-- `cargo build` / `cargo build --release`: build debug or optimized binaries.
-- `cargo run -- <command>`: run CLI (e.g., `cargo run -- portfolio show`).
-- `cargo test`: run all tests.
-- `cargo test irpf` / `cargo test corporate_actions` / `cargo test tax_integration_tests`: focused suites.
-- `cargo test --test generate_test_files -- --ignored`: regenerate XLS fixtures in `tests/data/`.
-- `RUST_LOG=debug cargo test test_name -- --nocapture`: debug a single test.
+```bash
+cargo build
+cargo build --release
+cargo test
+cargo test irpf
+cargo test corporate_actions
+./target/debug/interest portfolio show
+cargo run -- import <file.xlsx>
+```
+Use `RUST_LOG=debug` for verbose output when debugging import issues.
 
 ## Coding Style & Naming Conventions
-- Standard Rust formatting; use `cargo fmt` when needed.
-- Naming: `snake_case` for fns/modules, `CamelCase` for types, `SCREAMING_SNAKE_CASE` for constants.
-- Avoid float math; store decimals as TEXT and read via SQLite `ValueRef` matching.
+- Rust 2021, 4‑space indentation, `snake_case` for functions/vars.
+- **Money/quantity must use `rust_decimal::Decimal`** (never `f64`).
+- Keep transaction processing ordered by `trade_date ASC` for FIFO accuracy.
+- Prefer content-based file detection (`file_detector.rs`) over extensions.
 
 ## Testing Guidelines
-- Integration tests live in `tests/integration_tests.rs` and `tests/tax_integration_tests.rs`.
-- New import scenarios should add fixtures via `tests/generate_test_files.rs`.
-- Follow existing test naming (e.g., `test_04_stock_split`).
+- Unit tests live with modules; integration tests in `tests/`.
+- Use `tempfile::NamedTempFile` for isolated DBs.
+- Add fixtures via `tests/generate_test_files.rs` when new import formats are added.
 
 ## Commit & Pull Request Guidelines
-- Commit messages use imperative mood (e.g., “Add …”, “Implement …”).
-- PRs should include a brief summary, tests run (with commands), and any notable data/CLI output changes.
+- Commit messages are short, imperative, and scoped (e.g., “Add ofertas públicas import...”).
+- PRs should include: summary, test command run, and any data assumptions (e.g., split ratios, unit vs FII).
+
+## Critical Invariants
+- `quantity × price` must remain constant after corporate actions.
+- Corporate actions must be idempotent (tracked via junction table).
+- No negative positions; sells must be fully covered by prior buys.

@@ -95,6 +95,10 @@ This creates 9 test XLS files in `tests/data/`:
    - Buy 80 A1MD34, Desdobro credit of 560 shares
    - Tests: Infer 1:8 split and auto-apply adjustment
 
+14. **14_atualizacao_inference.xlsx** - Atualização ratio inference
+   - Buy 378 BRCR11, Atualização credit of 22 shares
+   - Tests: Infer 378:400 bonus-style adjustment and auto-apply
+
 ## Running Tests
 
 ### Run All Integration Tests

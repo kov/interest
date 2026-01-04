@@ -225,7 +225,7 @@ impl MovimentacaoEntry {
     /// Determine if this is a corporate action
     pub fn is_corporate_action(&self) -> bool {
         matches!(self.movement_type.as_str(),
-            "Desdobro" | "Bonificação em Ativos" | "Incorporação"
+            "Desdobro" | "Bonificação em Ativos" | "Incorporação" | "Atualização"
         )
     }
 
@@ -308,6 +308,10 @@ impl MovimentacaoEntry {
                 } else {
                     (CorporateActionType::Bonus, 100, 110)
                 }
+            }
+            "Atualização" => {
+                // Position update / subscription credit - infer ratio from holdings later
+                (CorporateActionType::Bonus, 1, 1)
             }
             "Incorporação" => {
                 // Merger - ratio unknown, use 1:1 as placeholder
