@@ -492,6 +492,46 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                     }
                 };
 
+                if entry.movement_type == "Atualização" {
+                    if let Some(qty) = entry.quantity {
+                        if qty > rust_decimal::Decimal::ZERO {
+                            let bonus_tx = db::Transaction {
+                                id: None,
+                                asset_id,
+                                transaction_type: db::TransactionType::Buy,
+                                trade_date: entry.date,
+                                settlement_date: Some(entry.date),
+                                quantity: qty,
+                                price_per_unit: rust_decimal::Decimal::ZERO,
+                                total_cost: rust_decimal::Decimal::ZERO,
+                                fees: rust_decimal::Decimal::ZERO,
+                                is_day_trade: false,
+                                quota_issuance_date: None,
+                                notes: Some(format!("Bonus shares from Atualização ({})", entry.product)),
+                                source: "MOVIMENTACAO".to_string(),
+                                created_at: chrono::Utc::now(),
+                            };
+
+                            match db::insert_transaction(&conn, &bonus_tx) {
+                                Ok(_) => {
+                                    imported_trades += 1;
+                                    println!(
+                                        "  {} Added bonus shares for {} on {}",
+                                        "✓".green(),
+                                        ticker.cyan(),
+                                        entry.date
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Error inserting Atualização bonus transaction: {}", e);
+                                    errors += 1;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 // Convert to corporate action
                 let mut action = match entry.to_corporate_action(asset_id) {
                     Ok(a) => a,

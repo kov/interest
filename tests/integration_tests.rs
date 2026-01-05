@@ -158,6 +158,37 @@ fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<
         let ticker = entry.ticker.as_ref().unwrap();
         let asset_type = AssetType::Stock;
         let asset_id = upsert_asset(conn, ticker, &asset_type, None)?;
+
+        if entry.movement_type == "Atualização" {
+            if let Some(qty) = entry.quantity {
+                if qty > Decimal::ZERO {
+                    conn.execute(
+                        "INSERT INTO transactions (
+                            asset_id, transaction_type, trade_date, settlement_date,
+                            quantity, price_per_unit, total_cost, fees,
+                            is_day_trade, quota_issuance_date, notes, source
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        rusqlite::params![
+                            asset_id,
+                            TransactionType::Buy.as_str(),
+                            entry.date,
+                            entry.date,
+                            qty.to_string(),
+                            Decimal::ZERO.to_string(),
+                            Decimal::ZERO.to_string(),
+                            Decimal::ZERO.to_string(),
+                            false,
+                            None::<chrono::NaiveDate>,
+                            format!("Bonus shares from Atualização ({})", entry.product),
+                            "MOVIMENTACAO",
+                        ],
+                    )?;
+                    imported_trades += 1;
+                }
+            }
+            continue;
+        }
+
         let mut action = entry.to_corporate_action(asset_id)?;
 
         if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
@@ -175,20 +206,6 @@ fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<
                 }
             }
         }
-        if entry.movement_type == "Atualização" && action.ratio_from == 1 && action.ratio_to == 1 {
-            if let Some(qty) = entry.quantity {
-                let old_qty = get_asset_position_before_date(conn, asset_id, entry.date)?;
-                if old_qty > Decimal::ZERO {
-                    if let (Some(old_i32), Some(credit_i32)) = (old_qty.to_i32(), qty.to_i32()) {
-                        if old_i32 > 0 && credit_i32 > 0 {
-                            action.ratio_from = old_i32;
-                            action.ratio_to = old_i32 + credit_i32;
-                        }
-                    }
-                }
-            }
-        }
-
         if let Some(last_date) = last_action_date {
             if action.event_date <= last_date {
                 skipped_actions_old += 1;
@@ -481,12 +498,16 @@ fn test_14_atualizacao_ratio_inference_auto_apply() -> Result<()> {
     let (_temp_dir, conn) = create_test_db()?;
 
     let stats = import_movimentacao_with_state(&conn, "tests/data/14_atualizacao_inference.xlsx")?;
-    assert_eq!(stats.imported_trades, 1);
-    assert_eq!(stats.imported_actions, 1);
-    assert_eq!(stats.auto_applied_actions, 1);
+    assert_eq!(stats.imported_trades, 2);
+    assert_eq!(stats.imported_actions, 0);
+    assert_eq!(stats.auto_applied_actions, 0);
 
     let transactions = get_transactions(&conn, "BRCR11")?;
     assert_eq!(transactions.len(), 2);
+    assert_eq!(transactions[1].quantity, dec!(22));
+    assert_eq!(transactions[1].price_per_unit, dec!(0));
+    assert_eq!(transactions[1].total_cost, dec!(0));
+    assert_eq!(transactions[1].source, "MOVIMENTACAO");
     let (qty, cost) = calculate_position(&transactions);
     assert_eq!(qty, dec!(400));
     assert_eq!(cost, dec!(3780));
