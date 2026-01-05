@@ -3,6 +3,7 @@
 pub mod cei_excel;
 pub mod cei_csv;
 pub mod movimentacao_excel;
+pub mod movimentacao_import;
 pub mod ofertas_publicas_excel;
 pub mod irpf_pdf;
 mod file_detector;
@@ -13,6 +14,7 @@ use tracing::info;
 
 pub use cei_excel::RawTransaction;
 pub use movimentacao_excel::MovimentacaoEntry;
+pub use movimentacao_import::import_movimentacao_entries;
 pub use ofertas_publicas_excel::OfertaPublicaEntry;
 pub use irpf_pdf::IrpfPosition;
 pub use file_detector::FileType;

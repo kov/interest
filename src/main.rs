@@ -12,8 +12,7 @@ mod term_contracts;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands, ActionCommands, TransactionCommands};
-use rust_decimal::Decimal;
-use tracing::{info, warn};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -152,7 +151,6 @@ async fn main() -> Result<()> {
 async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
     use colored::Colorize;
     use tabled::{Table, Tabled, settings::Style};
-    use tracing::warn;
 
     info!("Importing from: {}", file_path);
 
@@ -390,292 +388,34 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
-            // Import trades
-            let mut imported_trades = 0;
-            let mut skipped_trades = 0;
-            let mut skipped_trades_old = 0;
-            let mut errors = 0;
-            let mut max_trade_date: Option<chrono::NaiveDate> = None;
-
-            let last_trade_import_date =
-                db::get_last_import_date(&conn, "MOVIMENTACAO", "trades")?;
-
-            println!("{} Importing trades...", "⏳".cyan().bold());
-
-            for entry in trades {
-                if entry.ticker.is_none() {
-                    warn!("Skipping trade with no ticker: {:?}", entry.product);
-                    skipped_trades += 1;
-                    continue;
-                }
-
-                let ticker = entry.ticker.as_ref().unwrap();
-                let asset_type = db::AssetType::detect_from_ticker(ticker)
-                    .unwrap_or(db::AssetType::Stock);
-
-                // Upsert asset
-                let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        eprintln!("Error upserting asset {}: {}", ticker, e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-
-                // Convert to transaction
-                let transaction = match entry.to_transaction(asset_id) {
-                    Ok(tx) => tx,
-                    Err(e) => {
-                        warn!("Failed to convert entry to transaction: {}", e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-
-                if let Some(last_date) = last_trade_import_date {
-                    if transaction.trade_date <= last_date {
-                        skipped_trades_old += 1;
-                        continue;
-                    }
-                }
-
-                // Insert transaction
-                match db::insert_transaction(&conn, &transaction) {
-                    Ok(_) => {
-                        imported_trades += 1;
-                        max_trade_date = Some(match max_trade_date {
-                            Some(current) if current >= transaction.trade_date => current,
-                            _ => transaction.trade_date,
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("Error inserting transaction: {}", e);
-                        errors += 1;
-                    }
-                }
-            }
-
-            if let Some(last_date) = max_trade_date {
-                db::set_last_import_date(&conn, "MOVIMENTACAO", "trades", last_date)?;
-            }
-
-            // Import corporate actions
-            let mut imported_actions = 0;
-            let mut skipped_actions = 0;
-            let mut skipped_actions_old = 0;
-            let mut max_action_date: Option<chrono::NaiveDate> = None;
-
-            let last_action_import_date =
-                db::get_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions")?;
-
-            println!("{} Importing corporate actions...", "⏳".cyan().bold());
-
-            for entry in corporate_actions {
-                if entry.ticker.is_none() {
-                    warn!("Skipping corporate action with no ticker: {:?}", entry.product);
-                    skipped_actions += 1;
-                    continue;
-                }
-
-                let ticker = entry.ticker.as_ref().unwrap();
-                let asset_type = db::AssetType::detect_from_ticker(ticker)
-                    .unwrap_or(db::AssetType::Stock);
-
-                // Upsert asset
-                let asset_id = match db::upsert_asset(&conn, ticker, &asset_type, None) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        eprintln!("Error upserting asset {}: {}", ticker, e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-
-                if entry.movement_type == "Atualização" {
-                    if let Some(qty) = entry.quantity {
-                        if qty > rust_decimal::Decimal::ZERO {
-                            let bonus_tx = db::Transaction {
-                                id: None,
-                                asset_id,
-                                transaction_type: db::TransactionType::Buy,
-                                trade_date: entry.date,
-                                settlement_date: Some(entry.date),
-                                quantity: qty,
-                                price_per_unit: rust_decimal::Decimal::ZERO,
-                                total_cost: rust_decimal::Decimal::ZERO,
-                                fees: rust_decimal::Decimal::ZERO,
-                                is_day_trade: false,
-                                quota_issuance_date: None,
-                                notes: Some(format!("Bonus shares from Atualização ({})", entry.product)),
-                                source: "MOVIMENTACAO".to_string(),
-                                created_at: chrono::Utc::now(),
-                            };
-
-                            match db::insert_transaction(&conn, &bonus_tx) {
-                                Ok(_) => {
-                                    imported_trades += 1;
-                                    println!(
-                                        "  {} Added bonus shares for {} on {}",
-                                        "✓".green(),
-                                        ticker.cyan(),
-                                        entry.date
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!("Error inserting Atualização bonus transaction: {}", e);
-                                    errors += 1;
-                                }
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                // Convert to corporate action
-                let mut action = match entry.to_corporate_action(asset_id) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("Failed to convert entry to corporate action: {}", e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-
-                if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
-                    if let Some((ratio_from, ratio_to)) =
-                        infer_split_ratio_from_credit(&conn, asset_id, entry)?
-                    {
-                        action.ratio_from = ratio_from;
-                        action.ratio_to = ratio_to;
-                        let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
-                        action.notes = Some(match action.notes.take() {
-                            Some(existing) if !existing.is_empty() => {
-                                format!("{} | {}", existing, note_suffix)
-                            }
-                            _ => note_suffix,
-                        });
-                    }
-                }
-                if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
-                    warn!(
-                        "Desdobro ratio unknown for {} on {}; defaulting to 1:1",
-                        ticker,
-                        entry.date
-                    );
-                }
-                if entry.movement_type == "Atualização" && action.ratio_from == 1 && action.ratio_to == 1 {
-                    if let Some((ratio_from, ratio_to)) =
-                        infer_bonus_ratio_from_credit(&conn, asset_id, entry)?
-                    {
-                        action.ratio_from = ratio_from;
-                        action.ratio_to = ratio_to;
-                        let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
-                        action.notes = Some(match action.notes.take() {
-                            Some(existing) if !existing.is_empty() => {
-                                format!("{} | {}", existing, note_suffix)
-                            }
-                            _ => note_suffix,
-                        });
-                    }
-                }
-                if entry.movement_type == "Atualização" && action.ratio_from == 1 && action.ratio_to == 1 {
-                    warn!(
-                        "Atualização ratio unknown for {} on {}; defaulting to 1:1",
-                        ticker,
-                        entry.date
-                    );
-                }
-
-                if let Some(last_date) = last_action_import_date {
-                    if action.event_date <= last_date {
-                        skipped_actions_old += 1;
-                        continue;
-                    }
-                }
-
-                // Insert corporate action (no duplicate check for now - user can manage manually)
-                match db::insert_corporate_action(&conn, &action) {
-                    Ok(action_id) => {
-                        imported_actions += 1;
-                        max_action_date = Some(match max_action_date {
-                            Some(current) if current >= action.event_date => current,
-                            _ => action.event_date,
-                        });
-                        action.id = Some(action_id);
-                        if action.ratio_from != action.ratio_to {
-                            let asset = db::Asset {
-                                id: Some(asset_id),
-                                ticker: ticker.to_string(),
-                                asset_type,
-                                name: None,
-                                created_at: chrono::Utc::now(),
-                                updated_at: chrono::Utc::now(),
-                            };
-                            match corporate_actions::apply_corporate_action(&conn, &action, &asset) {
-                                Ok(adjusted) => {
-                                    if adjusted > 0 {
-                                        println!("    {} Auto-applied to {} transaction(s)", "↳".blue(), adjusted);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to auto-apply corporate action for {} on {}: {}",
-                                        ticker,
-                                        action.event_date,
-                                        e
-                                    );
-                                }
-                            }
-                        } else {
-                            warn!(
-                                "Skipping auto-apply for {} on {} (ratio 1:1)",
-                                ticker,
-                                action.event_date
-                            );
-                        }
-                        println!("  {} Added {} for {} on {}",
-                            "✓".green(),
-                            action.action_type.as_str().yellow(),
-                            ticker.cyan(),
-                            action.event_date
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("Error inserting corporate action: {}", e);
-                        errors += 1;
-                    }
-                }
-            }
+            println!("{} Importing trades and corporate actions...", "⏳".cyan().bold());
+            let stats = importers::import_movimentacao_entries(&conn, entries, true)?;
 
             println!("\n{} Import complete!", "✓".green().bold());
             println!("  {} Trades:", "💰".cyan());
-            println!("    Imported: {}", imported_trades.to_string().green());
-            if skipped_trades_old > 0 {
+            println!("    Imported: {}", stats.imported_trades.to_string().green());
+            if stats.skipped_trades_old > 0 {
                 println!(
                     "    Skipped (before last import date): {}",
-                    skipped_trades_old.to_string().yellow()
+                    stats.skipped_trades_old.to_string().yellow()
                 );
             }
-            if skipped_trades > 0 {
-                println!("    Skipped: {}", skipped_trades.to_string().yellow());
+            if stats.skipped_trades > 0 {
+                println!("    Skipped: {}", stats.skipped_trades.to_string().yellow());
             }
             println!("  {} Corporate actions:", "🏢".cyan());
-            println!("    Imported: {}", imported_actions.to_string().green());
-            if skipped_actions_old > 0 {
+            println!("    Imported: {}", stats.imported_actions.to_string().green());
+            if stats.skipped_actions_old > 0 {
                 println!(
                     "    Skipped (before last import date): {}",
-                    skipped_actions_old.to_string().yellow()
+                    stats.skipped_actions_old.to_string().yellow()
                 );
             }
-            if skipped_actions > 0 {
-                println!("    Skipped: {}", skipped_actions.to_string().yellow());
+            if stats.skipped_actions > 0 {
+                println!("    Skipped: {}", stats.skipped_actions.to_string().yellow());
             }
-            if errors > 0 {
-                println!("  {} Errors: {}", "❌".red(), errors.to_string().red());
-            }
-            if let Some(last_date) = max_action_date {
-                db::set_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions", last_date)?;
+            if stats.errors > 0 {
+                println!("  {} Errors: {}", "❌".red(), stats.errors.to_string().red());
             }
             println!("\n{} Income events not yet implemented - coming soon!", "ℹ".blue().bold());
 
@@ -1714,184 +1454,6 @@ async fn handle_action_edit(
     println!("\n{} Corporate action updated successfully!\n", "✓".green().bold());
 
     Ok(())
-}
-
-fn infer_split_ratio_from_credit(
-    conn: &rusqlite::Connection,
-    asset_id: i64,
-    entry: &importers::MovimentacaoEntry,
-) -> Result<Option<(i32, i32)>> {
-    use rust_decimal::prelude::ToPrimitive;
-    use rust_decimal::Decimal;
-
-    if entry.movement_type != "Desdobro" {
-        return Ok(None);
-    }
-
-    let credit_qty = match entry.quantity {
-        Some(qty) if qty > Decimal::ZERO => qty,
-        _ => return Ok(None),
-    };
-
-    let mut old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
-    if let Some(ticker) = entry.ticker.as_deref() {
-        let carryover = rename_carryover_quantity(conn, ticker, entry.date, asset_id)?;
-        if carryover > Decimal::ZERO {
-            old_qty += carryover;
-        }
-    }
-    if old_qty <= Decimal::ZERO {
-        warn!(
-            "Cannot infer split ratio for {} on {}: position before date is {}",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            old_qty
-        );
-        return Ok(None);
-    }
-
-    // Movimentacao "Credito" entries can represent either:
-    // 1) additional shares credited (increment), or
-    // 2) the new total position after the split.
-    let ratio_from_increment = (old_qty + credit_qty) / old_qty;
-    let ratio_from_total = credit_qty / old_qty;
-
-    let ratio_increment_i32 = ratio_from_increment.to_i32().and_then(|r| {
-        if r > 1 && Decimal::from(r) == ratio_from_increment {
-            Some(r)
-        } else {
-            None
-        }
-    });
-    let ratio_total_i32 = ratio_from_total.to_i32().and_then(|r| {
-        if r > 1 && Decimal::from(r) == ratio_from_total {
-            Some(r)
-        } else {
-            None
-        }
-    });
-
-    let selected_ratio = match (ratio_increment_i32, ratio_total_i32) {
-        (Some(r_inc), Some(r_total)) => {
-            let implied_credit_inc = old_qty * Decimal::from(r_inc - 1);
-            let implied_total = old_qty * Decimal::from(r_total);
-            let diff_inc = (credit_qty - implied_credit_inc).abs();
-            let diff_total = (credit_qty - implied_total).abs();
-            if diff_total < diff_inc {
-                r_total
-            } else {
-                r_inc
-            }
-        }
-        (Some(r_inc), None) => r_inc,
-        (None, Some(r_total)) => r_total,
-        (None, None) => {
-            warn!(
-                "Cannot infer split ratio for {} on {}: computed ratios {} and {}",
-                entry.ticker.as_deref().unwrap_or("?"),
-                entry.date,
-                ratio_from_increment,
-                ratio_from_total
-            );
-            return Ok(None);
-        }
-    };
-
-    Ok(Some((1, selected_ratio)))
-}
-
-fn rename_carryover_quantity(
-    conn: &rusqlite::Connection,
-    target_ticker: &str,
-    before_date: chrono::NaiveDate,
-    _asset_id: i64,
-) -> Result<Decimal> {
-    use rust_decimal::Decimal;
-    use rusqlite::OptionalExtension;
-
-    let mut total = Decimal::ZERO;
-
-    for (source_ticker, effective_date) in db::rename_sources_for(target_ticker) {
-        if effective_date >= before_date {
-            continue;
-        }
-
-        let source_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM assets WHERE ticker = ?1",
-                [source_ticker],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        if let Some(id) = source_id {
-            let source_qty = db::get_asset_position_before_date(conn, id, effective_date)?;
-            if source_qty > Decimal::ZERO {
-                total += source_qty;
-            }
-        }
-    }
-
-    Ok(total)
-}
-
-fn infer_bonus_ratio_from_credit(
-    conn: &rusqlite::Connection,
-    asset_id: i64,
-    entry: &importers::MovimentacaoEntry,
-) -> Result<Option<(i32, i32)>> {
-    use rust_decimal::prelude::ToPrimitive;
-    use rust_decimal::Decimal;
-
-    if entry.movement_type != "Atualização" {
-        return Ok(None);
-    }
-
-    let credit_qty = match entry.quantity {
-        Some(qty) if qty > Decimal::ZERO => qty,
-        _ => return Ok(None),
-    };
-
-    let old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
-    if old_qty <= Decimal::ZERO {
-        warn!(
-            "Cannot infer bonus ratio for {} on {}: position before date is {}",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            old_qty
-        );
-        return Ok(None);
-    }
-
-    let old_i32 = old_qty.to_i32();
-    let credit_i32 = credit_qty.to_i32();
-
-    if old_i32.is_none() || credit_i32.is_none() {
-        warn!(
-            "Cannot infer bonus ratio for {} on {}: non-integer quantities (old: {}, credit: {})",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            old_qty,
-            credit_qty
-        );
-        return Ok(None);
-    }
-
-    let old_i32 = old_i32.unwrap();
-    let credit_i32 = credit_i32.unwrap();
-
-    if old_i32 <= 0 || credit_i32 <= 0 {
-        warn!(
-            "Cannot infer bonus ratio for {} on {}: invalid quantities (old: {}, credit: {})",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            old_i32,
-            credit_i32
-        );
-        return Ok(None);
-    }
-
-    Ok(Some((old_i32, old_i32 + credit_i32)))
 }
 
 /// Handle portfolio show command

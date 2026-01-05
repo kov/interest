@@ -13,16 +13,14 @@ use anyhow::Result;
 use chrono::Utc;
 use interest::corporate_actions::{apply_corporate_action, get_unapplied_actions};
 use interest::db::models::{Asset, AssetType, Transaction, TransactionType};
-use interest::db::{
-    get_asset_position_before_date, get_last_import_date, init_database,
-    insert_corporate_action, open_db, set_last_import_date, upsert_asset,
-};
+use interest::db::{init_database, open_db, upsert_asset};
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
+use interest::importers::import_movimentacao_entries;
+use interest::importers::movimentacao_import::ImportStats;
 use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
 use interest::tax::cost_basis::AverageCostMatcher;
 use interest::term_contracts::process_term_liquidations;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use rusqlite::Connection;
 use std::str::FromStr;
@@ -40,214 +38,15 @@ fn create_test_db() -> Result<(TempDir, Connection)> {
 /// Test helper: Import movimentacao file into database
 fn import_movimentacao(conn: &Connection, file_path: &str) -> Result<()> {
     let entries = parse_movimentacao_excel(file_path)?;
-
-    for entry in entries {
-        // Skip non-trade entries for now (we'll handle corporate actions separately)
-        if !entry.is_trade() {
-            continue;
-        }
-
-        let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = AssetType::Stock; // Simplified for tests
-        let asset_id = upsert_asset(conn, ticker, &asset_type, None)?;
-
-        let transaction = entry.to_transaction(asset_id)?;
-
-        // Insert transaction
-        conn.execute(
-            "INSERT INTO transactions (
-                asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees,
-                is_day_trade, quota_issuance_date, notes, source
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![
-                transaction.asset_id,
-                transaction.transaction_type.as_str(),
-                transaction.trade_date,
-                transaction.settlement_date,
-                transaction.quantity.to_string(),
-                transaction.price_per_unit.to_string(),
-                transaction.total_cost.to_string(),
-                transaction.fees.to_string(),
-                transaction.is_day_trade,
-                transaction.quota_issuance_date,
-                transaction.notes,
-                transaction.source,
-            ],
-        )?;
-    }
-
+    let trade_entries: Vec<_> = entries.into_iter().filter(|e| e.is_trade()).collect();
+    import_movimentacao_entries(conn, trade_entries, false)?;
     Ok(())
-}
-
-struct ImportStats {
-    imported_trades: usize,
-    skipped_trades_old: usize,
-    imported_actions: usize,
-    skipped_actions_old: usize,
-    auto_applied_actions: usize,
 }
 
 /// Test helper: Import movimentacao file into database with import-state tracking and auto-apply
 fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<ImportStats> {
     let entries = parse_movimentacao_excel(file_path)?;
-
-    let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
-    let mut actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
-    actions.sort_by_key(|e| e.date);
-
-    let mut imported_trades = 0;
-    let mut skipped_trades_old = 0;
-    let mut max_trade_date = None;
-
-    let last_trade_date = get_last_import_date(conn, "MOVIMENTACAO", "trades")?;
-
-    for entry in trades {
-        let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = AssetType::Stock;
-        let asset_id = upsert_asset(conn, ticker, &asset_type, None)?;
-
-        let transaction = entry.to_transaction(asset_id)?;
-        if let Some(last_date) = last_trade_date {
-            if transaction.trade_date <= last_date {
-                skipped_trades_old += 1;
-                continue;
-            }
-        }
-
-        conn.execute(
-            "INSERT INTO transactions (
-                asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees,
-                is_day_trade, quota_issuance_date, notes, source
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![
-                transaction.asset_id,
-                transaction.transaction_type.as_str(),
-                transaction.trade_date,
-                transaction.settlement_date,
-                transaction.quantity.to_string(),
-                transaction.price_per_unit.to_string(),
-                transaction.total_cost.to_string(),
-                transaction.fees.to_string(),
-                transaction.is_day_trade,
-                transaction.quota_issuance_date,
-                transaction.notes,
-                transaction.source,
-            ],
-        )?;
-        imported_trades += 1;
-        max_trade_date = Some(match max_trade_date {
-            Some(current) if current >= transaction.trade_date => current,
-            _ => transaction.trade_date,
-        });
-    }
-
-    if let Some(last_date) = max_trade_date {
-        set_last_import_date(conn, "MOVIMENTACAO", "trades", last_date)?;
-    }
-
-    let mut imported_actions = 0;
-    let mut skipped_actions_old = 0;
-    let mut auto_applied_actions = 0;
-    let mut max_action_date = None;
-
-    let last_action_date = get_last_import_date(conn, "MOVIMENTACAO", "corporate_actions")?;
-
-    for entry in actions {
-        let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = AssetType::Stock;
-        let asset_id = upsert_asset(conn, ticker, &asset_type, None)?;
-
-        if entry.movement_type == "Atualização" {
-            if let Some(qty) = entry.quantity {
-                if qty > Decimal::ZERO {
-                    conn.execute(
-                        "INSERT INTO transactions (
-                            asset_id, transaction_type, trade_date, settlement_date,
-                            quantity, price_per_unit, total_cost, fees,
-                            is_day_trade, quota_issuance_date, notes, source
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                        rusqlite::params![
-                            asset_id,
-                            TransactionType::Buy.as_str(),
-                            entry.date,
-                            entry.date,
-                            qty.to_string(),
-                            Decimal::ZERO.to_string(),
-                            Decimal::ZERO.to_string(),
-                            Decimal::ZERO.to_string(),
-                            false,
-                            None::<chrono::NaiveDate>,
-                            format!("Bonus shares from Atualização ({})", entry.product),
-                            "MOVIMENTACAO",
-                        ],
-                    )?;
-                    imported_trades += 1;
-                }
-            }
-            continue;
-        }
-
-        let mut action = entry.to_corporate_action(asset_id)?;
-
-        if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
-            if let Some(qty) = entry.quantity {
-                let old_qty = get_asset_position_before_date(conn, asset_id, entry.date)?;
-                if old_qty > Decimal::ZERO {
-                    let new_qty = old_qty + qty;
-                    let ratio = new_qty / old_qty;
-                    if let Some(ratio_i32) = ratio.to_i32() {
-                        if ratio_i32 > 1 && Decimal::from(ratio_i32) == ratio {
-                            action.ratio_from = 1;
-                            action.ratio_to = ratio_i32;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(last_date) = last_action_date {
-            if action.event_date <= last_date {
-                skipped_actions_old += 1;
-                continue;
-            }
-        }
-
-        let action_id = insert_corporate_action(conn, &action)?;
-        action.id = Some(action_id);
-        imported_actions += 1;
-        max_action_date = Some(match max_action_date {
-            Some(current) if current >= action.event_date => current,
-            _ => action.event_date,
-        });
-
-        if action.ratio_from != action.ratio_to {
-            let asset = Asset {
-                id: Some(asset_id),
-                ticker: ticker.to_string(),
-                asset_type,
-                name: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            };
-            let adjusted = apply_corporate_action(conn, &action, &asset)?;
-            if adjusted > 0 {
-                auto_applied_actions += 1;
-            }
-        }
-    }
-
-    if let Some(last_date) = max_action_date {
-        set_last_import_date(conn, "MOVIMENTACAO", "corporate_actions", last_date)?;
-    }
-
-    Ok(ImportStats {
-        imported_trades,
-        skipped_trades_old,
-        imported_actions,
-        skipped_actions_old,
-        auto_applied_actions,
-    })
+    import_movimentacao_entries(conn, entries, true)
 }
 
 #[test]
