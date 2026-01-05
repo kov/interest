@@ -140,6 +140,7 @@ pub fn calculate_portfolio(
                     conn,
                     source_asset,
                     asset_id,
+                    &asset.ticker,
                     effective_date,
                 )? {
                     transactions.push(carryover);
@@ -306,6 +307,7 @@ fn build_rename_carryover_transaction(
     conn: &Connection,
     source_asset: &Asset,
     target_asset_id: i64,
+    target_ticker: &str,
     effective_date: NaiveDate,
 ) -> Result<Option<Transaction>> {
     let source_id = match source_asset.id {
@@ -340,6 +342,15 @@ fn build_rename_carryover_transaction(
     apply_actions_to_carryover(conn, target_asset_id, effective_date, &mut quantity, &mut total_cost)?;
     if quantity <= Decimal::ZERO {
         return Ok(None);
+    }
+
+    if let Some(target_qty) =
+        crate::db::rename_quantity_override(target_ticker, &source_asset.ticker)
+    {
+        if target_qty > Decimal::ZERO && quantity > Decimal::ZERO && target_qty != quantity {
+            // FIXME: consider amortized cash when quantity changes via rename.
+            quantity = target_qty;
+        }
     }
 
     let price_per_unit = if quantity > Decimal::ZERO {

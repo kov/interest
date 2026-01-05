@@ -275,6 +275,7 @@ pub struct RenameMapping {
     pub from: &'static str,
     pub to: &'static str,
     pub effective_date: NaiveDate,
+    pub target_quantity: Option<rust_decimal::Decimal>,
 }
 
 pub fn rename_mappings() -> &'static [RenameMapping] {
@@ -285,11 +286,25 @@ pub fn rename_mappings() -> &'static [RenameMapping] {
                 from: "JSLG3",
                 to: "SIMH3",
                 effective_date: NaiveDate::from_ymd_opt(2020, 9, 21).unwrap(),
+                target_quantity: None,
             },
             RenameMapping {
                 from: "BAHI3",
                 to: "BIED3",
                 effective_date: NaiveDate::from_ymd_opt(2024, 11, 26).unwrap(),
+                target_quantity: None,
+            },
+            RenameMapping {
+                from: "ALZM11",
+                to: "ALZC11",
+                effective_date: NaiveDate::from_ymd_opt(2025, 2, 24).unwrap(),
+                target_quantity: Some(rust_decimal::Decimal::from(762)),
+            },
+            RenameMapping {
+                from: "RBRF11",
+                to: "RBRX11",
+                effective_date: NaiveDate::from_ymd_opt(2025, 12, 1).unwrap(),
+                target_quantity: Some(rust_decimal::Decimal::from(7894)),
             },
         ]
     })
@@ -305,6 +320,13 @@ pub fn rename_sources_for(ticker: &str) -> Vec<(&'static str, NaiveDate)> {
         .filter(|m| m.to.eq_ignore_ascii_case(ticker))
         .map(|m| (m.from, m.effective_date))
         .collect()
+}
+
+pub fn rename_quantity_override(ticker: &str, source: &str) -> Option<rust_decimal::Decimal> {
+    rename_mappings()
+        .iter()
+        .find(|m| m.to.eq_ignore_ascii_case(ticker) && m.from.eq_ignore_ascii_case(source))
+        .and_then(|m| m.target_quantity)
 }
 
 /// Get latest price for an asset

@@ -1,55 +1,43 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/cli/`: clap command definitions and flags.
-- `src/db/`: schema (`schema.sql`), models, and SQLite access helpers.
-- `src/importers/`: CEI/Negociação, Movimentação, IRPF PDF, ofertas públicas; `file_detector.rs` auto-detects formats.
-- `src/corporate_actions/`: split/bonus handling and adjustment tracking.
-- `src/tax/`: average-cost matcher, swing/day trade rules, DARF, IRPF, loss carryforward.
-- `src/reports/`: portfolio and performance reports.
-- `tests/`: integration tests plus generated fixtures (`tests/generate_test_files.rs`).
-
-## Architecture & Data Flow
-1. **Import**: file → importer → normalized `transactions` in SQLite (`~/.interest/data.db`).
-2. **Corporate actions**: actions adjust pre‑ex‑date transactions and are tracked in `corporate_action_adjustments` to stay idempotent.
-3. **Tax**: average-cost matcher (day trade separated) → gains/losses → exemptions and loss carryforward → DARF payments.
-4. **Portfolio**: DB positions + price fetch (Yahoo/Brapi) → P&L report.
+- `src/cli/`: CLI definitions (clap).
+- `src/db/`: models, schema, and SQLite operations.
+- `src/importers/`: CEI Excel/CSV, Movimentacao, IRPF PDF parsers + file detection.
+- `src/corporate_actions/`: split/reverse-split/bonus handling with idempotent adjustments.
+- `src/tax/`: average-cost basis, swing/day trade rules, loss carryforward, DARF, IRPF.
+- `src/pricing/`: Yahoo/Brapi price fetching.
+- `src/reports/`: portfolio/performance output.
+- `tests/`: integration tests; `tests/generate_test_files.rs` for fixtures.
 
 ## Build, Test, and Development Commands
-```bash
-cargo build
-cargo build --release
-cargo test
-cargo test irpf
-cargo test corporate_actions
-./target/debug/interest portfolio show
-cargo run -- import .git/negociacao.xlsx
-```
-Use `RUST_LOG=debug cargo test test_name -- --nocapture` for noisy import debugging.
-
-## Developer Workflow
-1. Import data into a fresh DB: `rm ~/.interest/data.db && cargo run -- import <file.xlsx>`.
-2. Add missing transactions/corporate actions as needed (use original pre‑split values).
-3. Validate results with `interest portfolio show` and targeted `sqlite3` queries.
-4. When changing importers, add fixtures and an integration test.
+- `cargo build` / `cargo build --release`: compile debug/release.
+- `cargo test`: run all tests.
+- `cargo test irpf`, `cargo test corporate_actions`, `cargo test tax_integration_tests`: focused suites.
+- `cargo run -- portfolio show`: view current positions.
+- `cargo run -- import <file>`: import CEI/Movimentacao.
+- `cargo run -- import-irpf <pdf> <year> --dry-run`: preview IRPF imports.
+- DB lives at `~/.interest/data.db` (inspect with `sqlite3 ~/.interest/data.db`).
 
 ## Coding Style & Naming Conventions
-- Rust 2021, 4‑space indentation, `snake_case`.
-- **Never use `f64` for money/quantity**; use `rust_decimal::Decimal` end‑to‑end.
-- Maintain chronological processing (`ORDER BY trade_date ASC`) for cost basis correctness.
-- Units with `11` suffix are not always FIIs; avoid hard‑coding assumptions.
+- Rust standard style; keep `rustfmt` defaults (4-space indent).
+- Use `rust_decimal::Decimal` for all money/quantity values; never `f64`.
+- Keep transaction processing ordered by `trade_date`.
+- Use clear, short names; follow Rust conventions (`snake_case`, `CamelCase`).
 
 ## Testing Guidelines
-- Unit tests live in-module; integration tests in `tests/`.
-- Use `tempfile::NamedTempFile` for isolated DBs.
-- When adding import formats, extend `tests/generate_test_files.rs` and add an integration test.
+- Unit tests live alongside modules under `#[cfg(test)]`.
+- Integration tests live in `tests/` and should use isolated temp DBs.
+- Add tests for import edge cases and corporate action idempotency.
+
+## Architecture Overview
+- Import pipeline: file detector -> parser -> DB transactions.
+- Corporate actions adjust historical transactions; adjustments are tracked in a junction table to prevent double application.
+- Tax calculations use average cost basis (day trade separated) and apply exemptions/loss carryforward per category.
 
 ## Commit & Pull Request Guidelines
-- Commit messages are short, imperative, and scoped (e.g., `Add ofertas públicas import...`).
-- PRs should include: summary, test command(s), and data assumptions (e.g., split ratios).
+- Commit messages are short, imperative, and capitalized (see `git log --oneline`).
+- PRs should include a concise description, relevant test output, and any data/assumption changes.
 
-## Configuration & Invariants
-- Database path: `~/.interest/data.db`; inspect with `sqlite3 ~/.interest/data.db`.
-- `quantity × price` must remain constant across corporate action adjustments.
-- Corporate actions must be idempotent (use the junction table).
-- No negative positions; sells must be fully covered by prior buys.
+## Agent Notes
+- Align changes with `CLAUDE.md`, especially the Decimal precision and corporate action invariants.

@@ -126,6 +126,115 @@ pub fn import_movimentacao_entries(
             }
         };
 
+        if entry.movement_type == "Desdobro" {
+            let qty = match entry.quantity {
+                Some(qty) if qty > Decimal::ZERO => qty,
+                _ => {
+                    skipped_actions += 1;
+                    continue;
+                }
+            };
+            if let Some(last_date) = last_action_date {
+                if entry.date <= last_date {
+                    skipped_actions_old += 1;
+                    continue;
+                }
+            }
+
+            if let Some((ratio_from, ratio_to)) =
+                infer_split_ratio_from_credit(conn, asset_id, entry, qty)?
+            {
+                let mut action = match entry.to_corporate_action(asset_id) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("Failed to convert entry to corporate action: {}", e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+                action.ratio_from = ratio_from;
+                action.ratio_to = ratio_to;
+                let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
+                action.notes = Some(match action.notes.take() {
+                    Some(existing) if !existing.is_empty() => {
+                        format!("{} | {}", existing, note_suffix)
+                    }
+                    _ => note_suffix,
+                });
+
+                let action_id = match db::insert_corporate_action(conn, &action) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!("Error inserting corporate action: {}", e);
+                        errors += 1;
+                        continue;
+                    }
+                };
+                action.id = Some(action_id);
+                imported_actions += 1;
+                max_action_date = Some(match max_action_date {
+                    Some(current) if current >= action.event_date => current,
+                    _ => action.event_date,
+                });
+
+                let asset = db::Asset {
+                    id: Some(asset_id),
+                    ticker: ticker.to_string(),
+                    asset_type,
+                    name: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                };
+                match corporate_actions::apply_corporate_action(conn, &action, &asset) {
+                    Ok(adjusted) => {
+                        if adjusted > 0 {
+                            auto_applied_actions += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to auto-apply corporate action for {} on {}: {}",
+                            ticker,
+                            action.event_date,
+                            e
+                        );
+                        errors += 1;
+                    }
+                }
+            } else {
+                let bonus_tx = db::Transaction {
+                    id: None,
+                    asset_id,
+                    transaction_type: db::TransactionType::Buy,
+                    trade_date: entry.date,
+                    settlement_date: Some(entry.date),
+                    quantity: qty,
+                    price_per_unit: Decimal::ZERO,
+                    total_cost: Decimal::ZERO,
+                    fees: Decimal::ZERO,
+                    is_day_trade: false,
+                    quota_issuance_date: None,
+                    notes: Some(format!("Desdobro credit from movimentacao: {}", entry.product)),
+                    source: "MOVIMENTACAO".to_string(),
+                    created_at: chrono::Utc::now(),
+                };
+                match db::insert_transaction(conn, &bonus_tx) {
+                    Ok(_) => {
+                        imported_actions += 1;
+                        max_action_date = Some(match max_action_date {
+                            Some(current) if current >= entry.date => current,
+                            _ => entry.date,
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Error inserting Desdobro transaction: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
         if entry.movement_type == "Atualização" {
             let qty = match entry.quantity {
                 Some(qty) if qty > Decimal::ZERO => qty,
@@ -181,29 +290,6 @@ pub fn import_movimentacao_entries(
                 continue;
             }
         };
-
-        if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
-            if let Some((ratio_from, ratio_to)) =
-                infer_split_ratio_from_credit(conn, asset_id, entry)?
-            {
-                action.ratio_from = ratio_from;
-                action.ratio_to = ratio_to;
-                let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
-                action.notes = Some(match action.notes.take() {
-                    Some(existing) if !existing.is_empty() => {
-                        format!("{} | {}", existing, note_suffix)
-                    }
-                    _ => note_suffix,
-                });
-            }
-        }
-        if entry.movement_type == "Desdobro" && action.ratio_from == 1 && action.ratio_to == 1 {
-            warn!(
-                "Desdobro ratio unknown for {} on {}; defaulting to 1:1",
-                ticker,
-                entry.date
-            );
-        }
 
         if let Some(last_date) = last_action_date {
             if action.event_date <= last_date {
@@ -559,6 +645,7 @@ fn infer_split_ratio_from_credit(
     conn: &Connection,
     asset_id: i64,
     entry: &MovimentacaoEntry,
+    credit_qty: Decimal,
 ) -> Result<Option<(i32, i32)>> {
     use rust_decimal::prelude::ToPrimitive;
 
@@ -566,18 +653,7 @@ fn infer_split_ratio_from_credit(
         return Ok(None);
     }
 
-    let credit_qty = match entry.quantity {
-        Some(qty) if qty > Decimal::ZERO => qty,
-        _ => return Ok(None),
-    };
-
-    let mut old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
-    if let Some(ticker) = entry.ticker.as_deref() {
-        let carryover = rename_carryover_quantity(conn, ticker, entry.date)?;
-        if carryover > Decimal::ZERO {
-            old_qty += carryover;
-        }
-    }
+    let old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
     if old_qty <= Decimal::ZERO {
         warn!(
             "Cannot infer split ratio for {} on {}: position before date is {}",
@@ -625,37 +701,4 @@ fn infer_split_ratio_from_credit(
     }
 
     Ok(Some((1, selected_ratio.unwrap())))
-}
-
-fn rename_carryover_quantity(
-    conn: &Connection,
-    target_ticker: &str,
-    before_date: chrono::NaiveDate,
-) -> Result<Decimal> {
-    use rusqlite::OptionalExtension;
-
-    let mut total = Decimal::ZERO;
-
-    for (source_ticker, effective_date) in db::rename_sources_for(target_ticker) {
-        if effective_date >= before_date {
-            continue;
-        }
-
-        let source_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM assets WHERE ticker = ?1",
-                [source_ticker],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        if let Some(id) = source_id {
-            let source_qty = db::get_asset_position_before_date(conn, id, effective_date)?;
-            if source_qty > Decimal::ZERO {
-                total += source_qty;
-            }
-        }
-    }
-
-    Ok(total)
 }
