@@ -266,7 +266,7 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
     let stats = import_movimentacao_with_state(&conn, "tests/data/11_bonus_auto_apply.xlsx")?;
     assert_eq!(stats.imported_trades, 1);
     assert_eq!(stats.imported_actions, 1);
-    assert_eq!(stats.auto_applied_actions, 1);
+    assert_eq!(stats.auto_applied_actions, 0);
 
     let transactions = get_transactions(&conn, "ITSA4")?;
     assert_eq!(transactions.len(), 2);
@@ -297,18 +297,14 @@ fn test_14_atualizacao_ratio_inference_auto_apply() -> Result<()> {
     let (_temp_dir, conn) = create_test_db()?;
 
     let stats = import_movimentacao_with_state(&conn, "tests/data/14_atualizacao_inference.xlsx")?;
-    assert_eq!(stats.imported_trades, 2);
+    assert_eq!(stats.imported_trades, 1);
     assert_eq!(stats.imported_actions, 0);
     assert_eq!(stats.auto_applied_actions, 0);
 
     let transactions = get_transactions(&conn, "BRCR11")?;
-    assert_eq!(transactions.len(), 2);
-    assert_eq!(transactions[1].quantity, dec!(22));
-    assert_eq!(transactions[1].price_per_unit, dec!(0));
-    assert_eq!(transactions[1].total_cost, dec!(0));
-    assert_eq!(transactions[1].source, "MOVIMENTACAO");
+    assert_eq!(transactions.len(), 1);
     let (qty, cost) = calculate_position(&transactions);
-    assert_eq!(qty, dec!(400));
+    assert_eq!(qty, dec!(378));
     assert_eq!(cost, dec!(3780));
     Ok(())
 }

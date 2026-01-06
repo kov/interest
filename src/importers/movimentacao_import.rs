@@ -126,6 +126,68 @@ pub fn import_movimentacao_entries(
             }
         };
 
+        if entry.movement_type == "Bonificação em Ativos" {
+            use rust_decimal::RoundingStrategy;
+
+            let qty = match entry.quantity {
+                Some(qty) if qty > Decimal::ZERO => qty,
+                _ => {
+                    skipped_actions += 1;
+                    continue;
+                }
+            };
+            if let Some(last_date) = last_action_date {
+                if entry.date <= last_date {
+                    skipped_actions_old += 1;
+                    continue;
+                }
+            }
+
+            let integer_qty = qty.round_dp_with_strategy(0, RoundingStrategy::ToZero);
+            let fractional_qty = qty - integer_qty;
+            if integer_qty > Decimal::ZERO {
+                let mut notes = format!(
+                    "Bonificação em Ativos credit from movimentacao: {}",
+                    entry.product
+                );
+                if fractional_qty > Decimal::ZERO {
+                    notes = format!("{}; fractional remainder: {}", notes, fractional_qty);
+                }
+                let bonus_tx = db::Transaction {
+                    id: None,
+                    asset_id,
+                    transaction_type: db::TransactionType::Buy,
+                    trade_date: entry.date,
+                    settlement_date: Some(entry.date),
+                    quantity: integer_qty,
+                    price_per_unit: Decimal::ZERO,
+                    total_cost: Decimal::ZERO,
+                    fees: Decimal::ZERO,
+                    is_day_trade: false,
+                    quota_issuance_date: None,
+                    notes: Some(notes),
+                    source: "MOVIMENTACAO".to_string(),
+                    created_at: chrono::Utc::now(),
+                };
+                match db::insert_transaction(conn, &bonus_tx) {
+                    Ok(_) => {
+                        imported_actions += 1;
+                        max_action_date = Some(match max_action_date {
+                            Some(current) if current >= entry.date => current,
+                            _ => entry.date,
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Error inserting Bonificação em Ativos transaction: {}", e);
+                        errors += 1;
+                    }
+                }
+            } else {
+                skipped_actions += 1;
+            }
+            continue;
+        }
+
         if entry.movement_type == "Desdobro" {
             let qty = match entry.quantity {
                 Some(qty) if qty > Decimal::ZERO => qty,

@@ -142,29 +142,44 @@ pub fn apply_corporate_action(
     let ratio_to = Decimal::from(action.ratio_to);
 
     if action.action_type == crate::db::CorporateActionType::Bonus {
-        let total_old_qty: Decimal = transactions.iter().map(|tx| tx.quantity).sum();
-        let new_total_qty = total_old_qty * ratio_to / ratio_from;
-        let bonus_qty = new_total_qty - total_old_qty;
+        use rust_decimal::RoundingStrategy;
 
-        if bonus_qty > Decimal::ZERO {
+        let net_qty: Decimal = transactions
+            .iter()
+            .map(|tx| match tx.transaction_type {
+                TransactionType::Buy => tx.quantity,
+                TransactionType::Sell => -tx.quantity,
+            })
+            .sum();
+        let new_total_qty = net_qty * ratio_to / ratio_from;
+        let bonus_qty = new_total_qty - net_qty;
+        let integer_bonus = bonus_qty.round_dp_with_strategy(0, RoundingStrategy::ToZero);
+        let fractional_bonus = bonus_qty - integer_bonus;
+
+        if integer_bonus > Decimal::ZERO {
+            let mut notes = format!(
+                "Bonus shares from {} (ratio {}:{})",
+                action.action_type.as_str(),
+                action.ratio_from,
+                action.ratio_to
+            );
+            if fractional_bonus > Decimal::ZERO {
+                notes = format!("{}; fractional remainder: {}", notes, fractional_bonus);
+            }
+
             let bonus_tx = Transaction {
                 id: None,
                 asset_id: action.asset_id,
                 transaction_type: TransactionType::Buy,
                 trade_date: action.ex_date,
                 settlement_date: Some(action.ex_date),
-                quantity: bonus_qty,
+                quantity: integer_bonus,
                 price_per_unit: Decimal::ZERO,
                 total_cost: Decimal::ZERO,
                 fees: Decimal::ZERO,
                 is_day_trade: false,
                 quota_issuance_date: None,
-                notes: Some(format!(
-                    "Bonus shares from {} (ratio {}:{})",
-                    action.action_type.as_str(),
-                    action.ratio_from,
-                    action.ratio_to
-                )),
+                notes: Some(notes),
                 source: "CORPORATE_ACTION".to_string(),
                 created_at: chrono::Utc::now(),
             };
