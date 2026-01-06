@@ -152,33 +152,6 @@ pub fn get_asset_position_before_date(
     Ok(position)
 }
 
-/// Check if a transaction already exists (duplicate detection)
-pub fn transaction_exists(
-    conn: &Connection,
-    asset_id: i64,
-    trade_date: &chrono::NaiveDate,
-    transaction_type: &TransactionType,
-    quantity: &rust_decimal::Decimal,
-) -> Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT COUNT(*) FROM transactions
-         WHERE asset_id = ?1 AND trade_date = ?2
-           AND transaction_type = ?3 AND quantity = ?4",
-    )?;
-
-    let count: i64 = stmt.query_row(
-        params![
-            asset_id,
-            trade_date,
-            transaction_type.as_str(),
-            quantity.to_string()
-        ],
-        |row| row.get(0),
-    )?;
-
-    Ok(count > 0)
-}
-
 /// Get last imported date for a source and entry type
 pub fn get_last_import_date(
     conn: &Connection,

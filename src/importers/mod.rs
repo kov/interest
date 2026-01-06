@@ -16,7 +16,6 @@ pub use cei_excel::RawTransaction;
 pub use movimentacao_excel::MovimentacaoEntry;
 pub use movimentacao_import::import_movimentacao_entries;
 pub use ofertas_publicas_excel::OfertaPublicaEntry;
-pub use irpf_pdf::IrpfPosition;
 pub use file_detector::FileType;
 
 /// Result of importing a file with auto-detection
@@ -25,7 +24,6 @@ pub enum ImportResult {
     Cei(Vec<RawTransaction>),
     Movimentacao(Vec<MovimentacaoEntry>),
     OfertasPublicas(Vec<OfertaPublicaEntry>),
-    IrpfPositions(Vec<IrpfPosition>),
 }
 
 /// Import file with automatic format detection

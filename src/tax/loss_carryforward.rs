@@ -8,6 +8,7 @@ use super::swing_trade::TaxCategory;
 
 /// Loss carryforward entry
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LossCarryforward {
     pub id: Option<i64>,
     pub year: i32,
@@ -113,6 +114,7 @@ pub fn record_loss(
 }
 
 /// Get total remaining losses by category
+#[allow(dead_code)]
 pub fn get_total_losses_by_category(
     conn: &Connection,
 ) -> Result<HashMap<TaxCategory, Decimal>> {

@@ -554,10 +554,6 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             Ok(())
         }
 
-        importers::ImportResult::IrpfPositions(_) => {
-            // This should never happen - IRPF imports use handle_irpf_import directly
-            unreachable!("IrpfPositions should not be returned by import_file_auto")
-        }
     }
 }
 

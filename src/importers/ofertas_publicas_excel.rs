@@ -20,6 +20,7 @@ pub struct OfertaPublicaEntry {
     pub offer: String,
     pub ticker: String,
     pub raw_ticker: String,
+    #[allow(dead_code)]
     pub institution: String,
     pub quantity: Decimal,
     pub unit_price: Decimal,

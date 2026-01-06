@@ -56,6 +56,7 @@ impl TaxCategory {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_exempt(&self) -> bool {
         matches!(self, TaxCategory::FiInfra)
     }

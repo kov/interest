@@ -37,6 +37,7 @@ pub struct MovimentacaoEntry {
     pub movement_type: String,      // Compra, Venda, Liquidação Termo, Desdobro, etc.
     pub product: String,            // Full product name with ticker
     pub ticker: Option<String>,     // Extracted ticker
+    #[allow(dead_code)]
     pub institution: String,
     pub quantity: Option<Decimal>,
     pub unit_price: Option<Decimal>,
@@ -208,12 +209,14 @@ impl MovimentacaoEntry {
     }
 
     /// Check if this is a term contract liquidation
+    #[allow(dead_code)]
     pub fn is_term_liquidation(&self) -> bool {
         self.movement_type == "Liquidação Termo"
     }
 
     /// Get the term contract ticker (adds 'T' suffix to base ticker)
     /// Used for matching liquidations to their original term purchases
+    #[allow(dead_code)]
     pub fn get_term_ticker(&self) -> Option<String> {
         if let Some(base_ticker) = &self.ticker {
             Some(format!("{}T", base_ticker))

@@ -6,6 +6,7 @@ use super::swing_trade::{MonthlyTaxCalculation, TaxCategory};
 
 /// DARF payment information
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DarfPayment {
     pub year: i32,
     pub month: u32,
@@ -77,6 +78,7 @@ fn calculate_darf_due_date(year: i32, month: u32) -> Result<NaiveDate> {
 }
 
 /// Format DARF payment for display
+#[allow(dead_code)]
 pub fn format_darf_payment(payment: &DarfPayment) -> String {
     format!(
         "DARF {code} - {description}\n  Vencimento: {due_date}\n  Valor: R$ {amount:.2}",
@@ -88,6 +90,7 @@ pub fn format_darf_payment(payment: &DarfPayment) -> String {
 }
 
 /// Format all DARF payments for a month
+#[allow(dead_code)]
 pub fn format_monthly_darf_summary(payments: &[DarfPayment], year: i32, month: u32) -> String {
     if payments.is_empty() {
         return format!("Nenhum DARF a pagar para {}/{}", month, year);

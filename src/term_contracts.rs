@@ -46,6 +46,7 @@ pub fn is_term_contract(ticker: &str) -> bool {
 
 /// Get the base ticker from a term contract ticker
 /// Example: "ANIM3T" -> "ANIM3"
+#[allow(dead_code)]
 pub fn get_base_ticker(term_ticker: &str) -> String {
     if is_term_contract(term_ticker) {
         term_ticker[..term_ticker.len() - 1].to_string()

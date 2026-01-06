@@ -22,6 +22,7 @@ pub struct IrpfPosition {
     pub quantity: Decimal,      // Shares held at year-end
     pub total_cost: Decimal,    // Cost basis from IRPF
     pub average_cost: Decimal,  // Calculated: total_cost / quantity
+    #[allow(dead_code)]
     pub cnpj: Option<String>,
 }
 

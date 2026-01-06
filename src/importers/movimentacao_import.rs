@@ -16,6 +16,7 @@ pub struct ImportStats {
     pub imported_actions: usize,
     pub skipped_actions: usize,
     pub skipped_actions_old: usize,
+    #[allow(dead_code)]
     pub auto_applied_actions: usize,
     pub errors: usize,
 }
