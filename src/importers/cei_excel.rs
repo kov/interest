@@ -49,6 +49,31 @@ impl RawTransaction {
         }
     }
 
+    pub fn is_option_exercise(&self) -> bool {
+        let market = self.market.as_deref().unwrap_or("");
+        let upper = market.to_uppercase();
+        let has_exercise = upper.contains("EXERC") || upper.contains("EXERCÍCIO");
+        let has_option = upper.contains("OPCAO") || upper.contains("OPÇÃO");
+        has_exercise && has_option
+    }
+
+    pub fn option_exercise_underlying_base(&self) -> Option<String> {
+        if !self.is_option_exercise() {
+            return None;
+        }
+
+        if self.ticker.len() < 4 {
+            return None;
+        }
+
+        let base: String = self.ticker.chars().take(4).collect();
+        if base.chars().all(|c| c.is_ascii_alphabetic()) {
+            Some(base.to_uppercase())
+        } else {
+            None
+        }
+    }
+
     /// Convert to Transaction model with asset type detection
     pub fn to_transaction(&self, asset_id: i64) -> Result<Transaction> {
         let transaction_type = TransactionType::from_str(&self.transaction_type)
@@ -365,6 +390,46 @@ fn parse_date(cell: &Data) -> Result<NaiveDate> {
     }
 }
 
+pub fn resolve_option_exercise_ticker<F>(
+    raw_tx: &RawTransaction,
+    asset_exists: F,
+) -> Result<(String, Option<String>)>
+where
+    F: Fn(&str) -> Result<bool>,
+{
+    let mut normalized_ticker = raw_tx.normalized_ticker();
+    let mut notes_override: Option<String> = None;
+
+    if raw_tx.is_option_exercise() {
+        if let Some(base) = raw_tx.option_exercise_underlying_base() {
+            let candidate_4 = format!("{}4", base);
+            let candidate_3 = format!("{}3", base);
+            let resolved = if asset_exists(&candidate_4)? {
+                candidate_4
+            } else if asset_exists(&candidate_3)? {
+                candidate_3
+            } else {
+                candidate_4
+            };
+
+            if resolved != normalized_ticker {
+                let market_note = raw_tx
+                    .market
+                    .clone()
+                    .unwrap_or_else(|| "Exercício de opção".to_string());
+                notes_override = Some(format!(
+                    "{} (exercício de opção via {})",
+                    market_note,
+                    raw_tx.ticker
+                ));
+                normalized_ticker = resolved;
+            }
+        }
+    }
+
+    Ok((normalized_ticker, notes_override))
+}
+
 /// Parse decimal from cell (handles numbers, strings with Brazilian format)
 fn parse_decimal(cell: &Data) -> Result<Decimal> {
     match cell {
@@ -464,5 +529,22 @@ mod tests {
     fn test_parse_date_brazilian_format() {
         let result = parse_date(&Data::String("15/03/2025".to_string())).unwrap();
         assert_eq!(result, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap());
+    }
+
+    #[test]
+    fn test_is_option_exercise() {
+        let tx = RawTransaction {
+            ticker: "ITSAA101E".to_string(),
+            transaction_type: "Venda".to_string(),
+            trade_date: NaiveDate::from_ymd_opt(2022, 1, 21).unwrap(),
+            quantity: Decimal::from(2000),
+            price: Decimal::from(9),
+            fees: Decimal::ZERO,
+            total: Decimal::from(19060),
+            market: Some("Exercício de Opção de Compra".to_string()),
+        };
+
+        assert!(tx.is_option_exercise());
+        assert_eq!(tx.option_exercise_underlying_base(), Some("ITSA".to_string()));
     }
 }

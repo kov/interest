@@ -150,6 +150,7 @@ async fn main() -> Result<()> {
 /// Handle import command with automatic format detection
 async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
     use colored::Colorize;
+    use rusqlite::OptionalExtension;
     use tabled::{Table, Tabled, settings::Style};
 
     info!("Importing from: {}", file_path);
@@ -219,6 +220,17 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
 
             let last_import_date = db::get_last_import_date(&conn, "CEI", "trades")?;
 
+            let asset_exists = |ticker: &str| -> Result<bool> {
+                let exists: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM assets WHERE ticker = ?1",
+                        [ticker],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(exists.is_some())
+            };
+
             for raw_tx in &raw_transactions {
                 if let Some(last_date) = last_import_date {
                     if raw_tx.trade_date <= last_date {
@@ -228,7 +240,8 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 }
 
                 // Detect asset type from ticker
-                let normalized_ticker = raw_tx.normalized_ticker();
+                let (normalized_ticker, notes_override) =
+                    importers::cei_excel::resolve_option_exercise_ticker(raw_tx, &asset_exists)?;
                 let asset_type = db::AssetType::detect_from_ticker(&normalized_ticker)
                     .unwrap_or(db::AssetType::Stock);
 
@@ -243,7 +256,7 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 };
 
                 // Convert to Transaction model
-                let transaction = match raw_tx.to_transaction(asset_id) {
+                let mut transaction = match raw_tx.to_transaction(asset_id) {
                     Ok(tx) => tx,
                     Err(e) => {
                         eprintln!("Error converting transaction for {}: {}", raw_tx.ticker, e);
@@ -251,6 +264,9 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                         continue;
                     }
                 };
+                if let Some(notes) = notes_override {
+                    transaction.notes = Some(notes);
+                }
 
                 // Insert transaction
                 match db::insert_transaction(&conn, &transaction) {

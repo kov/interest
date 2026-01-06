@@ -18,6 +18,7 @@ use interest::importers::movimentacao_excel::parse_movimentacao_excel;
 use interest::importers::import_movimentacao_entries;
 use interest::importers::movimentacao_import::ImportStats;
 use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
+use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::tax::cost_basis::AverageCostMatcher;
 use interest::term_contracts::process_term_liquidations;
 use rust_decimal::Decimal;
@@ -57,6 +58,27 @@ fn test_13_ofertas_publicas_import_normalizes_ticker() -> Result<()> {
     assert_eq!(entry.ticker, "AMBP3");
     assert_eq!(entry.raw_ticker, "AMBP3L");
     assert_eq!(entry.quantity, Decimal::from(1064));
+    Ok(())
+}
+
+#[test]
+fn test_14_option_exercise_resolves_underlying_ticker() -> Result<()> {
+    let raw_tx = interest::importers::RawTransaction {
+        ticker: "ITSAA101E".to_string(),
+        transaction_type: "Venda".to_string(),
+        trade_date: chrono::NaiveDate::from_ymd_opt(2022, 1, 21).unwrap(),
+        quantity: Decimal::from(2000),
+        price: Decimal::from(9),
+        fees: Decimal::ZERO,
+        total: Decimal::from(19060),
+        market: Some("Exercício de Opção de Compra".to_string()),
+    };
+
+    let asset_exists = |ticker: &str| -> Result<bool> { Ok(ticker == "ITSA4") };
+    let (resolved, notes) = resolve_option_exercise_ticker(&raw_tx, asset_exists)?;
+
+    assert_eq!(resolved, "ITSA4");
+    assert!(notes.unwrap_or_default().contains("ITSAA101E"));
     Ok(())
 }
 
