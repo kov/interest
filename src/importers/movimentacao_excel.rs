@@ -160,7 +160,8 @@ impl MovimentacaoEntry {
         // [0] Entrada/Saída, [1] Data, [2] Movimentação, [3] Produto
         // [4] Instituição, [5] Quantidade, [6] Preço unitário, [7] Valor da Operação
 
-        let direction = row.first()
+        let direction = row
+            .first()
             .and_then(|d| d.get_string())
             .ok_or_else(|| anyhow!("Missing direction (Entrada/Saída)"))?
             .to_string();
@@ -239,7 +240,9 @@ impl MovimentacaoEntry {
     /// Used for matching liquidations to their original term purchases
     #[allow(dead_code)]
     pub fn get_term_ticker(&self) -> Option<String> {
-        self.ticker.as_ref().map(|base_ticker| format!("{}T", base_ticker))
+        self.ticker
+            .as_ref()
+            .map(|base_ticker| format!("{}T", base_ticker))
     }
 
     /// Determine if this is a corporate action

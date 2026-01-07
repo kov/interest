@@ -77,6 +77,7 @@ interest prices update
 ### Schema Overview
 
 **Core Tables:**
+
 - `assets` - Ticker definitions (ticker, asset_type, name)
 - `transactions` - Buy/sell records with average cost tracking
 - `corporate_actions` - Splits, reverse splits, bonuses
@@ -89,16 +90,19 @@ interest prices update
 ### Key Design Decisions
 
 1. **Decimal Precision**
+
    - All monetary values stored as TEXT (Decimal strings) for exact precision
    - Never use floating point (`f64`) for financial calculations
    - SQLite type affinity handled with `ValueRef` pattern matching
 
 2. **Corporate Action Tracking**
+
    - Junction table prevents double-adjustment
    - Tracks: action_id, transaction_id, old/new quantity/price
    - Enables idempotent application
 
 3. **Foreign Keys**
+
    - Enabled for referential integrity
    - Cascading deletes where appropriate
 
@@ -119,6 +123,7 @@ interest import <file.xlsx> --dry-run
 ```
 
 **Supported formats:**
+
 - B3/CEI "Negociação de Ativos" Excel exports
 - CSV exports from CEI
 
@@ -146,6 +151,7 @@ Examples:
 ```
 
 **Important:** When adding historical transactions:
+
 - **Enter the original quantities and prices** (as you remember them)
 - The system automatically applies any corporate actions that occurred after the trade date
 - No need to calculate post-split values yourself
@@ -224,11 +230,13 @@ interest portfolio performance --period 1y
 ```
 
 **Output includes:**
+
 - Ticker, quantity, average cost, current price
 - Current value, unrealized P&L (amount and %)
 - Total portfolio value and P&L
 
 **Calculations:**
+
 - Uses average cost basis for sales
 - Automatically accounts for corporate actions
 - Real-time prices from Yahoo Finance/Brapi.dev
@@ -244,6 +252,7 @@ interest prices history PETR4 --from 2023-01-01 --to 2023-12-31
 ```
 
 **Price sources:**
+
 1. **Yahoo Finance** - Primary (ticker.SA suffix)
 2. **Brapi.dev** - Fallback for Brazilian stocks
 3. **Note:** BDRs may not have corporate action data in Brapi.dev
@@ -265,13 +274,13 @@ interest tax summary 2025
 
 The tool auto-detects asset types from ticker suffixes:
 
-| Type | Ticker Pattern | Example | Tax Treatment |
-|------|---------------|---------|---------------|
-| **STOCK** | Ends in 3-6 | PETR4, VALE3 | Swing: 15%, R$20k/month exempt |
-| **FII** | Ends in 11 | MXRF11, HGLG11 | Pre-2026 quotas: exempt dividends, 20% gains<br>Post-2026: 5% dividends, 17.5% gains |
-| **FIAGRO** | Ends in 11 | AGRO11 | Same as FII |
-| **FI-INFRA** | Ends in 11 | IFRA11 | Same as FII |
-| **BDR** | Ends in 34 | A1MD34 (AMD) | Special handling, limited API data |
+| Type         | Ticker Pattern | Example        | Tax Treatment                                                                        |
+| ------------ | -------------- | -------------- | ------------------------------------------------------------------------------------ |
+| **STOCK**    | Ends in 3-6    | PETR4, VALE3   | Swing: 15%, R$20k/month exempt                                                       |
+| **FII**      | Ends in 11     | MXRF11, HGLG11 | Pre-2026 quotas: exempt dividends, 20% gains<br>Post-2026: 5% dividends, 17.5% gains |
+| **FIAGRO**   | Ends in 11     | AGRO11         | Same as FII                                                                          |
+| **FI-INFRA** | Ends in 11     | IFRA11         | Same as FII                                                                          |
+| **BDR**      | Ends in 34     | A1MD34 (AMD)   | Special handling, limited API data                                                   |
 
 **Manual override:** Asset type can be modified directly in the database if auto-detection is incorrect.
 
@@ -282,10 +291,12 @@ The tool auto-detects asset types from ticker suffixes:
 **Rate:** 15% on monthly net profit (may become 17.5% if new law passes)
 
 **Exemption:**
+
 - **Stocks only**: Sales below R$20,000/month
 - **FII/FIAGRO/FI-INFRA**: No exemption
 
 **Calculation method:**
+
 1. Sum all sales for the month by asset type
 2. Calculate profit/loss for each sale using average cost basis
 3. Net profit = total profits - total losses
@@ -305,6 +316,7 @@ The tool auto-detects asset types from ticker suffixes:
 ### IRPF Annual Report (TODO)
 
 **Required reporting:**
+
 - All transactions (buys/sells) with dates and values
 - Monthly tax paid (DARFs submitted)
 - Current holdings as of December 31 (Bens e Direitos section)
@@ -314,6 +326,7 @@ The tool auto-detects asset types from ticker suffixes:
 ### Fund Income Tax (2026 New Rules)
 
 **FII/FIAGRO/FI-INFRA:**
+
 - **Quotas issued ≤ 2025:**
   - Dividends: Tax-exempt
   - Capital gains: 20%
@@ -322,6 +335,7 @@ The tool auto-detects asset types from ticker suffixes:
   - Capital gains: 17.5%
 
 **Amortization (Capital Return):**
+
 - 20% tax withheld at source
 - **Reduces cost basis** of your investment
 - Not counted as income, but lowers future capital gains
@@ -335,6 +349,7 @@ The tool auto-detects asset types from ticker suffixes:
 **Assumption:** Financial calculations require exact decimal precision to avoid rounding errors in tax calculations.
 
 **Implementation:**
+
 - All prices, quantities, and monetary values use `rust_decimal::Decimal`
 - Never use `f64` for financial calculations
 - Database stores decimals as TEXT to preserve precision
@@ -347,11 +362,13 @@ The tool auto-detects asset types from ticker suffixes:
 **Assumption:** Cost basis is calculated using average cost per asset.
 
 **Implementation:**
+
 - Transactions processed in chronological order (by `trade_date`)
 - Earliest purchases matched against sales first
 - Proportional cost basis calculated for partial sales
 
 **Example:**
+
 ```
 Portfolio: Buy 100 @ R$10 = R$1,000
            Buy 50 @ R$15 = R$750
@@ -367,11 +384,13 @@ Sell 75 shares:
 **Problem:** Previously, reapplying a corporate action would double-adjust transactions (e.g., 1000 → 100 → 10).
 
 **Solution:** Junction table `corporate_action_adjustments` records every adjustment:
+
 - Tracks: `(action_id, transaction_id)` pair
 - Stores: old/new quantity, old/new price
 - Prevents: Double-adjustment on reapply
 
 **Benefits:**
+
 - **Idempotent:** Can reapply actions safely
 - **Auditable:** Know exactly which transactions were adjusted
 - **Reversible:** Could implement undo if needed
@@ -382,6 +401,7 @@ Sell 75 shares:
 
 **Implementation:**
 When adding a manual transaction:
+
 1. Insert with user-provided quantity/price
 2. Find all applied corporate actions with `ex_date > trade_date`
 3. Apply them in chronological order
@@ -389,6 +409,7 @@ When adding a manual transaction:
 5. Record adjustments in junction table
 
 **Example:**
+
 ```bash
 # User adds pre-split purchase
 interest transactions add A1MD34 buy 1000 50 2020-01-15
@@ -405,6 +426,7 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15
 **Assumption:** CEI only provides 5 years of transaction history (nothing before ~2019).
 
 **Workarounds:**
+
 1. **Manual transaction entry** for pre-2019 data
 2. **Potential IRPF PDF import** (TODO) - annual tax declarations have full history
 3. **Other sources** (TODO) - broker statements, personal records
@@ -414,12 +436,14 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15
 ### 6. Transaction Source Tracking
 
 **Implementation:** `source` field on every transaction:
+
 - `CEI` - Imported from CEI export
 - `MANUAL` - Manually added by user
 - `B3_PORTAL` - Future: Direct B3 integration
 - `IRPF` - Future: Extracted from tax declaration PDFs
 
 **Why:**
+
 - Debug data quality issues
 - Understand data provenance
 - Prioritize which sources to trust on duplicates
@@ -427,6 +451,7 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15
 ### 7. Corporate Actions Data Sources
 
 **Challenges:**
+
 - **Brapi.dev:** Has data for Brazilian stocks, **but NOT for BDRs** (e.g., A1MD34 = AMD)
 - **Investing.com:** Has comprehensive data but **no API** (Cloudflare protection blocks scraping)
 - **Yahoo Finance:** Provides adjusted prices but not raw corporate action events
@@ -434,6 +459,7 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15
 **Current solution:** Manual entry (`interest actions add`)
 
 **Future solutions (TODO):**
+
 - Headless browser (Puppeteer/Playwright) to scrape investing.com
 - B3 official data API (if they provide one)
 - CSV import for bulk entry from investing.com exports
@@ -443,6 +469,7 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15
 **Assumption:** Same asset, date, type, and quantity = duplicate transaction.
 
 **Implementation:** Before inserting, check:
+
 ```sql
 SELECT COUNT(*) FROM transactions
 WHERE asset_id = ? AND trade_date = ?
@@ -458,11 +485,13 @@ WHERE asset_id = ? AND trade_date = ?
 **Brazilian stock settlement:** T+2 (trade date + 2 business days)
 
 **Why it matters for funds:**
+
 - Quotas issued in 2025 or earlier: Old tax rules (exempt dividends)
 - Quotas issued in 2026 or later: New tax rules (5% dividend tax)
 - Determined by `settlement_date` or `quota_issuance_date`
 
 **Implementation:**
+
 - CEI imports include `settlement_date` from export
 - Manual entries default to same as `trade_date`
 - TODO: Track quota vintage for accurate tax calculations
@@ -480,11 +509,13 @@ WHERE asset_id = ? AND trade_date = ?
 ### 11. Database Schema Versioning
 
 **Current approach:**
+
 - Schema version tracked in `metadata` table (`schema_version = 1`)
 - Schema SQL in `src/db/schema.sql`
 - Executed on first run or when database doesn't exist
 
 **Future migrations:**
+
 1. Increment `schema_version` in new schema.sql
 2. Add migration SQL in `src/db/migrations/v2.sql`
 3. Check version on startup, run migrations if needed
@@ -497,6 +528,7 @@ WHERE asset_id = ? AND trade_date = ?
 **Implementation:** Prices stored in `price_history` table with `price_date`.
 
 **Cache strategy:**
+
 - Check `price_history` for today's date first
 - Only fetch from API if not cached or stale
 - TODO: Add configurable TTL (time-to-live)
@@ -512,6 +544,7 @@ Error: A1MD34: Insufficient purchase history: Selling 100 units but only 6.1 ava
 ```
 
 **Causes:**
+
 1. Missing pre-2019 transactions (CEI limitation)
 2. Shares from term contracts/transfers not in export
 3. Corporate action not applied (quantities still pre-split)
@@ -558,16 +591,19 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15
 ### Price Fetch Failures
 
 **Yahoo Finance 404:**
+
 ```
 Error: Failed to fetch price for PETR4: 404 Not Found
 ```
 
 **Solutions:**
+
 - Verify ticker format (should be TICKER.SA, e.g., PETR4.SA) - automatic in code
 - Some tickers may not be listed on Yahoo Finance
 - Try Brapi.dev as fallback (automatic)
 
 **Brapi.dev errors:**
+
 - No authentication required as of 2026-01
 - BDRs may not have complete data (especially corporate actions)
 
@@ -576,6 +612,7 @@ Error: Failed to fetch price for PETR4: 404 Not Found
 **Problem:** Decimal values read as wrong type from database.
 
 **Cause:** SQLite stores numbers differently based on value:
+
 - Whole numbers (100) → INTEGER
 - Decimals (100.50) → TEXT or REAL
 
@@ -597,6 +634,7 @@ match row.get_ref(idx)? {
 See `TODO` file for planned features.
 
 When contributing:
+
 1. **Never use `f64`** for financial calculations - always use `Decimal`
 2. **Write tests** for tax calculations and average cost logic
 3. **Document assumptions** in code comments
@@ -607,6 +645,7 @@ When contributing:
 **Language:** Rust (2021 edition)
 
 **Key Dependencies:**
+
 - `rusqlite` - SQLite database (considered Limbo but stuck with SQLite)
 - `clap` - CLI framework with derive macros
 - `rust_decimal` - Precise financial arithmetic

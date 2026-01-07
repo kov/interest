@@ -171,9 +171,7 @@ pub async fn fetch_quote(
             .regular_market_price
             .and_then(Decimal::from_f64_retain)
             .ok_or_else(|| anyhow!("No price available"))?,
-        open: quote
-            .regular_market_open
-            .and_then(Decimal::from_f64_retain),
+        open: quote.regular_market_open.and_then(Decimal::from_f64_retain),
         high: quote
             .regular_market_day_high
             .and_then(Decimal::from_f64_retain),

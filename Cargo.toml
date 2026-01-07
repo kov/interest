@@ -30,7 +30,7 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # Headless browser for web scraping (investing.com, etc.)
 headless_chrome = "1.0"
-scraper = "0.22"  # HTML parsing
+scraper = "0.22"        # HTML parsing
 
 # Serialization/deserialization
 serde = { version = "1.0", features = ["derive"] }
@@ -39,8 +39,8 @@ serde_json = "1.0"
 # Excel/CSV/PDF parsing
 calamine = "0.26"
 csv = "1.3"
-pdf-extract = "0.7"  # IRPF PDF parsing
-regex = "1.10"       # Pattern matching for IRPF data extraction
+pdf-extract = "0.7" # IRPF PDF parsing
+regex = "1.10"      # Pattern matching for IRPF data extraction
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }

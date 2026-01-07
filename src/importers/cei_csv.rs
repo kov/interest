@@ -84,9 +84,10 @@ fn find_columns(headers: &csv::StringRecord) -> Result<CsvColumnMapping> {
 
         // Date
         if text.contains("data")
-            && (text.contains("negó") || text.contains("nego") || date_idx.is_none()) {
-                date_idx = Some(idx);
-            }
+            && (text.contains("negó") || text.contains("nego") || date_idx.is_none())
+        {
+            date_idx = Some(idx);
+        }
 
         // Ticker
         if text.contains("código")

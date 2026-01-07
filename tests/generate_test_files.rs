@@ -17,14 +17,16 @@ fn create_workbook_with_header() -> Workbook {
     worksheet.set_name("Movimentação").unwrap();
 
     // Header row
-    let headers = ["Entrada/Saída",
+    let headers = [
+        "Entrada/Saída",
         "Data",
         "Movimentação",
         "Produto",
         "Instituição",
         "Quantidade",
         "Preço unitário",
-        "Valor da Operação"];
+        "Valor da Operação",
+    ];
 
     for (col, header) in headers.iter().enumerate() {
         worksheet.write_string(0, col as u16, *header).unwrap();
