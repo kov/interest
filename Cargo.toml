@@ -57,7 +57,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Table formatting for CLI output
-tabled = "0.16"
+tabled = { version = "0.16", features = ["ansi"] }
 colored = "2.1"
 
 # Terminal UI (TUI) framework

@@ -14,7 +14,6 @@ use tracing::debug;
 ///
 #[derive(Debug, Clone)]
 pub struct MonthlyIrpfSummary {
-    pub month: u32,
     pub month_name: &'static str,
     pub total_sales: Decimal,
     pub total_profit: Decimal,
@@ -147,7 +146,6 @@ fn compute_annual_report_with_carry(
         annual_total_tax += month_tax;
 
         monthly_summaries.push(MonthlyIrpfSummary {
-            month,
             month_name: get_month_name(month),
             total_sales: month_sales,
             total_profit: month_profit,

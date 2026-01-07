@@ -19,6 +19,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::io::Write as _;
+use tax::swing_trade::TaxCategory;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -2390,30 +2391,312 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
         println!();
     }
 
-    // Monthly breakdown
-    println!("{}", "Monthly Summary:".bold());
+    // Helper function to check if a category is a stock category
+    fn is_stock_category(category: &TaxCategory) -> bool {
+        matches!(
+            category,
+            TaxCategory::StockSwingTrade | TaxCategory::StockDayTrade
+        )
+    }
+
+    fn is_fii_category(category: &TaxCategory) -> bool {
+        matches!(
+            category,
+            TaxCategory::FiiSwingTrade
+                | TaxCategory::FiiDayTrade
+                | TaxCategory::FiagroSwingTrade
+                | TaxCategory::FiagroDayTrade
+        )
+    }
+
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
+
+    // Helper struct for table display with colored profit/loss and offset
+    #[derive(Tabled, Clone)]
+    struct TaxTableRow {
+        #[tabled(rename = "Month")]
+        month: String,
+        #[tabled(rename = "Category")]
+        category: String,
+        #[tabled(rename = "Sales")]
+        sales: String,
+        #[tabled(rename = "Profit/Loss")]
+        profit_loss: String,
+        #[tabled(rename = "Exempt")]
+        exempt: String,
+        #[tabled(rename = "Offset")]
+        offset: String,
+        #[tabled(rename = "Tax")]
+        tax: String,
+    }
+
+    // Helper to color profit/loss values
+    fn color_profit_loss(value: Decimal, formatted: &str) -> String {
+        if value > Decimal::ZERO {
+            formatted.green().to_string()
+        } else if value < Decimal::ZERO {
+            formatted.red().to_string()
+        } else {
+            "—".to_string()
+        }
+    }
+
+    // Helper to color offset values
+    fn color_offset(value: Decimal, formatted: &str) -> String {
+        if value > Decimal::ZERO {
+            formatted.cyan().to_string()
+        } else {
+            "—".to_string()
+        }
+    }
+
+    // STOCKS SECTION
+    println!("{}", "📈 Stocks (Ações)".bold());
+
+    let mut stock_total_sales = Decimal::ZERO;
+    let mut stock_total_profit = Decimal::ZERO;
+    let mut stock_total_loss = Decimal::ZERO;
+    let mut stock_total_offset = Decimal::ZERO;
+    let mut stock_total_tax = Decimal::ZERO;
+
+    let mut stock_rows: Vec<TaxTableRow> = Vec::new();
+    let mut last_month: Option<&str> = None;
+
     for summary in &report.monthly_summaries {
-        println!("\n  {} ({}):", summary.month_name.bold(), summary.month);
-        println!(
-            "    Sales:  {}",
-            format!("R$ {:.2}", summary.total_sales).cyan()
-        );
-        println!(
-            "    Profit: {}",
-            format!("R$ {:.2}", summary.total_profit).green()
-        );
-        println!(
-            "    Loss:   {}",
-            format!("R$ {:.2}", summary.total_loss).red()
-        );
-        println!(
-            "    Tax:    {}",
-            format!("R$ {:.2}", summary.tax_due).yellow()
-        );
+        let month_stock_categories: Vec<_> = summary
+            .by_category
+            .iter()
+            .filter(|(cat, _)| is_stock_category(cat))
+            .collect();
+
+        if !month_stock_categories.is_empty() {
+            // Add a separator before a new month (except first)
+            if last_month.is_some() && !stock_rows.is_empty() {
+                stock_rows.push(TaxTableRow {
+                    month: String::new(),
+                    category: String::new(),
+                    sales: String::new(),
+                    profit_loss: String::new(),
+                    exempt: String::new(),
+                    offset: String::new(),
+                    tax: String::new(),
+                });
+            }
+            last_month = Some(summary.month_name);
+
+            let mut is_first_in_month = true;
+
+            for (category, cat_summary) in month_stock_categories {
+                let month_str = if is_first_in_month {
+                    summary.month_name.to_string()
+                } else {
+                    String::new()
+                };
+                is_first_in_month = false;
+
+                stock_total_sales += cat_summary.sales;
+                stock_total_profit += if cat_summary.profit_loss > Decimal::ZERO {
+                    cat_summary.profit_loss
+                } else {
+                    Decimal::ZERO
+                };
+                stock_total_loss += if cat_summary.profit_loss < Decimal::ZERO {
+                    cat_summary.profit_loss.abs()
+                } else {
+                    Decimal::ZERO
+                };
+                stock_total_offset += cat_summary.loss_offset_applied;
+                stock_total_tax += cat_summary.tax_due;
+
+                let sales_str = format!("R$ {:.2}", cat_summary.sales);
+                let profit_raw = format!("R$ {:.2}", cat_summary.profit_loss);
+                let profit_str = color_profit_loss(cat_summary.profit_loss, &profit_raw);
+
+                // Exempt: ✓ or ✗
+                let exempt_str = if cat_summary.exemption_applied > Decimal::ZERO {
+                    "✓".green().to_string()
+                } else {
+                    "✗".red().to_string()
+                };
+
+                // Offset: show only applied loss offset
+                let offset_value = cat_summary.loss_offset_applied;
+
+                let offset_raw = if offset_value == Decimal::ZERO {
+                    "—".to_string()
+                } else {
+                    format!("R$ {:.2}", offset_value)
+                };
+                let offset_str = color_offset(offset_value, &offset_raw);
+
+                let tax_str = if cat_summary.tax_due > Decimal::ZERO {
+                    format!("R$ {:.2}", cat_summary.tax_due)
+                } else {
+                    "—".to_string()
+                };
+
+                stock_rows.push(TaxTableRow {
+                    month: month_str,
+                    category: category.display_name().to_string(),
+                    sales: sales_str,
+                    profit_loss: profit_str,
+                    exempt: exempt_str,
+                    offset: offset_str,
+                    tax: tax_str,
+                });
+            }
+        }
+    }
+
+    if !stock_rows.is_empty() {
+        // Add total row
+        stock_rows.push(TaxTableRow {
+            month: "TOTAL".to_string(),
+            category: String::new(),
+            sales: format!("R$ {:.2}", stock_total_sales),
+            profit_loss: format!("R$ {:.2}", stock_total_profit),
+            exempt: String::new(),
+            offset: if stock_total_offset > Decimal::ZERO {
+                format!("R$ {:.2}", stock_total_offset).cyan().to_string()
+            } else {
+                "—".to_string()
+            },
+            tax: format!("R$ {:.2}", stock_total_tax),
+        });
+
+        let table = Table::new(&stock_rows)
+            .with(Style::rounded())
+            .with(Modify::new(Columns::new(2..)).with(Alignment::right()))
+            .to_string();
+        println!("{}\n", table);
+    }
+
+    // FII/FIAGRO SECTION
+    println!("{}", "💰 FIIs and FIAGROs".bold());
+
+    let mut fii_total_sales = Decimal::ZERO;
+    let mut fii_total_profit = Decimal::ZERO;
+    let mut fii_total_loss = Decimal::ZERO;
+    let mut fii_total_offset = Decimal::ZERO;
+    let mut fii_total_tax = Decimal::ZERO;
+
+    let mut fii_rows: Vec<TaxTableRow> = Vec::new();
+    let mut last_month_fii: Option<&str> = None;
+
+    for summary in &report.monthly_summaries {
+        let month_fii_categories: Vec<_> = summary
+            .by_category
+            .iter()
+            .filter(|(cat, _)| is_fii_category(cat))
+            .collect();
+
+        if !month_fii_categories.is_empty() {
+            // Add a separator before a new month (except first)
+            if last_month_fii.is_some() && !fii_rows.is_empty() {
+                fii_rows.push(TaxTableRow {
+                    month: String::new(),
+                    category: String::new(),
+                    sales: String::new(),
+                    profit_loss: String::new(),
+                    exempt: String::new(),
+                    offset: String::new(),
+                    tax: String::new(),
+                });
+            }
+            last_month_fii = Some(summary.month_name);
+
+            let mut is_first_in_month = true;
+
+            for (category, cat_summary) in month_fii_categories {
+                let month_str = if is_first_in_month {
+                    summary.month_name.to_string()
+                } else {
+                    String::new()
+                };
+                is_first_in_month = false;
+
+                fii_total_sales += cat_summary.sales;
+                fii_total_profit += if cat_summary.profit_loss > Decimal::ZERO {
+                    cat_summary.profit_loss
+                } else {
+                    Decimal::ZERO
+                };
+                fii_total_loss += if cat_summary.profit_loss < Decimal::ZERO {
+                    cat_summary.profit_loss.abs()
+                } else {
+                    Decimal::ZERO
+                };
+                fii_total_offset += cat_summary.loss_offset_applied;
+                fii_total_tax += cat_summary.tax_due;
+
+                let sales_str = format!("R$ {:.2}", cat_summary.sales);
+                let profit_raw = format!("R$ {:.2}", cat_summary.profit_loss);
+                let profit_str = color_profit_loss(cat_summary.profit_loss, &profit_raw);
+
+                // Exempt: ✓ or ✗
+                let exempt_str = if cat_summary.exemption_applied > Decimal::ZERO {
+                    "✓".green().to_string()
+                } else {
+                    "✗".red().to_string()
+                };
+
+                // Offset: show only applied loss offset
+                let offset_value = cat_summary.loss_offset_applied;
+
+                let offset_raw = if offset_value == Decimal::ZERO {
+                    "—".to_string()
+                } else {
+                    format!("R$ {:.2}", offset_value)
+                };
+                let offset_str = color_offset(offset_value, &offset_raw);
+
+                let tax_str = if cat_summary.tax_due > Decimal::ZERO {
+                    format!("R$ {:.2}", cat_summary.tax_due)
+                } else {
+                    "—".to_string()
+                };
+
+                fii_rows.push(TaxTableRow {
+                    month: month_str,
+                    category: category.display_name().to_string(),
+                    sales: sales_str,
+                    profit_loss: profit_str,
+                    exempt: exempt_str,
+                    offset: offset_str,
+                    tax: tax_str,
+                });
+            }
+        }
+    }
+
+    if !fii_rows.is_empty() {
+        // Add total row
+        fii_rows.push(TaxTableRow {
+            month: "TOTAL".to_string(),
+            category: String::new(),
+            sales: format!("R$ {:.2}", fii_total_sales),
+            profit_loss: format!("R$ {:.2}", fii_total_profit),
+            exempt: String::new(),
+            offset: if fii_total_offset > Decimal::ZERO {
+                format!("R$ {:.2}", fii_total_offset).cyan().to_string()
+            } else {
+                "—".to_string()
+            },
+            tax: format!("R$ {:.2}", fii_total_tax),
+        });
+
+        let table = Table::new(&fii_rows)
+            .with(Style::rounded())
+            .with(Modify::new(Columns::new(2..)).with(Alignment::right()))
+            .to_string();
+        println!("{}\n", table);
     }
 
     // Annual totals
-    println!("\n{} Annual Totals:", "📈".cyan().bold());
+    println!("\n{} Annual Summary:", "📋".cyan().bold());
     println!(
         "  Total Sales:  {}",
         format!("R$ {:.2}", report.annual_total_sales).cyan()
@@ -2426,6 +2709,17 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
         "  Total Loss:   {}",
         format!("R$ {:.2}", report.annual_total_loss).red()
     );
+    let total_loss_offset: Decimal = report
+        .monthly_summaries
+        .iter()
+        .map(|s| s.total_loss_offset_applied)
+        .sum();
+    if total_loss_offset > Decimal::ZERO {
+        println!(
+            "  Total Loss Offset: {}",
+            format!("R$ {:.2}", total_loss_offset).yellow()
+        );
+    }
     println!(
         "  {} {}\n",
         "Total Tax:".bold(),

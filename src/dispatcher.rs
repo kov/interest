@@ -148,7 +148,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
     // Monthly breakdown
     println!("{}", "Monthly Summary:".bold());
     for summary in &report.monthly_summaries {
-        println!("\n  {} ({}):", summary.month_name.bold(), summary.month);
+        println!("\n  {}:", summary.month_name.bold());
         println!(
             "    Sales:  {}",
             format!("R$ {:.2}", summary.total_sales).cyan()
