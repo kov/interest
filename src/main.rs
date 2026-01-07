@@ -65,7 +65,15 @@ async fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
-    match cli.command {
+    // Default to interactive mode if no command given
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            return interest::ui::launch_tui().await;
+        }
+    };
+
+    match command {
         Commands::Import { file, dry_run } => handle_import(&file, dry_run, cli.json).await,
 
         Commands::ImportIrpf {
@@ -94,7 +102,7 @@ async fn main() -> Result<()> {
 
         Commands::Tax { action } => match action {
             TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
-            TaxCommands::Report { year } => handle_tax_report(year).await,
+            TaxCommands::Report { year, export } => handle_tax_report(year, export).await,
             TaxCommands::Summary { year } => handle_tax_summary(year).await,
         },
 
@@ -163,6 +171,8 @@ async fn main() -> Result<()> {
 
         Commands::Inspect { file, full, column } => handle_inspect(&file, full, column).await,
 
+        Commands::Interactive => interest::ui::launch_tui().await,
+
         Commands::ProcessTerms => handle_process_terms().await,
     }
 }
@@ -171,7 +181,10 @@ async fn main() -> Result<()> {
 async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Result<()> {
     use colored::Colorize;
     use rusqlite::OptionalExtension;
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
 
     info!("Importing from: {}", file_path);
 
@@ -218,7 +231,10 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                 })
                 .collect();
 
-            let table = Table::new(preview).with(Style::rounded()).to_string();
+            let table = Table::new(preview)
+                .with(Style::rounded())
+                .with(Modify::new(Columns::new(3..)).with(Alignment::right()))
+                .to_string();
             println!("{}", table);
 
             if raw_transactions.len() > 10 {
@@ -406,7 +422,10 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                     })
                     .collect();
 
-                let table = Table::new(preview).with(Style::rounded()).to_string();
+                let table = Table::new(preview)
+                    .with(Style::rounded())
+                    .with(Modify::new(Columns::new(3..)).with(Alignment::right()))
+                    .to_string();
                 println!("{}\n", table);
             }
 
@@ -556,7 +575,10 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                 })
                 .collect();
 
-            let table = Table::new(preview).with(Style::rounded()).to_string();
+            let table = Table::new(preview)
+                .with(Style::rounded())
+                .with(Modify::new(Columns::new(2..4)).with(Alignment::right()))
+                .to_string();
             println!("{}\n", table);
 
             if dry_run {
@@ -647,7 +669,10 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
 /// Handle IRPF PDF import command
 async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result<()> {
     use colored::Colorize;
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
 
     info!(
         "Importing IRPF positions from: {} for year {}",
@@ -700,7 +725,10 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
         })
         .collect();
 
-    let table = Table::new(preview).with(Style::rounded()).to_string();
+    let table = Table::new(preview)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::new(1..4)).with(Alignment::right()))
+        .to_string();
     println!("{}", table);
 
     if dry_run {
@@ -921,7 +949,10 @@ async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> 
     use anyhow::Context;
     use chrono::NaiveDate;
     use colored::Colorize;
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
 
     info!(
         "Fetching historical prices for {} from {} to {}",
@@ -990,7 +1021,10 @@ async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> 
         })
         .collect();
 
-    let table = Table::new(rows).with(Style::rounded()).to_string();
+    let table = Table::new(rows)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+        .to_string();
     println!("\n{}", table);
     println!(
         "\n{} Total: {} price points",
@@ -1122,7 +1156,10 @@ async fn handle_actions_update() -> Result<()> {
 /// Handle listing corporate actions
 async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<()> {
     use colored::Colorize;
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
 
     db::init_database(None)?;
     let conn = db::open_db(None)?;
@@ -1219,7 +1256,10 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
         })
         .collect();
 
-    let table = Table::new(rows).with(Style::rounded()).to_string();
+    let table = Table::new(rows)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::single(0)).with(Alignment::right()))
+        .to_string();
     println!("{}", table);
 
     println!("\n{} {} total actions", "ℹ".blue().bold(), results.len());
@@ -1920,9 +1960,6 @@ async fn handle_action_edit(
 
 /// Handle portfolio show command
 async fn handle_portfolio_show(asset_type: Option<&str>, json_output: bool) -> Result<()> {
-    use colored::Colorize;
-    use tabled::{settings::Style, Table, Tabled};
-
     info!("Generating portfolio report");
 
     // Initialize database
@@ -1964,178 +2001,49 @@ async fn handle_portfolio_show(asset_type: Option<&str>, json_output: bool) -> R
                 })
             );
         } else {
-            println!("{} No positions found", "ℹ".blue().bold());
-            println!("Import transactions first using: interest import <file>");
+            println!("{}", cli::formatters::format_empty_portfolio());
         }
         return Ok(());
     }
 
     if json_output {
-        // Serialize the report for JSON output
-        #[derive(Serialize)]
-        struct JsonPosition {
-            ticker: String,
-            asset_type: String,
-            quantity: String,
-            average_cost: String,
-            total_cost: String,
-            current_price: Option<String>,
-            current_value: Option<String>,
-            unrealized_pl: Option<String>,
-            unrealized_pl_pct: Option<String>,
-        }
-
-        #[derive(Serialize)]
-        struct JsonPortfolio {
-            positions: Vec<JsonPosition>,
-            total_cost: String,
-            total_value: String,
-            total_pl: String,
-            total_pl_pct: String,
-        }
-
-        let positions = report
-            .positions
-            .iter()
-            .map(|p| JsonPosition {
-                ticker: p.asset.ticker.clone(),
-                asset_type: p.asset.asset_type.as_str().to_string(),
-                quantity: p.quantity.to_string(),
-                average_cost: p.average_cost.to_string(),
-                total_cost: p.total_cost.to_string(),
-                current_price: p.current_price.map(|pr| pr.to_string()),
-                current_value: p.current_value.map(|v| v.to_string()),
-                unrealized_pl: p.unrealized_pl.map(|pl| pl.to_string()),
-                unrealized_pl_pct: p.unrealized_pl_pct.map(|pl| pl.to_string()),
-            })
-            .collect();
-
         println!(
             "{}",
-            json_success(&JsonPortfolio {
-                positions,
-                total_cost: report.total_cost.to_string(),
-                total_value: report.total_value.to_string(),
-                total_pl: report.total_pl.to_string(),
-                total_pl_pct: report.total_pl_pct.to_string(),
-            })
+            json_success(serde_json::json!({
+                "positions": report.positions.iter().map(|p| serde_json::json!({
+                    "ticker": p.asset.ticker,
+                    "asset_type": p.asset.asset_type.as_str(),
+                    "quantity": p.quantity.to_string(),
+                    "average_cost": p.average_cost.to_string(),
+                    "total_cost": p.total_cost.to_string(),
+                    "current_price": p.current_price.map(|pr| pr.to_string()),
+                    "current_value": p.current_value.map(|v| v.to_string()),
+                    "unrealized_pl": p.unrealized_pl.map(|pl| pl.to_string()),
+                    "unrealized_pl_pct": p.unrealized_pl_pct.map(|pl| pl.to_string()),
+                })).collect::<Vec<_>>(),
+                "total_cost": report.total_cost.to_string(),
+                "total_value": report.total_value.to_string(),
+                "total_pl": report.total_pl.to_string(),
+                "total_pl_pct": report.total_pl_pct.to_string(),
+            }))
         );
         return Ok(());
     }
 
-    // Display header
-    if let Some(ref filter) = asset_type_filter {
-        let filter_name: &db::AssetType = filter;
-        println!(
-            "\n{} Portfolio - {} only\n",
-            "📊".cyan().bold(),
-            filter_name.as_str().to_uppercase()
-        );
-    } else {
-        println!("\n{} Complete Portfolio\n", "📊".cyan().bold());
-    }
-
-    // Display positions table
-    #[derive(Tabled)]
-    struct PositionRow {
-        #[tabled(rename = "Ticker")]
-        ticker: String,
-        #[tabled(rename = "Type")]
-        asset_type: String,
-        #[tabled(rename = "Quantity")]
-        quantity: String,
-        #[tabled(rename = "Avg Cost")]
-        avg_cost: String,
-        #[tabled(rename = "Total Cost")]
-        total_cost: String,
-        #[tabled(rename = "Price")]
-        price: String,
-        #[tabled(rename = "Value")]
-        value: String,
-        #[tabled(rename = "P&L")]
-        pl: String,
-        #[tabled(rename = "P&L %")]
-        pl_pct: String,
-    }
-
-    let rows: Vec<PositionRow> = report
-        .positions
-        .iter()
-        .map(|p| {
-            let pl_str = if let Some(pl) = p.unrealized_pl {
-                if pl >= rust_decimal::Decimal::ZERO {
-                    format!("R$ {:.2}", pl).green().to_string()
-                } else {
-                    format!("R$ {:.2}", pl).red().to_string()
-                }
-            } else {
-                "-".to_string()
-            };
-
-            let pl_pct_str = if let Some(pl_pct) = p.unrealized_pl_pct {
-                if pl_pct >= rust_decimal::Decimal::ZERO {
-                    format!("{:.2}%", pl_pct).green().to_string()
-                } else {
-                    format!("{:.2}%", pl_pct).red().to_string()
-                }
-            } else {
-                "-".to_string()
-            };
-
-            PositionRow {
-                ticker: p.asset.ticker.clone(),
-                asset_type: p.asset.asset_type.as_str().to_string(),
-                quantity: format!("{:.2}", p.quantity),
-                avg_cost: format!("R$ {:.2}", p.average_cost),
-                total_cost: format!("R$ {:.2}", p.total_cost),
-                price: p
-                    .current_price
-                    .map(|pr| format!("R$ {:.2}", pr))
-                    .unwrap_or_else(|| "-".to_string()),
-                value: p
-                    .current_value
-                    .map(|v| format!("R$ {:.2}", v))
-                    .unwrap_or_else(|| "-".to_string()),
-                pl: pl_str,
-                pl_pct: pl_pct_str,
-            }
-        })
-        .collect();
-
-    let table = Table::new(rows).with(Style::rounded()).to_string();
-    println!("{}", table);
-
-    // Display summary
-    println!("\n{} Summary", "📈".cyan().bold());
+    // Use formatter for table output
+    let filter_str = asset_type.map(|f| f.to_uppercase());
     println!(
-        "  Total Cost:  {}",
-        format!("R$ {:.2}", report.total_cost).cyan()
+        "{}",
+        cli::formatters::format_portfolio_table(&report, filter_str.as_deref())
     );
-    println!(
-        "  Total Value: {}",
-        format!("R$ {:.2}", report.total_value).cyan()
-    );
-
-    if report.total_pl >= rust_decimal::Decimal::ZERO {
-        println!(
-            "  Total P&L:   {} ({})",
-            format!("R$ {:.2}", report.total_pl).green().bold(),
-            format!("{:.2}%", report.total_pl_pct).green().bold()
-        );
-    } else {
-        println!(
-            "  Total P&L:   {} ({})",
-            format!("R$ {:.2}", report.total_pl).red().bold(),
-            format!("{:.2}%", report.total_pl_pct).red().bold()
-        );
-    }
 
     // Display asset allocation if showing full portfolio
     if asset_type_filter.is_none() {
         let allocation = reports::calculate_allocation(&report);
 
         if allocation.len() > 1 {
-            println!("\n{} Asset Allocation", "🎯".cyan().bold());
+            use colored::Colorize;
+            println!("{} Asset Allocation", "🎯".cyan().bold());
 
             let mut alloc_vec: Vec<_> = allocation.iter().collect();
             alloc_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
@@ -2327,7 +2235,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
 }
 
 /// Handle IRPF annual report generation
-async fn handle_tax_report(year: i32) -> Result<()> {
+async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     use colored::Colorize;
 
     info!("Generating IRPF annual report for {}", year);
@@ -2409,12 +2317,13 @@ async fn handle_tax_report(year: i32) -> Result<()> {
         println!();
     }
 
-    // Export to CSV
-    let csv_content = tax::irpf::export_to_csv(&report);
-    let csv_path = format!("irpf_report_{}.csv", year);
-    std::fs::write(&csv_path, csv_content)?;
+    if export_csv {
+        let csv_content = tax::irpf::export_to_csv(&report);
+        let csv_path = format!("irpf_report_{}.csv", year);
+        std::fs::write(&csv_path, csv_content)?;
 
-    println!("{} Report exported to: {}\n", "✓".green().bold(), csv_path);
+        println!("{} Report exported to: {}\n", "✓".green().bold(), csv_path);
+    }
 
     Ok(())
 }
@@ -2422,7 +2331,10 @@ async fn handle_tax_report(year: i32) -> Result<()> {
 /// Handle tax summary display
 async fn handle_tax_summary(year: i32) -> Result<()> {
     use colored::Colorize;
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
 
     info!("Generating tax summary for {}", year);
 
@@ -2471,7 +2383,10 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
         })
         .collect();
 
-    let table = Table::new(rows).with(Style::rounded()).to_string();
+    let table = Table::new(rows)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+        .to_string();
     println!("{}", table);
 
     // Annual summary

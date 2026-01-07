@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+pub mod formatters;
+
 #[derive(Parser)]
 #[command(name = "interest")]
 #[command(
@@ -19,7 +21,7 @@ pub struct Cli {
     pub json: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -93,6 +95,9 @@ pub enum Commands {
         #[arg(short, long)]
         column: Option<usize>,
     },
+
+    /// Launch interactive TUI mode
+    Interactive,
 }
 
 #[derive(Subcommand)]
@@ -144,6 +149,10 @@ pub enum TaxCommands {
     Report {
         /// Year (e.g., 2025)
         year: i32,
+
+        /// Export report to CSV (irpf_report_<year>.csv)
+        #[arg(long)]
+        export: bool,
     },
 
     /// Show monthly tax summary for a year

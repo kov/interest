@@ -7,6 +7,7 @@ pub mod irpf_pdf;
 pub mod movimentacao_excel;
 pub mod movimentacao_import;
 pub mod ofertas_publicas_excel;
+pub mod validation;
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
