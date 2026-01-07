@@ -152,7 +152,7 @@ mod sql {
     }
 
     /// Helper to read Decimal from SQLite (handles INTEGER, REAL, TEXT)
-    fn get_decimal(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+    pub fn get_decimal(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
         use rusqlite::types::ValueRef;
 
         match row.get_ref(idx)? {
@@ -1122,6 +1122,79 @@ fn test_11_multi_asset_portfolio() -> Result<()> {
         .stdout(predicate::str::contains("100.00")) // PETR4 quantity
         .stdout(predicate::str::contains("200.00")) // VALE3 quantity
         .stdout(predicate::str::contains("50.00")); // MXRF11 quantity
+
+    Ok(())
+}
+
+#[test]
+fn test_irpf_import_sets_cutoff_dates() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+
+    // Import IRPF for year 2024
+    let irpf_path = "tests/data/irpf_minimal.pdf";
+    let mut cmd = base_cmd(&home);
+    cmd.arg("import-irpf").arg(irpf_path).arg("2024");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Import complete"));
+
+    // Verify opening position was created
+    let conn = open_db(Some(db_path))?;
+
+    let tx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transactions WHERE source = 'IRPF_PDF'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(tx_count, 1, "Should have 1 IRPF opening transaction");
+
+    // Verify the transaction details
+    let (ticker, quantity, date): (String, Decimal, String) = conn.query_row(
+        "SELECT a.ticker, t.quantity, t.trade_date
+         FROM transactions t
+         JOIN assets a ON t.asset_id = a.id
+         WHERE t.source = 'IRPF_PDF'",
+        [],
+        |row| Ok((row.get(0)?, sql::get_decimal(row, 1)?, row.get(2)?)),
+    )?;
+    assert_eq!(ticker, "ITSA4");
+    assert_eq!(quantity, dec!(100));
+    assert_eq!(date, "2024-12-31");
+
+    // Verify import_state cutoff dates were set for CEI and Movimentação
+    let cei_trades_date: String = conn.query_row(
+        "SELECT last_date FROM import_state WHERE source = 'CEI' AND entry_type = 'trades'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        cei_trades_date, "2024-12-31",
+        "CEI trades cutoff should be set to year-end"
+    );
+
+    let mov_trades_date: String = conn.query_row(
+        "SELECT last_date FROM import_state WHERE source = 'MOVIMENTACAO' AND entry_type = 'trades'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        mov_trades_date, "2024-12-31",
+        "Movimentação trades cutoff should be set to year-end"
+    );
+
+    let mov_actions_date: String = conn.query_row(
+        "SELECT last_date FROM import_state WHERE source = 'MOVIMENTACAO' AND entry_type = 'corporate_actions'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        mov_actions_date, "2024-12-31",
+        "Movimentação corporate actions cutoff should be set to year-end"
+    );
 
     Ok(())
 }

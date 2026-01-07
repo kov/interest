@@ -811,6 +811,24 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             replaced.to_string().yellow()
         );
     }
+
+    // Set import cutoff to prevent older CEI/Movimentação imports
+    let year_end = chrono::NaiveDate::from_ymd_opt(year, 12, 31)
+        .ok_or_else(|| anyhow::anyhow!("Invalid year: {}", year))?;
+
+    db::set_last_import_date(&conn, "CEI", "trades", year_end)?;
+    db::set_last_import_date(&conn, "MOVIMENTACAO", "trades", year_end)?;
+    db::set_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions", year_end)?;
+
+    println!(
+        "\n{} Set import cutoff to {} for CEI and Movimentação",
+        "ℹ".blue().bold(),
+        year_end.format("%Y-%m-%d")
+    );
+    println!(
+        "  This prevents importing older data that conflicts with these IRPF opening positions"
+    );
+
     println!(
         "\n{} These opening positions will be used for cost basis calculations",
         "ℹ".blue().bold()
