@@ -1,10 +1,19 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
+use tracing::debug;
 
 use super::swing_trade::TaxCategory;
+
+#[derive(Debug, Clone)]
+pub struct LossSnapshot {
+    #[allow(dead_code)]
+    pub year: i32,
+    pub ending_carry: HashMap<TaxCategory, Decimal>,
+    pub tx_fingerprint: String,
+}
 
 /// Loss carryforward entry
 #[derive(Debug, Clone)]
@@ -19,6 +28,7 @@ pub struct LossCarryforward {
 }
 
 /// Get all uncompensated losses for a specific category, ordered by date (FIFO)
+#[allow(dead_code)]
 pub fn get_losses_for_category(
     conn: &Connection,
     category: &TaxCategory,
@@ -50,6 +60,7 @@ pub fn get_losses_for_category(
 }
 
 /// Apply losses to a profit amount, returns (profit_after_loss_offset, total_loss_applied)
+#[allow(dead_code)]
 pub fn apply_losses_to_profit(
     conn: &Connection,
     category: &TaxCategory,
@@ -89,6 +100,7 @@ pub fn apply_losses_to_profit(
 }
 
 /// Record a new loss for carryforward
+#[allow(dead_code)]
 pub fn record_loss(
     conn: &Connection,
     year: i32,
@@ -128,19 +140,153 @@ pub fn get_total_losses_by_category(conn: &Connection) -> Result<HashMap<TaxCate
     let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
 
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((row.get::<_, String>(0)?, get_decimal_value(row, 1)?))
     })?;
 
     for row in rows {
-        let (category_str, total_str) = row?;
+        let (category_str, total) = row?;
         if let Ok(category) = category_str.parse::<TaxCategory>() {
-            if let Ok(total) = Decimal::from_str(&total_str) {
-                losses.insert(category, total);
-            }
+            losses.insert(category, total);
         }
     }
 
     Ok(losses)
+}
+
+/// Get remaining losses by category accrued before a given year (useful to show prior-year carryover).
+#[allow(dead_code)]
+pub fn get_remaining_losses_before_year(
+    conn: &Connection,
+    year: i32,
+) -> Result<HashMap<TaxCategory, Decimal>> {
+    let mut stmt = conn.prepare(
+        "SELECT tax_category, SUM(remaining_amount) as total
+         FROM loss_carryforward
+         WHERE remaining_amount > 0 AND year < ?1
+         GROUP BY tax_category",
+    )?;
+
+    let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
+
+    let rows = stmt.query_map([year], |row| {
+        Ok((row.get::<_, String>(0)?, get_decimal_value(row, 1)?))
+    })?;
+
+    for row in rows {
+        let (category_str, total) = row?;
+        if let Ok(category) = category_str.parse::<TaxCategory>() {
+            losses.insert(category, total);
+        }
+    }
+
+    Ok(losses)
+}
+
+/// Compute a lightweight fingerprint of tax-relevant transactions for a year.
+pub fn compute_year_fingerprint(conn: &Connection, year: i32) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) as cnt,
+                COALESCE(SUM(quantity), 0) as qty_sum,
+                COALESCE(SUM(total_cost), 0) as total_sum,
+                COALESCE(SUM(fees), 0) as fee_sum
+         FROM transactions
+         WHERE strftime('%Y', trade_date) = ?1",
+    )?;
+
+    let row = stmt.query_row([year.to_string()], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            get_decimal_value(row, 1)?,
+            get_decimal_value(row, 2)?,
+            get_decimal_value(row, 3)?,
+        ))
+    })?;
+
+    Ok(format!("{}:{}:{}:{}", row.0, row.1, row.2, row.3))
+}
+
+pub fn load_snapshots(conn: &Connection) -> Result<HashMap<i32, LossSnapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT year, tax_category, ending_remaining_amount, tx_fingerprint
+         FROM loss_carryforward_snapshots",
+    )?;
+
+    let mut by_year: HashMap<i32, LossSnapshot> = HashMap::new();
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i32>(0)?,
+            row.get::<_, String>(1)?,
+            get_decimal_value(row, 2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (year, cat_str, amount, fingerprint) = row?;
+        let category = cat_str
+            .parse::<TaxCategory>()
+            .unwrap_or(TaxCategory::StockSwingTrade);
+
+        let entry = by_year.entry(year).or_insert(LossSnapshot {
+            year,
+            ending_carry: HashMap::new(),
+            tx_fingerprint: fingerprint.clone(),
+        });
+
+        entry.ending_carry.insert(category, amount);
+        // If fingerprints differ across rows, keep the first; rows should share the same value.
+    }
+
+    let mut years: Vec<i32> = by_year.keys().copied().collect();
+    years.sort_unstable();
+    debug!(snapshot_years = ?years, "Loaded loss snapshots");
+
+    Ok(by_year)
+}
+
+pub fn upsert_snapshot(
+    conn: &Connection,
+    year: i32,
+    fingerprint: &str,
+    carry: &HashMap<TaxCategory, Decimal>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute(
+        "DELETE FROM loss_carryforward_snapshots WHERE year = ?1",
+        [year],
+    )?;
+
+    if carry.is_empty() {
+        // Persist an empty snapshot so we do not recompute this year again
+        tx.execute(
+            "INSERT INTO loss_carryforward_snapshots
+             (year, tax_category, ending_remaining_amount, tx_fingerprint)
+             VALUES (?1, ?2, 0, ?3)",
+            rusqlite::params![year, TaxCategory::StockSwingTrade.as_str(), fingerprint],
+        )?;
+    } else {
+        for (category, amount) in carry {
+            tx.execute(
+                "INSERT INTO loss_carryforward_snapshots
+                 (year, tax_category, ending_remaining_amount, tx_fingerprint)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![year, category.as_str(), amount.to_string(), fingerprint],
+            )?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn earliest_transaction_year(conn: &Connection) -> Result<Option<i32>> {
+    let mut stmt =
+        conn.prepare("SELECT MIN(CAST(strftime('%Y', trade_date) AS INTEGER)) FROM transactions")?;
+
+    let year: Option<i32> = stmt.query_row([], |row| row.get(0)).optional()?;
+    Ok(year)
 }
 
 /// Helper to read Decimal from SQLite

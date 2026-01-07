@@ -26,6 +26,16 @@ pub struct IrpfPosition {
     pub cnpj: Option<String>,
 }
 
+/// Represents loss carryforward amounts extracted from IRPF PDF
+#[derive(Debug, Clone)]
+pub struct IrpfLossCarryforward {
+    #[allow(dead_code)]
+    pub year: i32, // IRPF year (e.g., 2024)
+    pub stock_swing_loss: Decimal, // Ações (Operações Comuns) losses
+    pub stock_day_loss: Decimal,   // Ações (Day Trade) losses
+    pub fii_fiagro_loss: Decimal,  // FII/FIAGRO losses (combined)
+}
+
 impl IrpfPosition {
     /// Convert IRPF position to a virtual opening BUY transaction
     pub fn to_opening_transaction(&self, asset_id: i64) -> Result<Transaction> {
@@ -73,6 +83,98 @@ pub fn parse_irpf_pdf<P: AsRef<Path>>(path: P, year: i32) -> Result<Vec<IrpfPosi
 
     // Parse positions from the text
     parse_positions_from_text(&text, year)
+}
+
+/// Parse IRPF PDF and extract loss carryforward amounts for a specific year
+pub fn parse_irpf_pdf_losses<P: AsRef<Path>>(path: P, year: i32) -> Result<IrpfLossCarryforward> {
+    let path = path.as_ref();
+    info!("Parsing IRPF PDF losses: {:?} for year {}", path, year);
+
+    // Extract text from PDF
+    let text = extract_text(path).context("Failed to extract text from PDF")?;
+
+    // Find loss carryforward data from two sections:
+    // 1. "RENDA VARIÁVEL - OPERAÇÕES COMUNS/DAYTRADE - TITULAR" for stocks
+    // 2. "FUNDOS DE INVESTIMENTO IMOBILIÁRIO OU NAS CADEIAS PRODUTIVAS AGROINDUSTRIAIS - TITULAR" for FII/FIAGRO
+
+    let stock_swing_loss = extract_stock_losses(&text, "OPERAÇÕES COMUNS");
+    let stock_day_loss = extract_stock_losses(&text, "OPERAÇÕES DAY-TRADE");
+    let fii_fiagro_loss = extract_fii_fiagro_losses(&text);
+
+    Ok(IrpfLossCarryforward {
+        year,
+        stock_swing_loss: stock_swing_loss.unwrap_or(Decimal::ZERO),
+        stock_day_loss: stock_day_loss.unwrap_or(Decimal::ZERO),
+        fii_fiagro_loss: fii_fiagro_loss.unwrap_or(Decimal::ZERO),
+    })
+}
+
+/// Extract stock losses from the "RENDA VARIÁVEL - OPERAÇÕES COMUNS/DAYTRADE" section
+fn extract_stock_losses(text: &str, operation_type: &str) -> Option<Decimal> {
+    // Find the section for this operation type
+    let section_start = text.find("RENDA VARIÁVEL - OPERAÇÕES COMUNS")?;
+
+    // Get text from section start to a reasonable endpoint
+    let search_end = (section_start + 50000).min(text.len());
+    let search_text = &text[section_start..search_end];
+
+    // Look for "GANHOS LÍQUIDOS OU PERDAS - DEZ" (December section in stock losses)
+    // Then find "Prejuízo a compensar" with its value
+    let dezembro_marker = "GANHOS LÍQUIDOS OU PERDAS - DEZ";
+    let dezembro_start = search_text.find(dezembro_marker)?;
+    let dezembro_section = &search_text[dezembro_start..];
+
+    // Find the next section marker or end
+    let next_section = dezembro_section
+        .find("RENDA VARIÁVEL - OPERAÇÕES COMUNS/DAYTRADE - DEPENDENTES")
+        .unwrap_or(dezembro_section.len());
+    let target_text = &dezembro_section[..next_section];
+
+    // Extract "Prejuízo a compensar" line which has format:
+    // "Prejuízo a compensar                                                                          5,704.00                             0.00"
+    // We want the first number (for OPERAÇÕES COMUNS) or second number (for OPERAÇÕES DAY-TRADE)
+    let loss_regex = Regex::new(r"Prejuízo a compensar\s+([\d,\.]+)\s+([\d,\.]+)").ok()?;
+
+    let captures = loss_regex.captures(target_text)?;
+
+    // For OPERAÇÕES COMUNS, use first value; for DAY-TRADE, use second
+    let loss_str = if operation_type.contains("COMUNS") {
+        captures.get(1)?.as_str()
+    } else {
+        captures.get(2)?.as_str()
+    };
+
+    parse_brazilian_decimal(loss_str).ok()
+}
+
+/// Extract FII/FIAGRO losses from the "FUNDOS DE INVESTIMENTO IMOBILIÁRIO..." section
+fn extract_fii_fiagro_losses(text: &str) -> Option<Decimal> {
+    // Find the FII/FIAGRO section
+    let section_marker = "FUNDOS DE INVESTIMENTO IMOBILIÁRIO";
+    let section_start = text.find(section_marker)?;
+
+    // Get text from section start
+    let search_end = (section_start + 50000).min(text.len());
+    let search_text = &text[section_start..search_end];
+
+    // Find December section ("MÊS" header followed by months and then "Dezembro" column)
+    let dezembro_marker = "Dezembro";
+    let dezembro_pos = search_text.find(dezembro_marker)?;
+
+    // Go back to find the "PREJUÍZO A COMPENSAR" line in the December column
+    let search_back_start = dezembro_pos.saturating_sub(2000);
+    let search_forward = (dezembro_pos + 2000).min(search_text.len());
+    let relevant_section = &search_text[search_back_start..search_forward];
+
+    // Find "PREJUÍZO A COMPENSAR" followed by numbers across months
+    // The December value is the last number in that row
+    let loss_regex =
+        Regex::new(r"PREJUÍZO A COMPENSAR\s+(?:[\d,\.]+\s+)*?([\d,\.]+)\s*(?:\n|$)").ok()?;
+
+    let captures = loss_regex.captures(relevant_section)?;
+    let loss_str = captures.get(1)?.as_str();
+
+    parse_brazilian_decimal(loss_str).ok()
 }
 
 /// Parse positions from extracted PDF text

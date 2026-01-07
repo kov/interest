@@ -3,9 +3,14 @@ use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
+use super::loss_carryforward::{
+    compute_year_fingerprint, earliest_transaction_year, load_snapshots, upsert_snapshot,
+};
 use super::swing_trade::{calculate_monthly_tax, TaxCategory};
+use tracing::debug;
 
 /// Monthly summary for IRPF
+///
 #[derive(Debug, Clone)]
 pub struct MonthlyIrpfSummary {
     pub month: u32,
@@ -37,23 +42,59 @@ pub struct AnnualTaxReport {
     pub annual_total_profit: Decimal,
     pub annual_total_loss: Decimal,
     pub annual_total_tax: Decimal,
+    pub previous_losses_carry_forward: HashMap<TaxCategory, Decimal>,
     pub losses_to_carry_forward: HashMap<TaxCategory, Decimal>,
 }
 
-/// Generate annual IRPF report for a year
-pub fn generate_annual_report(conn: &Connection, year: i32) -> Result<AnnualTaxReport> {
+/// Progress events emitted while generating an annual report.
+#[derive(Debug, Clone)]
+pub enum ReportProgress {
+    Start {
+        target_year: i32,
+        #[allow(dead_code)]
+        earliest_year: i32,
+        #[allow(dead_code)]
+        snapshot_years: usize,
+    },
+    SnapshotHit {
+        #[allow(dead_code)]
+        year: i32,
+    },
+    SnapshotMiss {
+        #[allow(dead_code)]
+        year: i32,
+    },
+    SnapshotStale {
+        #[allow(dead_code)]
+        year: i32,
+    },
+    TargetCacheHit {
+        year: i32,
+    },
+    RecomputeStart {
+        from_year: i32,
+    },
+    RecomputedYear {
+        year: i32,
+    },
+}
+
+fn compute_annual_report_with_carry(
+    conn: &Connection,
+    year: i32,
+    starting_carry: HashMap<TaxCategory, Decimal>,
+) -> Result<(AnnualTaxReport, HashMap<TaxCategory, Decimal>)> {
     let mut monthly_summaries = Vec::new();
     let mut annual_total_sales = Decimal::ZERO;
     let mut annual_total_profit = Decimal::ZERO;
     let mut annual_total_loss = Decimal::ZERO;
     let mut annual_total_tax = Decimal::ZERO;
 
-    // Track accumulated losses by tax category for carryforward
-    let mut accumulated_losses: HashMap<TaxCategory, Decimal> = HashMap::new();
+    let mut carryforward = starting_carry.clone();
 
     // Process each month
     for month in 1..=12 {
-        let month_calculations = calculate_monthly_tax(conn, year, month)?;
+        let month_calculations = calculate_monthly_tax(conn, year, month, &mut carryforward)?;
 
         if month_calculations.is_empty() {
             continue;
@@ -74,12 +115,6 @@ pub fn generate_annual_report(conn: &Connection, year: i32) -> Result<AnnualTaxR
                 month_profit += net_pl;
             } else {
                 month_loss += net_pl.abs();
-
-                // Track losses for carryforward
-                let loss_entry = accumulated_losses
-                    .entry(calc.category.clone())
-                    .or_insert(Decimal::ZERO);
-                *loss_entry += net_pl.abs();
             }
 
             by_category.insert(
@@ -108,15 +143,161 @@ pub fn generate_annual_report(conn: &Connection, year: i32) -> Result<AnnualTaxR
         });
     }
 
-    Ok(AnnualTaxReport {
+    let ending_carry = carryforward
+        .iter()
+        .filter_map(|(k, v)| {
+            if v.is_zero() {
+                None
+            } else {
+                Some((k.clone(), *v))
+            }
+        })
+        .collect::<HashMap<_, _>>();
+
+    let report = AnnualTaxReport {
         year,
         monthly_summaries,
         annual_total_sales,
         annual_total_profit,
         annual_total_loss,
         annual_total_tax,
-        losses_to_carry_forward: accumulated_losses,
-    })
+        previous_losses_carry_forward: starting_carry
+            .iter()
+            .filter_map(|(k, v)| {
+                if v.is_zero() {
+                    None
+                } else {
+                    Some((k.clone(), *v))
+                }
+            })
+            .collect(),
+        losses_to_carry_forward: ending_carry.clone(),
+    };
+
+    Ok((report, ending_carry))
+}
+
+/// Generate annual IRPF report for a year (deterministic, snapshot-aware)
+#[allow(dead_code)]
+pub fn generate_annual_report(conn: &Connection, year: i32) -> Result<AnnualTaxReport> {
+    generate_annual_report_with_progress(conn, year, |_| {})
+}
+
+/// Generate annual IRPF report for a year with progress callbacks.
+pub fn generate_annual_report_with_progress<P>(
+    conn: &Connection,
+    year: i32,
+    mut progress: P,
+) -> Result<AnnualTaxReport>
+where
+    P: FnMut(ReportProgress),
+{
+    let earliest_year = earliest_transaction_year(conn)?.unwrap_or(year);
+
+    let snapshots = load_snapshots(conn)?;
+
+    debug!(
+        target_year = year,
+        earliest_year,
+        snapshot_years = snapshots.len(),
+        "Starting IRPF report generation with snapshot cache"
+    );
+    progress(ReportProgress::Start {
+        target_year: year,
+        earliest_year,
+        snapshot_years: snapshots.len(),
+    });
+
+    // Determine starting carry from the latest valid snapshot before or at target year
+    // and find the earliest year that needs recomputation.
+    let mut recompute_start = earliest_year;
+    let mut carry: HashMap<TaxCategory, Decimal> = HashMap::new();
+    let mut carry_before_target: HashMap<TaxCategory, Decimal> = HashMap::new();
+    let mut target_snapshot_valid = false;
+
+    // Find the latest consecutive snapshot chain with matching fingerprints before target
+    for y in earliest_year..=year {
+        let fingerprint = compute_year_fingerprint(conn, y)?;
+        if let Some(snapshot) = snapshots.get(&y) {
+            let match_fingerprint = snapshot.tx_fingerprint == fingerprint;
+            debug!(
+                target_year = year,
+                snapshot_year = y,
+                match_fingerprint,
+                "Snapshot lookup"
+            );
+            if match_fingerprint {
+                progress(ReportProgress::SnapshotHit { year: y });
+                if y == year {
+                    // For the target year, we want the starting carry BEFORE applying this snapshot
+                    carry_before_target = carry.clone();
+                    target_snapshot_valid = true;
+                }
+                // snapshot matches; we can use its ending carry for next year
+                carry = snapshot.ending_carry.clone();
+                recompute_start = y + 1;
+                continue;
+            } else {
+                // Snapshot exists but is stale; still honor its carry so imported IRPF losses are not lost
+                progress(ReportProgress::SnapshotStale { year: y });
+                carry = snapshot.ending_carry.clone();
+                recompute_start = y;
+                break;
+            }
+        } else {
+            debug!(target_year = year, snapshot_year = y, "Snapshot miss");
+            progress(ReportProgress::SnapshotMiss { year: y });
+            // missing snapshot: recompute from here with whatever carry we have
+            progress(ReportProgress::SnapshotStale { year: y });
+            recompute_start = y;
+            break;
+        }
+    }
+
+    if target_snapshot_valid {
+        debug!(
+            target_year = year,
+            "Using cached carry for target year; skipping recomputation"
+        );
+        progress(ReportProgress::TargetCacheHit { year });
+        let (report, _) = compute_annual_report_with_carry(conn, year, carry_before_target)?;
+        return Ok(report);
+    }
+
+    // Recompute from recompute_start through target year
+    debug!(
+        target_year = year,
+        recompute_start, "Recomputing carry snapshots"
+    );
+    progress(ReportProgress::RecomputeStart {
+        from_year: recompute_start,
+    });
+    let mut last_report = None;
+    for y in recompute_start..=year {
+        let fingerprint = compute_year_fingerprint(conn, y)?;
+        let (report, ending_carry) = compute_annual_report_with_carry(conn, y, carry.clone())?;
+        upsert_snapshot(conn, y, &fingerprint, &ending_carry)?;
+        debug!(
+            target_year = year,
+            recomputed_year = y,
+            "Recomputed year and updated snapshot"
+        );
+        progress(ReportProgress::RecomputedYear { year: y });
+        carry = ending_carry;
+        if y == year {
+            last_report = Some(report);
+        }
+    }
+
+    // If no recomputation was needed (all snapshots valid and target year < recompute_start)
+    if recompute_start > year {
+        // The carry at this point is the ending carry of the last snapshot at or before target
+        // We still need to compute the target year report using that carry as starting point
+        let (report, _) = compute_annual_report_with_carry(conn, year, carry)?;
+        return Ok(report);
+    }
+
+    last_report.ok_or_else(|| anyhow::anyhow!("Failed to compute annual report for {year}"))
 }
 
 /// Get month name in Portuguese
@@ -206,6 +387,7 @@ mod tests {
             annual_total_profit: Decimal::from(15000),
             annual_total_loss: Decimal::from(2000),
             annual_total_tax: Decimal::from(1950),
+            previous_losses_carry_forward: HashMap::new(),
             losses_to_carry_forward: HashMap::new(),
         };
 

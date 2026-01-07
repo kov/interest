@@ -4,6 +4,7 @@ use interest::db::{init_database, open_db, upsert_asset, AssetType, TransactionT
 use interest::tax::swing_trade::{calculate_monthly_tax, TaxCategory};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::collections::HashMap;
 use tempfile::NamedTempFile;
 
 /// Helper to create a test database
@@ -87,7 +88,8 @@ fn test_stock_swing_trade_under_exemption() -> Result<()> {
 
     // Calculate tax for January 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 1)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 1, &mut carry)?;
 
     // Should have one calculation for stock swing trade
     assert_eq!(calculations.len(), 1);
@@ -138,7 +140,8 @@ fn test_stock_swing_trade_over_exemption() -> Result<()> {
 
     // Calculate tax for February 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 2)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 2, &mut carry)?;
 
     assert_eq!(calculations.len(), 1);
 
@@ -188,7 +191,8 @@ fn test_stock_day_trade_always_taxable() -> Result<()> {
 
     // Calculate tax for March 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 3)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 3, &mut carry)?;
 
     assert_eq!(calculations.len(), 1);
 
@@ -238,7 +242,8 @@ fn test_fii_always_taxable_20_percent() -> Result<()> {
 
     // Calculate tax for April 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 4)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 4, &mut carry)?;
 
     assert_eq!(calculations.len(), 1);
 
@@ -288,7 +293,8 @@ fn test_fiagro_same_as_fii() -> Result<()> {
 
     // Calculate tax for May 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 5)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 5, &mut carry)?;
 
     assert_eq!(calculations.len(), 1);
 
@@ -338,7 +344,8 @@ fn test_fi_infra_fully_exempt() -> Result<()> {
 
     // Calculate tax for June 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 6)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 6, &mut carry)?;
 
     // FI-Infra should be skipped entirely
     assert_eq!(
@@ -421,7 +428,8 @@ fn test_multi_category_same_month() -> Result<()> {
 
     // Calculate tax for July 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 7)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 7, &mut carry)?;
 
     // Should have 3 categories
     assert_eq!(calculations.len(), 3);
@@ -497,7 +505,8 @@ fn test_loss_scenario() -> Result<()> {
 
     // Calculate tax for August 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    let calculations = calculate_monthly_tax(&conn, 2025, 8)?;
+    let mut carry = HashMap::new();
+    let calculations = calculate_monthly_tax(&conn, 2025, 8, &mut carry)?;
 
     assert_eq!(calculations.len(), 1);
 
@@ -565,7 +574,8 @@ fn test_loss_carryforward_single_category() -> Result<()> {
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
     // Month 1 - should record loss
-    let calc_month1 = calculate_monthly_tax(&conn, 2025, 1)?;
+    let mut carry = HashMap::new();
+    let calc_month1 = calculate_monthly_tax(&conn, 2025, 1, &mut carry)?;
     assert_eq!(calc_month1.len(), 1);
     let m1 = &calc_month1[0];
     assert_eq!(m1.net_profit, dec!(-1000.00)); // Loss
@@ -573,7 +583,7 @@ fn test_loss_carryforward_single_category() -> Result<()> {
     assert_eq!(m1.tax_due, dec!(0)); // No tax on loss
 
     // Month 2 - should apply previous loss
-    let calc_month2 = calculate_monthly_tax(&conn, 2025, 2)?;
+    let calc_month2 = calculate_monthly_tax(&conn, 2025, 2, &mut carry)?;
     assert_eq!(calc_month2.len(), 1);
     let m2 = &calc_month2[0];
     assert_eq!(m2.net_profit, dec!(1500.00)); // Raw profit
@@ -657,11 +667,12 @@ fn test_loss_carryforward_partial_offset() -> Result<()> {
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
     // Month 1: Record R$5,000 loss
-    let calc_month1 = calculate_monthly_tax(&conn, 2025, 1)?;
+    let mut carry = HashMap::new();
+    let calc_month1 = calculate_monthly_tax(&conn, 2025, 1, &mut carry)?;
     assert_eq!(calc_month1[0].net_profit, dec!(-5000.00));
 
     // Month 2: Apply R$2,000 of the R$5,000 loss
-    let calc_month2 = calculate_monthly_tax(&conn, 2025, 2)?;
+    let calc_month2 = calculate_monthly_tax(&conn, 2025, 2, &mut carry)?;
     let m2 = &calc_month2[0];
     assert_eq!(m2.net_profit, dec!(2000.00));
     assert_eq!(m2.loss_offset_applied, dec!(2000.00)); // Partial offset
@@ -669,7 +680,7 @@ fn test_loss_carryforward_partial_offset() -> Result<()> {
     assert_eq!(m2.tax_due, dec!(0));
 
     // Month 3: Apply remaining R$3,000 of loss, leaving R$1,000 profit
-    let calc_month3 = calculate_monthly_tax(&conn, 2025, 3)?;
+    let calc_month3 = calculate_monthly_tax(&conn, 2025, 3, &mut carry)?;
     let m3 = &calc_month3[0];
     assert_eq!(m3.net_profit, dec!(4000.00));
     assert_eq!(m3.loss_offset_applied, dec!(3000.00)); // Remaining loss applied
@@ -752,12 +763,13 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
     // Month 1: Swing trade loss
-    let calc_month1 = calculate_monthly_tax(&conn, 2025, 1)?;
+    let mut carry = HashMap::new();
+    let calc_month1 = calculate_monthly_tax(&conn, 2025, 1, &mut carry)?;
     assert_eq!(calc_month1[0].category, TaxCategory::StockSwingTrade);
     assert_eq!(calc_month1[0].net_profit, dec!(-1000.00));
 
     // Month 2: Day trade profit - NO offset (different category)
-    let calc_month2 = calculate_monthly_tax(&conn, 2025, 2)?;
+    let calc_month2 = calculate_monthly_tax(&conn, 2025, 2, &mut carry)?;
     let day_trade = calc_month2
         .iter()
         .find(|c| c.category == TaxCategory::StockDayTrade)
@@ -768,7 +780,7 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
     assert_eq!(day_trade.tax_due, dec!(100.00)); // 20% of 500
 
     // Month 3: Swing trade profit - should offset previous swing loss
-    let calc_month3 = calculate_monthly_tax(&conn, 2025, 3)?;
+    let calc_month3 = calculate_monthly_tax(&conn, 2025, 3, &mut carry)?;
     let swing_trade = calc_month3
         .iter()
         .find(|c| c.category == TaxCategory::StockSwingTrade)

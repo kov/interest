@@ -15,9 +15,12 @@ use cli::{
     ActionCommands, Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands,
     TransactionCommands,
 };
+use rust_decimal::Decimal;
 use serde::Serialize;
 use std::io::IsTerminal;
+use std::io::Write as _;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 // JSON response utilities
 #[derive(Serialize)]
@@ -55,9 +58,12 @@ async fn main() -> Result<()> {
     let disable_color = cli.no_color || !stdout_is_tty || cli.json;
 
     // Initialize logging - always write to stderr to keep stdout clean
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     tracing_subscriber::fmt()
         .with_ansi(!disable_color)
         .with_writer(std::io::stderr)
+        .with_env_filter(env_filter)
         .init();
 
     // Disable colored crate globally when needed
@@ -679,12 +685,26 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
         file_path, year
     );
 
-    // Parse IRPF PDF
+    // Parse IRPF PDF for positions and loss carryforward
     let positions = importers::irpf_pdf::parse_irpf_pdf(file_path, year)?;
+    let losses = importers::irpf_pdf::parse_irpf_pdf_losses(file_path, year).unwrap_or_else(|e| {
+        info!("Could not parse loss carryforward: {}", e);
+        importers::irpf_pdf::IrpfLossCarryforward {
+            year,
+            stock_swing_loss: Decimal::ZERO,
+            stock_day_loss: Decimal::ZERO,
+            fii_fiagro_loss: Decimal::ZERO,
+        }
+    });
 
-    if positions.is_empty() {
+    // Check if there's anything to import (positions or losses)
+    let has_losses = losses.stock_swing_loss > Decimal::ZERO
+        || losses.stock_day_loss > Decimal::ZERO
+        || losses.fii_fiagro_loss > Decimal::ZERO;
+
+    if positions.is_empty() && !has_losses {
         println!(
-            "\n{} No positions found for year {}",
+            "\n{} No positions or loss carryforward found for year {}",
             "ℹ".yellow().bold(),
             year
         );
@@ -692,54 +712,88 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
         return Ok(());
     }
 
-    println!(
-        "\n{} Found {} opening position(s) from IRPF {}\n",
-        "✓".green().bold(),
-        positions.len(),
-        year
-    );
+    // Display what was found
+    if !positions.is_empty() {
+        println!(
+            "\n{} Found {} opening position(s) from IRPF {}\n",
+            "✓".green().bold(),
+            positions.len(),
+            year
+        );
 
-    // Display preview
-    #[derive(Tabled)]
-    struct PositionPreview {
-        #[tabled(rename = "Ticker")]
-        ticker: String,
-        #[tabled(rename = "Quantity")]
-        quantity: String,
-        #[tabled(rename = "Total Cost")]
-        total_cost: String,
-        #[tabled(rename = "Avg Cost")]
-        avg_cost: String,
-        #[tabled(rename = "Date")]
-        date: String,
+        // Display preview
+        #[derive(Tabled)]
+        struct PositionPreview {
+            #[tabled(rename = "Ticker")]
+            ticker: String,
+            #[tabled(rename = "Quantity")]
+            quantity: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Avg Cost")]
+            avg_cost: String,
+            #[tabled(rename = "Date")]
+            date: String,
+        }
+
+        let preview: Vec<PositionPreview> = positions
+            .iter()
+            .map(|pos| PositionPreview {
+                ticker: pos.ticker.clone(),
+                quantity: pos.quantity.to_string(),
+                total_cost: format!("R$ {:.2}", pos.total_cost),
+                avg_cost: format!("R$ {:.2}", pos.average_cost),
+                date: format!("31/12/{}", pos.year),
+            })
+            .collect();
+
+        let table = Table::new(preview)
+            .with(Style::rounded())
+            .with(Modify::new(Columns::new(1..4)).with(Alignment::right()))
+            .to_string();
+        println!("{}", table);
     }
 
-    let preview: Vec<PositionPreview> = positions
-        .iter()
-        .map(|pos| PositionPreview {
-            ticker: pos.ticker.clone(),
-            quantity: pos.quantity.to_string(),
-            total_cost: format!("R$ {:.2}", pos.total_cost),
-            avg_cost: format!("R$ {:.2}", pos.average_cost),
-            date: format!("31/12/{}", pos.year),
-        })
-        .collect();
-
-    let table = Table::new(preview)
-        .with(Style::rounded())
-        .with(Modify::new(Columns::new(1..4)).with(Alignment::right()))
-        .to_string();
-    println!("{}", table);
+    if has_losses {
+        println!(
+            "\n{} Found loss carryforward for year {}\n",
+            "✓".green().bold(),
+            year
+        );
+        if losses.stock_swing_loss > Decimal::ZERO {
+            println!("  • Stock Swing Trade: R$ {:.2}", losses.stock_swing_loss);
+        }
+        if losses.stock_day_loss > Decimal::ZERO {
+            println!("  • Stock Day Trade: R$ {:.2}", losses.stock_day_loss);
+        }
+        if losses.fii_fiagro_loss > Decimal::ZERO {
+            println!("  • FII/FIAGRO: R$ {:.2}", losses.fii_fiagro_loss);
+        }
+    }
 
     if dry_run {
         println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
         println!("\n{} What would be imported:", "📝".cyan().bold());
-        println!(
-            "  • {} opening BUY transactions dated {}-12-31",
-            positions.len(),
-            year
-        );
-        println!("  • Previous IRPF opening positions for these tickers would be deleted");
+        if !positions.is_empty() {
+            println!(
+                "  • {} opening BUY transactions dated {}-12-31",
+                positions.len(),
+                year
+            );
+            println!("  • Previous IRPF opening positions for these tickers would be deleted");
+        }
+        if has_losses {
+            println!("  • Loss carryforward snapshot would be created:");
+            if losses.stock_swing_loss > Decimal::ZERO {
+                println!("    - Stock Swing Trade: R$ {:.2}", losses.stock_swing_loss);
+            }
+            if losses.stock_day_loss > Decimal::ZERO {
+                println!("    - Stock Day Trade: R$ {:.2}", losses.stock_day_loss);
+            }
+            if losses.fii_fiagro_loss > Decimal::ZERO {
+                println!("    - FII/FIAGRO: R$ {:.2}", losses.fii_fiagro_loss);
+            }
+        }
         return Ok(());
     }
 
@@ -751,111 +805,174 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
     let mut imported = 0;
     let mut replaced = 0;
 
-    println!("\n{} Importing opening positions...\n", "⏳".cyan().bold());
+    if !positions.is_empty() {
+        println!("\n{} Importing opening positions...\n", "⏳".cyan().bold());
 
-    for position in positions {
-        // Detect asset type from ticker
-        let asset_type =
-            db::AssetType::detect_from_ticker(&position.ticker).unwrap_or(db::AssetType::Stock);
+        for position in positions {
+            // Detect asset type from ticker
+            let asset_type =
+                db::AssetType::detect_from_ticker(&position.ticker).unwrap_or(db::AssetType::Stock);
 
-        // Upsert asset
-        let asset_id = match db::upsert_asset(&conn, &position.ticker, &asset_type, None) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!(
-                    "{} Error upserting asset {}: {}",
-                    "✗".red(),
-                    position.ticker,
-                    e
-                );
-                continue;
-            }
-        };
+            // Upsert asset
+            let asset_id = match db::upsert_asset(&conn, &position.ticker, &asset_type, None) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!(
+                        "{} Error upserting asset {}: {}",
+                        "✗".red(),
+                        position.ticker,
+                        e
+                    );
+                    continue;
+                }
+            };
 
-        // Check if there are existing IRPF opening positions for this ticker
-        let existing_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM transactions WHERE asset_id = ?1 AND source = 'IRPF_PDF'",
-            rusqlite::params![asset_id],
-            |row| row.get(0),
-        )?;
-
-        // Delete existing IRPF opening positions for this ticker
-        if existing_count > 0 {
-            conn.execute(
-                "DELETE FROM transactions WHERE asset_id = ?1 AND source = 'IRPF_PDF'",
+            // Check if there are existing IRPF opening positions for this ticker
+            let existing_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM transactions WHERE asset_id = ?1 AND source = 'IRPF_PDF'",
                 rusqlite::params![asset_id],
+                |row| row.get(0),
             )?;
-            replaced += 1;
+
+            // Delete existing IRPF opening positions for this ticker
+            if existing_count > 0 {
+                conn.execute(
+                    "DELETE FROM transactions WHERE asset_id = ?1 AND source = 'IRPF_PDF'",
+                    rusqlite::params![asset_id],
+                )?;
+                replaced += 1;
+                println!(
+                    "  {} Replaced {} existing IRPF position(s) for {}",
+                    "↻".yellow(),
+                    existing_count,
+                    position.ticker.cyan()
+                );
+            }
+
+            // Convert to opening transaction
+            let transaction = match position.to_opening_transaction(asset_id) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    eprintln!(
+                        "{} Error converting position for {}: {}",
+                        "✗".red(),
+                        position.ticker,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // Insert opening transaction
+            match db::insert_transaction(&conn, &transaction) {
+                Ok(_) => {
+                    println!(
+                        "  {} Added opening position: {} {} @ R$ {:.2}",
+                        "✓".green(),
+                        position.quantity,
+                        position.ticker.cyan(),
+                        position.average_cost
+                    );
+                    imported += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} Error inserting transaction for {}: {}",
+                        "✗".red(),
+                        position.ticker,
+                        e
+                    );
+                }
+            }
+        }
+
+        println!("\n{} Import complete!", "✓".green().bold());
+        println!("  Imported: {}", imported.to_string().green());
+        if replaced > 0 {
             println!(
-                "  {} Replaced {} existing IRPF position(s) for {}",
-                "↻".yellow(),
-                existing_count,
-                position.ticker.cyan()
+                "  Replaced: {} (previous IRPF positions)",
+                replaced.to_string().yellow()
             );
         }
 
-        // Convert to opening transaction
-        let transaction = match position.to_opening_transaction(asset_id) {
-            Ok(tx) => tx,
+        // Set import cutoff to prevent older CEI/Movimentação imports
+        let year_end = chrono::NaiveDate::from_ymd_opt(year, 12, 31)
+            .ok_or_else(|| anyhow::anyhow!("Invalid year: {}", year))?;
+
+        db::set_last_import_date(&conn, "CEI", "trades", year_end)?;
+        db::set_last_import_date(&conn, "MOVIMENTACAO", "trades", year_end)?;
+        db::set_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions", year_end)?;
+
+        println!(
+            "\n{} Set import cutoff to {} for CEI and Movimentação",
+            "ℹ".blue().bold(),
+            year_end.format("%Y-%m-%d")
+        );
+        println!(
+            "  This prevents importing older data that conflicts with these IRPF opening positions"
+        );
+    }
+
+    // Import loss carryforward if any losses exist
+    if has_losses {
+        println!(
+            "\n{} Importing loss carryforward snapshot for year {}",
+            "⏳".cyan().bold(),
+            year
+        );
+
+        // Create a snapshot with the extracted losses
+        // Compute a fingerprint from the year's transactions so the snapshot matches cache lookups
+        let fingerprint = match tax::loss_carryforward::compute_year_fingerprint(&conn, year) {
+            Ok(fp) => fp,
             Err(e) => {
                 eprintln!(
-                    "{} Error converting position for {}: {}",
-                    "✗".red(),
-                    position.ticker,
+                    "  {} Warning: Could not compute year fingerprint: {}; using 'irpf_import'",
+                    "⚠".yellow(),
                     e
                 );
-                continue;
+                "irpf_import".to_string()
             }
         };
+        let mut loss_carry = std::collections::HashMap::new();
 
-        // Insert opening transaction
-        match db::insert_transaction(&conn, &transaction) {
+        if losses.stock_swing_loss > Decimal::ZERO {
+            loss_carry.insert(
+                tax::swing_trade::TaxCategory::StockSwingTrade,
+                losses.stock_swing_loss,
+            );
+        }
+        if losses.stock_day_loss > Decimal::ZERO {
+            loss_carry.insert(
+                tax::swing_trade::TaxCategory::StockDayTrade,
+                losses.stock_day_loss,
+            );
+        }
+        if losses.fii_fiagro_loss > Decimal::ZERO {
+            // FII/FIAGRO losses are combined in the PDF, so split proportionally or use FII category
+            // For now, assign to FII swing trade (most common)
+            loss_carry.insert(
+                tax::swing_trade::TaxCategory::FiiSwingTrade,
+                losses.fii_fiagro_loss,
+            );
+        }
+
+        match tax::loss_carryforward::upsert_snapshot(&conn, year, &fingerprint, &loss_carry) {
             Ok(_) => {
-                println!(
-                    "  {} Added opening position: {} {} @ R$ {:.2}",
-                    "✓".green(),
-                    position.quantity,
-                    position.ticker.cyan(),
-                    position.average_cost
-                );
-                imported += 1;
+                println!("  {} Loss carryforward snapshot imported", "✓".green());
+                for (category, amount) in &loss_carry {
+                    println!("    • {}: R$ {:.2}", category.display_name(), amount);
+                }
             }
             Err(e) => {
                 eprintln!(
-                    "{} Error inserting transaction for {}: {}",
-                    "✗".red(),
-                    position.ticker,
+                    "  {} Warning: Could not import loss carryforward: {}",
+                    "⚠".yellow(),
                     e
                 );
             }
         }
     }
-
-    println!("\n{} Import complete!", "✓".green().bold());
-    println!("  Imported: {}", imported.to_string().green());
-    if replaced > 0 {
-        println!(
-            "  Replaced: {} (previous IRPF positions)",
-            replaced.to_string().yellow()
-        );
-    }
-
-    // Set import cutoff to prevent older CEI/Movimentação imports
-    let year_end = chrono::NaiveDate::from_ymd_opt(year, 12, 31)
-        .ok_or_else(|| anyhow::anyhow!("Invalid year: {}", year))?;
-
-    db::set_last_import_date(&conn, "CEI", "trades", year_end)?;
-    db::set_last_import_date(&conn, "MOVIMENTACAO", "trades", year_end)?;
-    db::set_last_import_date(&conn, "MOVIMENTACAO", "corporate_actions", year_end)?;
-
-    println!(
-        "\n{} Set import cutoff to {} for CEI and Movimentação",
-        "ℹ".blue().bold(),
-        year_end.format("%Y-%m-%d")
-    );
-    println!(
-        "  This prevents importing older data that conflicts with these IRPF opening positions"
-    );
 
     println!(
         "\n{} These opening positions will be used for cost basis calculations",
@@ -2090,8 +2207,9 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Calculate monthly tax
-    let calculations = tax::calculate_monthly_tax(&conn, year, month)?;
+    // Calculate monthly tax; carryforward map stays empty for one-off calculation
+    let mut carryforward = std::collections::HashMap::new();
+    let calculations = tax::calculate_monthly_tax(&conn, year, month, &mut carryforward)?;
 
     if calculations.is_empty() {
         println!(
@@ -2244,8 +2362,9 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Generate report
-    let report = tax::generate_annual_report(&conn, year)?;
+    // Generate report with in-place spinner progress
+    let mut printer = TaxProgressPrinter::new(true);
+    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
 
     if report.monthly_summaries.is_empty() {
         println!(
@@ -2261,6 +2380,15 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
         "📊".cyan().bold(),
         year
     );
+
+    // Show prior-year carryforward losses if any
+    if !report.previous_losses_carry_forward.is_empty() {
+        println!("{} Carryover from previous years:", "📦".yellow().bold());
+        for (category, amount) in &report.previous_losses_carry_forward {
+            println!("  {}: R$ {:.2}", category.display_name(), amount);
+        }
+        println!();
+    }
 
     // Monthly breakdown
     println!("{}", "Monthly Summary:".bold());
@@ -2342,8 +2470,9 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Generate report
-    let report = tax::generate_annual_report(&conn, year)?;
+    // Generate report with in-place spinner progress (terse)
+    let mut printer = TaxProgressPrinter::new(true);
+    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
 
     if report.monthly_summaries.is_empty() {
         println!(
@@ -2410,6 +2539,94 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
     );
 
     Ok(())
+}
+
+struct TaxProgressPrinter {
+    spinner: interest::ui::crossterm_engine::Spinner,
+    in_place: bool,
+    in_progress: bool,
+    from_year: Option<i32>,
+    target_year: Option<i32>,
+    total_years: usize,
+    completed_years: usize,
+}
+
+impl TaxProgressPrinter {
+    fn new(in_place: bool) -> Self {
+        Self {
+            spinner: interest::ui::crossterm_engine::Spinner::new(),
+            in_place,
+            in_progress: false,
+            from_year: None,
+            target_year: None,
+            total_years: 0,
+            completed_years: 0,
+        }
+    }
+
+    fn render_line(&mut self, text: &str) {
+        use std::io::{stdout, Write};
+        if self.in_place {
+            print!("\r\x1b[2K{} {}", self.spinner.tick(), text);
+            let _ = stdout().flush();
+        } else {
+            println!("{} {}", self.spinner.tick(), text);
+        }
+    }
+
+    fn finish_line(&mut self) {
+        use std::io::{stdout, Write};
+        if self.in_place {
+            println!();
+            let _ = stdout().flush();
+        }
+    }
+
+    fn on_event(&mut self, event: tax::ReportProgress) {
+        match event {
+            tax::ReportProgress::Start { target_year, .. } => {
+                self.target_year = Some(target_year);
+            }
+            tax::ReportProgress::RecomputeStart { from_year } => {
+                self.from_year = Some(from_year);
+                self.in_progress = true;
+                self.completed_years = 0;
+                self.total_years = self
+                    .target_year
+                    .map(|t| (t - from_year + 1).max(1) as usize)
+                    .unwrap_or(1);
+                self.render_line(&format!(
+                    "↻ Recomputing snapshots {}/{} (starting {})",
+                    self.completed_years, self.total_years, from_year
+                ));
+            }
+            tax::ReportProgress::RecomputedYear { year } => {
+                if self.in_progress {
+                    self.completed_years = (self.completed_years + 1).min(self.total_years);
+                    let from = self.from_year.unwrap_or(year);
+                    if Some(year) == self.target_year {
+                        // Finalize with a clean success line
+                        if self.in_place {
+                            print!("\r\x1b[2K");
+                        }
+                        println!("✓ Snapshots updated {}→{}", from, year);
+                        let _ = std::io::stdout().flush();
+                        self.in_progress = false;
+                    } else {
+                        self.render_line(&format!(
+                            "↻ Recomputing snapshots {}/{} (year {})",
+                            self.completed_years, self.total_years, year
+                        ));
+                    }
+                }
+            }
+            tax::ReportProgress::TargetCacheHit { year } => {
+                self.render_line(&format!("✓ Cache hit for {}; using cached carry", year));
+                self.finish_line();
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Handle manual transaction add command

@@ -173,6 +173,18 @@ CREATE TABLE IF NOT EXISTS loss_carryforward (
 CREATE INDEX IF NOT EXISTS idx_loss_carryforward_category ON loss_carryforward(tax_category);
 CREATE INDEX IF NOT EXISTS idx_loss_carryforward_date ON loss_carryforward(year, month);
 
+-- Loss carryforward snapshots (idempotent, per-year per-category)
+CREATE TABLE IF NOT EXISTS loss_carryforward_snapshots (
+    year INTEGER NOT NULL,
+    tax_category TEXT NOT NULL,
+    ending_remaining_amount DECIMAL(15,4) NOT NULL,
+    tx_fingerprint TEXT NOT NULL,
+    computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (year, tax_category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_loss_carryforward_snapshots_year ON loss_carryforward_snapshots(year);
+
 -- Metadata table for schema version and app settings
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,

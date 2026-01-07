@@ -5,9 +5,11 @@
 //! to switch between different command sources (CLI args vs interactive input).
 
 use crate::commands::Command;
+use crate::ui::crossterm_engine::Spinner;
 use crate::{cli, db, reports, tax};
 use anyhow::Result;
 use colored::Colorize;
+use std::io::{stdout, Write};
 use tracing::info;
 
 /// Route a parsed command to its handler
@@ -115,8 +117,9 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Generate report
-    let report = tax::generate_annual_report(&conn, year)?;
+    // Generate report with in-place spinner progress
+    let mut printer = TaxProgressPrinter::new(true);
+    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
 
     if report.monthly_summaries.is_empty() {
         println!(
@@ -132,6 +135,15 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
         "📊".cyan().bold(),
         year
     );
+
+    // Show prior-year carryforward losses if any
+    if !report.previous_losses_carry_forward.is_empty() {
+        println!("{} Carryover from previous years:", "📦".yellow().bold());
+        for (category, amount) in &report.previous_losses_carry_forward {
+            println!("  {}: R$ {:.2}", category.display_name(), amount);
+        }
+        println!();
+    }
 
     // Monthly breakdown
     println!("{}", "Monthly Summary:".bold());
@@ -211,8 +223,9 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Generate report
-    let report = tax::generate_annual_report(&conn, year)?;
+    // Generate report with in-place spinner progress (terse)
+    let mut printer = TaxProgressPrinter::new(true);
+    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
 
     if report.monthly_summaries.is_empty() {
         println!(
@@ -279,6 +292,92 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
     );
 
     Ok(())
+}
+
+struct TaxProgressPrinter {
+    spinner: Spinner,
+    in_place: bool,
+    in_progress: bool,
+    from_year: Option<i32>,
+    target_year: Option<i32>,
+    total_years: usize,
+    completed_years: usize,
+}
+
+impl TaxProgressPrinter {
+    fn new(in_place: bool) -> Self {
+        Self {
+            spinner: Spinner::new(),
+            in_place,
+            in_progress: false,
+            from_year: None,
+            target_year: None,
+            total_years: 0,
+            completed_years: 0,
+        }
+    }
+
+    fn render_line(&mut self, text: &str) {
+        if self.in_place {
+            print!("\r\x1b[2K{} {}", self.spinner.tick(), text);
+            let _ = stdout().flush();
+        } else {
+            println!("{} {}", self.spinner.tick(), text);
+        }
+    }
+
+    fn finish_line(&mut self) {
+        if self.in_place {
+            println!();
+            let _ = stdout().flush();
+        }
+    }
+
+    fn on_event(&mut self, event: tax::ReportProgress) {
+        match event {
+            tax::ReportProgress::Start { target_year, .. } => {
+                self.target_year = Some(target_year);
+            }
+            tax::ReportProgress::RecomputeStart { from_year } => {
+                self.from_year = Some(from_year);
+                self.in_progress = true;
+                self.completed_years = 0;
+                self.total_years = self
+                    .target_year
+                    .map(|t| (t - from_year + 1).max(1) as usize)
+                    .unwrap_or(1);
+                self.render_line(&format!(
+                    "↻ Recomputing snapshots {}/{} (starting {})",
+                    self.completed_years, self.total_years, from_year
+                ));
+            }
+            tax::ReportProgress::RecomputedYear { year } => {
+                if self.in_progress {
+                    self.completed_years = (self.completed_years + 1).min(self.total_years);
+                    let from = self.from_year.unwrap_or(year);
+                    if Some(year) == self.target_year {
+                        // Finalize with a clean success line
+                        if self.in_place {
+                            print!("\r\x1b[2K");
+                        }
+                        println!("✓ Snapshots updated {}→{}", from, year);
+                        let _ = stdout().flush();
+                        self.in_progress = false;
+                    } else {
+                        self.render_line(&format!(
+                            "↻ Recomputing snapshots {}/{} (year {})",
+                            self.completed_years, self.total_years, year
+                        ));
+                    }
+                }
+            }
+            tax::ReportProgress::TargetCacheHit { year } => {
+                self.render_line(&format!("✓ Cache hit for {}; using cached carry", year));
+                self.finish_line();
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
-use super::loss_carryforward;
 use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
 
 /// Tax category for operations
@@ -153,6 +152,7 @@ pub fn calculate_monthly_tax(
     conn: &Connection,
     year: i32,
     month: u32,
+    carryforward: &mut HashMap<TaxCategory, Decimal>,
 ) -> Result<Vec<MonthlyTaxCalculation>> {
     // Get all assets
     let assets = crate::db::get_all_assets(conn)?;
@@ -293,22 +293,26 @@ pub fn calculate_monthly_tax(
         // Calculate net profit/loss
         let net_profit = total_profit - total_loss;
 
-        // Apply loss carryforward if there's a profit
-        let (profit_after_loss_offset, loss_offset_applied) = if net_profit > Decimal::ZERO {
-            loss_carryforward::apply_losses_to_profit(conn, &category, net_profit)?
+        // Apply loss carryforward from in-memory map
+        let starting_carry = carryforward
+            .get(&category)
+            .cloned()
+            .unwrap_or(Decimal::ZERO);
+        let loss_offset_applied = if net_profit > Decimal::ZERO {
+            net_profit.min(starting_carry)
         } else {
-            (net_profit, Decimal::ZERO)
+            Decimal::ZERO
         };
+        let profit_after_loss_offset = net_profit - loss_offset_applied;
 
-        // Record new loss if there is one
+        let mut new_carry = starting_carry - loss_offset_applied;
         if profit_after_loss_offset < Decimal::ZERO {
-            loss_carryforward::record_loss(
-                conn,
-                year,
-                month,
-                &category,
-                profit_after_loss_offset.abs(),
-            )?;
+            new_carry += profit_after_loss_offset.abs();
+        }
+        if new_carry.is_zero() {
+            carryforward.remove(&category);
+        } else {
+            carryforward.insert(category.clone(), new_carry);
         }
 
         // Apply exemption threshold (only to positive profit)
