@@ -1,34 +1,48 @@
 mod cli;
+mod corporate_actions;
 mod db;
 mod importers;
 mod pricing;
-mod corporate_actions;
-mod tax;
 mod reports;
-mod utils;
 mod scraping;
+mod tax;
 mod term_contracts;
+mod utils;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands, ActionCommands, TransactionCommands};
+use cli::{
+    ActionCommands, Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands,
+    TransactionCommands,
+};
+use std::io::IsTerminal;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
-
+    // Parse CLI first to configure logging and color
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Import { file, dry_run } => {
-            handle_import(&file, dry_run).await
-        }
+    // Determine color usage: disable when requested or when stdout is not a TTY (piped)
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let disable_color = cli.no_color || !stdout_is_tty;
 
-        Commands::ImportIrpf { file, year, dry_run } => {
-            handle_irpf_import(&file, year, dry_run).await
-        }
+    // Initialize logging with ANSI disabled when color is disabled
+    tracing_subscriber::fmt().with_ansi(!disable_color).init();
+
+    // Disable colored crate globally when needed
+    if disable_color {
+        colored::control::set_override(false);
+    }
+
+    match cli.command {
+        Commands::Import { file, dry_run } => handle_import(&file, dry_run).await,
+
+        Commands::ImportIrpf {
+            file,
+            year,
+            dry_run,
+        } => handle_irpf_import(&file, year, dry_run).await,
 
         Commands::Portfolio { action } => match action {
             PortfolioCommands::Show { asset_type } => {
@@ -42,24 +56,16 @@ async fn main() -> Result<()> {
         },
 
         Commands::Prices { action } => match action {
-            PriceCommands::Update => {
-                handle_price_update().await
-            }
+            PriceCommands::Update => handle_price_update().await,
             PriceCommands::History { ticker, from, to } => {
                 handle_price_history(&ticker, &from, &to).await
             }
         },
 
         Commands::Tax { action } => match action {
-            TaxCommands::Calculate { month } => {
-                handle_tax_calculate(&month).await
-            }
-            TaxCommands::Report { year } => {
-                handle_tax_report(year).await
-            }
-            TaxCommands::Summary { year } => {
-                handle_tax_summary(year).await
-            }
+            TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
+            TaxCommands::Report { year } => handle_tax_report(year).await,
+            TaxCommands::Summary { year } => handle_tax_summary(year).await,
         },
 
         Commands::Actions { action } => match action {
@@ -69,35 +75,17 @@ async fn main() -> Result<()> {
                 ratio,
                 date,
                 notes,
-            } => {
-                handle_action_add(
-                    &ticker,
-                    &action_type,
-                    &ratio,
-                    &date,
-                    notes.as_deref(),
-                ).await
-            }
-            ActionCommands::Scrape { ticker, url, name, save } => {
-                handle_action_scrape(
-                    &ticker,
-                    url.as_deref(),
-                    name.as_deref(),
-                    save,
-                ).await
-            }
-            ActionCommands::Update => {
-                handle_actions_update().await
-            }
-            ActionCommands::List { ticker } => {
-                handle_actions_list(ticker.as_deref()).await
-            }
-            ActionCommands::Apply { ticker } => {
-                handle_action_apply(ticker.as_deref()).await
-            }
-            ActionCommands::Delete { id } => {
-                handle_action_delete(id).await
-            }
+            } => handle_action_add(&ticker, &action_type, &ratio, &date, notes.as_deref()).await,
+            ActionCommands::Scrape {
+                ticker,
+                url,
+                name,
+                save,
+            } => handle_action_scrape(&ticker, url.as_deref(), name.as_deref(), save).await,
+            ActionCommands::Update => handle_actions_update().await,
+            ActionCommands::List { ticker } => handle_actions_list(ticker.as_deref()).await,
+            ActionCommands::Apply { ticker } => handle_action_apply(ticker.as_deref()).await,
+            ActionCommands::Delete { id } => handle_action_delete(id).await,
             ActionCommands::Edit {
                 id,
                 action_type,
@@ -111,7 +99,8 @@ async fn main() -> Result<()> {
                     ratio.as_deref(),
                     date.as_deref(),
                     notes.as_deref(),
-                ).await
+                )
+                .await
             }
         },
 
@@ -133,17 +122,14 @@ async fn main() -> Result<()> {
                     &date,
                     &fees,
                     notes.as_deref(),
-                ).await
+                )
+                .await
             }
         },
 
-        Commands::Inspect { file, full, column } => {
-            handle_inspect(&file, full, column).await
-        },
+        Commands::Inspect { file, full, column } => handle_inspect(&file, full, column).await,
 
-        Commands::ProcessTerms => {
-            handle_process_terms().await
-        },
+        Commands::ProcessTerms => handle_process_terms().await,
     }
 }
 
@@ -151,7 +137,7 @@ async fn main() -> Result<()> {
 async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
     use colored::Colorize;
     use rusqlite::OptionalExtension;
-    use tabled::{Table, Tabled, settings::Style};
+    use tabled::{settings::Style, Table, Tabled};
 
     info!("Importing from: {}", file_path);
 
@@ -162,7 +148,11 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
         importers::ImportResult::Cei(raw_transactions) => {
             // Handle CEI format
             info!("Detected CEI format");
-            println!("\n{} Found {} transactions\n", "✓".green().bold(), raw_transactions.len());
+            println!(
+                "\n{} Found {} transactions\n",
+                "✓".green().bold(),
+                raw_transactions.len()
+            );
 
             // Display preview
             #[derive(Tabled)]
@@ -198,7 +188,10 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             println!("{}", table);
 
             if raw_transactions.len() > 10 {
-                println!("\n... and {} more transactions", raw_transactions.len() - 10);
+                println!(
+                    "\n... and {} more transactions",
+                    raw_transactions.len() - 10
+                );
             }
 
             if dry_run {
@@ -222,11 +215,9 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
 
             let asset_exists = |ticker: &str| -> Result<bool> {
                 let exists: Option<i64> = conn
-                    .query_row(
-                        "SELECT id FROM assets WHERE ticker = ?1",
-                        [ticker],
-                        |row| row.get(0),
-                    )
+                    .query_row("SELECT id FROM assets WHERE ticker = ?1", [ticker], |row| {
+                        row.get(0)
+                    })
                     .optional()?;
                 Ok(exists.is_some())
             };
@@ -246,7 +237,8 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                     .unwrap_or(db::AssetType::Stock);
 
                 // Upsert asset
-                let asset_id = match db::upsert_asset(&conn, &normalized_ticker, &asset_type, None) {
+                let asset_id = match db::upsert_asset(&conn, &normalized_ticker, &asset_type, None)
+                {
                     Ok(id) => id,
                     Err(e) => {
                         eprintln!("Error upserting asset {}: {}", normalized_ticker, e);
@@ -306,21 +298,36 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
         importers::ImportResult::Movimentacao(entries) => {
             // Handle Movimentacao format
             info!("Detected Movimentacao format");
-            println!("\n{} Found {} movimentacao entries\n", "✓".green().bold(), entries.len());
+            println!(
+                "\n{} Found {} movimentacao entries\n",
+                "✓".green().bold(),
+                entries.len()
+            );
 
             // Categorize entries
             let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
-            let mut corporate_actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
+            let mut corporate_actions: Vec<_> =
+                entries.iter().filter(|e| e.is_corporate_action()).collect();
             corporate_actions.sort_by_key(|e| e.date);
             let income_events: Vec<_> = entries.iter().filter(|e| e.is_income_event()).collect();
-            let other: Vec<_> = entries.iter()
+            let other: Vec<_> = entries
+                .iter()
                 .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
                 .collect();
 
             println!("{} Summary:", "📊".cyan().bold());
-            println!("  {} Trades (buy/sell/term)", trades.len().to_string().green());
-            println!("  {} Corporate actions (splits, bonuses, mergers)", corporate_actions.len().to_string().yellow());
-            println!("  {} Income events (dividends, yields, amortization)", income_events.len().to_string().cyan());
+            println!(
+                "  {} Trades (buy/sell/term)",
+                trades.len().to_string().green()
+            );
+            println!(
+                "  {} Corporate actions (splits, bonuses, mergers)",
+                corporate_actions.len().to_string().yellow()
+            );
+            println!(
+                "  {} Income events (dividends, yields, amortization)",
+                income_events.len().to_string().cyan()
+            );
             println!("  {} Other movements", other.len().to_string().dimmed());
             println!();
 
@@ -349,8 +356,14 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                         date: e.date.format("%d/%m/%Y").to_string(),
                         movement_type: e.movement_type.clone(),
                         ticker: e.ticker.clone().unwrap_or_else(|| "?".to_string()),
-                        quantity: e.quantity.map(|q| q.to_string()).unwrap_or_else(|| "-".to_string()),
-                        price: e.unit_price.map(|p| format!("R$ {:.2}", p)).unwrap_or_else(|| "-".to_string()),
+                        quantity: e
+                            .quantity
+                            .map(|q| q.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        price: e
+                            .unit_price
+                            .map(|p| format!("R$ {:.2}", p))
+                            .unwrap_or_else(|| "-".to_string()),
                     })
                     .collect();
 
@@ -363,7 +376,8 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 println!("{} Corporate actions:", "🏢".cyan().bold());
 
                 for action in corporate_actions.iter().take(5) {
-                    println!("  {} {} - {}",
+                    println!(
+                        "  {} {} - {}",
                         action.date.format("%d/%m/%Y").to_string().dimmed(),
                         action.movement_type.yellow(),
                         action.ticker.as_ref().unwrap_or(&action.product)
@@ -377,11 +391,13 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 println!("{} Income events:", "💵".cyan().bold());
 
                 for event in income_events.iter().take(5) {
-                    let value = event.operation_value
+                    let value = event
+                        .operation_value
                         .map(|v| format!("R$ {:.2}", v))
                         .unwrap_or_else(|| "-".to_string());
 
-                    println!("  {} {} - {} {}",
+                    println!(
+                        "  {} {} - {} {}",
                         event.date.format("%d/%m/%Y").to_string().dimmed(),
                         event.movement_type.cyan(),
                         event.ticker.as_ref().unwrap_or(&event.product),
@@ -396,7 +412,10 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 println!("\n{} What would be imported:", "📝".cyan().bold());
                 println!("  • {} trade transactions", trades.len());
                 println!("  • {} corporate actions", corporate_actions.len());
-                println!("  • {} income events (not yet implemented)", income_events.len());
+                println!(
+                    "  • {} income events (not yet implemented)",
+                    income_events.len()
+                );
                 return Ok(());
             }
 
@@ -404,12 +423,18 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
-            println!("{} Importing trades and corporate actions...", "⏳".cyan().bold());
+            println!(
+                "{} Importing trades and corporate actions...",
+                "⏳".cyan().bold()
+            );
             let stats = importers::import_movimentacao_entries(&conn, entries, true)?;
 
             println!("\n{} Import complete!", "✓".green().bold());
             println!("  {} Trades:", "💰".cyan());
-            println!("    Imported: {}", stats.imported_trades.to_string().green());
+            println!(
+                "    Imported: {}",
+                stats.imported_trades.to_string().green()
+            );
             if stats.skipped_trades_old > 0 {
                 println!(
                     "    Skipped (before last import date): {}",
@@ -420,7 +445,10 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 println!("    Skipped: {}", stats.skipped_trades.to_string().yellow());
             }
             println!("  {} Corporate actions:", "🏢".cyan());
-            println!("    Imported: {}", stats.imported_actions.to_string().green());
+            println!(
+                "    Imported: {}",
+                stats.imported_actions.to_string().green()
+            );
             if stats.skipped_actions_old > 0 {
                 println!(
                     "    Skipped (before last import date): {}",
@@ -428,19 +456,33 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 );
             }
             if stats.skipped_actions > 0 {
-                println!("    Skipped: {}", stats.skipped_actions.to_string().yellow());
+                println!(
+                    "    Skipped: {}",
+                    stats.skipped_actions.to_string().yellow()
+                );
             }
             if stats.errors > 0 {
-                println!("  {} Errors: {}", "❌".red(), stats.errors.to_string().red());
+                println!(
+                    "  {} Errors: {}",
+                    "❌".red(),
+                    stats.errors.to_string().red()
+                );
             }
-            println!("\n{} Income events not yet implemented - coming soon!", "ℹ".blue().bold());
+            println!(
+                "\n{} Income events not yet implemented - coming soon!",
+                "ℹ".blue().bold()
+            );
 
             Ok(())
         }
 
         importers::ImportResult::OfertasPublicas(entries) => {
             info!("Detected Ofertas Públicas format");
-            println!("\n{} Found {} ofertas públicas entries\n", "✓".green().bold(), entries.len());
+            println!(
+                "\n{} Found {} ofertas públicas entries\n",
+                "✓".green().bold(),
+                entries.len()
+            );
 
             #[derive(Tabled)]
             struct OfertaPreview {
@@ -553,28 +595,38 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
 
             Ok(())
         }
-
     }
 }
 
 /// Handle IRPF PDF import command
 async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result<()> {
     use colored::Colorize;
-    use tabled::{Table, Tabled, settings::Style};
+    use tabled::{settings::Style, Table, Tabled};
 
-    info!("Importing IRPF positions from: {} for year {}", file_path, year);
+    info!(
+        "Importing IRPF positions from: {} for year {}",
+        file_path, year
+    );
 
     // Parse IRPF PDF
     let positions = importers::irpf_pdf::parse_irpf_pdf(file_path, year)?;
 
     if positions.is_empty() {
-        println!("\n{} No positions found for year {}", "ℹ".yellow().bold(), year);
+        println!(
+            "\n{} No positions found for year {}",
+            "ℹ".yellow().bold(),
+            year
+        );
         println!("Check that the PDF contains 'DECLARAÇÃO DE BENS E DIREITOS' section with Code 31 entries.");
         return Ok(());
     }
 
-    println!("\n{} Found {} opening position(s) from IRPF {}\n",
-        "✓".green().bold(), positions.len(), year);
+    println!(
+        "\n{} Found {} opening position(s) from IRPF {}\n",
+        "✓".green().bold(),
+        positions.len(),
+        year
+    );
 
     // Display preview
     #[derive(Tabled)]
@@ -608,7 +660,11 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
     if dry_run {
         println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
         println!("\n{} What would be imported:", "📝".cyan().bold());
-        println!("  • {} opening BUY transactions dated {}-12-31", positions.len(), year);
+        println!(
+            "  • {} opening BUY transactions dated {}-12-31",
+            positions.len(),
+            year
+        );
         println!("  • Previous IRPF opening positions for these tickers would be deleted");
         return Ok(());
     }
@@ -625,15 +681,19 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
 
     for position in positions {
         // Detect asset type from ticker
-        let asset_type = db::AssetType::detect_from_ticker(&position.ticker)
-            .unwrap_or(db::AssetType::Stock);
+        let asset_type =
+            db::AssetType::detect_from_ticker(&position.ticker).unwrap_or(db::AssetType::Stock);
 
         // Upsert asset
         let asset_id = match db::upsert_asset(&conn, &position.ticker, &asset_type, None) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("{} Error upserting asset {}: {}",
-                    "✗".red(), position.ticker, e);
+                eprintln!(
+                    "{} Error upserting asset {}: {}",
+                    "✗".red(),
+                    position.ticker,
+                    e
+                );
                 continue;
             }
         };
@@ -652,16 +712,24 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
                 rusqlite::params![asset_id],
             )?;
             replaced += 1;
-            println!("  {} Replaced {} existing IRPF position(s) for {}",
-                "↻".yellow(), existing_count, position.ticker.cyan());
+            println!(
+                "  {} Replaced {} existing IRPF position(s) for {}",
+                "↻".yellow(),
+                existing_count,
+                position.ticker.cyan()
+            );
         }
 
         // Convert to opening transaction
         let transaction = match position.to_opening_transaction(asset_id) {
             Ok(tx) => tx,
             Err(e) => {
-                eprintln!("{} Error converting position for {}: {}",
-                    "✗".red(), position.ticker, e);
+                eprintln!(
+                    "{} Error converting position for {}: {}",
+                    "✗".red(),
+                    position.ticker,
+                    e
+                );
                 continue;
             }
         };
@@ -669,7 +737,8 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
         // Insert opening transaction
         match db::insert_transaction(&conn, &transaction) {
             Ok(_) => {
-                println!("  {} Added opening position: {} {} @ R$ {:.2}",
+                println!(
+                    "  {} Added opening position: {} {} @ R$ {:.2}",
                     "✓".green(),
                     position.quantity,
                     position.ticker.cyan(),
@@ -678,8 +747,12 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
                 imported += 1;
             }
             Err(e) => {
-                eprintln!("{} Error inserting transaction for {}: {}",
-                    "✗".red(), position.ticker, e);
+                eprintln!(
+                    "{} Error inserting transaction for {}: {}",
+                    "✗".red(),
+                    position.ticker,
+                    e
+                );
             }
         }
     }
@@ -687,10 +760,18 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
     println!("\n{} Import complete!", "✓".green().bold());
     println!("  Imported: {}", imported.to_string().green());
     if replaced > 0 {
-        println!("  Replaced: {} (previous IRPF positions)", replaced.to_string().yellow());
+        println!(
+            "  Replaced: {} (previous IRPF positions)",
+            replaced.to_string().yellow()
+        );
     }
-    println!("\n{} These opening positions will be used for cost basis calculations", "ℹ".blue().bold());
-    println!("  Run 'interest tax calculate <month>' to see tax calculations with these cost bases\n");
+    println!(
+        "\n{} These opening positions will be used for cost basis calculations",
+        "ℹ".blue().bold()
+    );
+    println!(
+        "  Run 'interest tax calculate <month>' to see tax calculations with these cost bases\n"
+    );
 
     Ok(())
 }
@@ -715,7 +796,11 @@ async fn handle_price_update() -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{} Updating prices for {} assets\n", "→".cyan().bold(), assets.len());
+    println!(
+        "\n{} Updating prices for {} assets\n",
+        "→".cyan().bold(),
+        assets.len()
+    );
 
     let fetcher = PriceFetcher::new();
     let mut updated = 0;
@@ -769,19 +854,26 @@ async fn handle_price_update() -> Result<()> {
 
 /// Handle historical price fetching
 async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> {
-    use colored::Colorize;
-    use chrono::NaiveDate;
-    use tabled::{Table, Tabled, settings::Style};
     use anyhow::Context;
+    use chrono::NaiveDate;
+    use colored::Colorize;
+    use tabled::{settings::Style, Table, Tabled};
 
-    info!("Fetching historical prices for {} from {} to {}", ticker, from, to);
+    info!(
+        "Fetching historical prices for {} from {} to {}",
+        ticker, from, to
+    );
 
     let from_date = NaiveDate::parse_from_str(from, "%Y-%m-%d")
         .context("Invalid from date. Use YYYY-MM-DD format")?;
     let to_date = NaiveDate::parse_from_str(to, "%Y-%m-%d")
         .context("Invalid to date. Use YYYY-MM-DD format")?;
 
-    println!("\n{} Fetching historical prices for {}", "→".cyan().bold(), ticker);
+    println!(
+        "\n{} Fetching historical prices for {}",
+        "→".cyan().bold(),
+        ticker
+    );
 
     let prices = pricing::yahoo::fetch_historical_prices(ticker, from_date, to_date).await?;
 
@@ -811,17 +903,36 @@ async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> 
         .iter()
         .map(|p| PriceRow {
             date: p.date.format("%Y-%m-%d").to_string(),
-            open: p.open.as_ref().map(|o| format!("R$ {:.2}", o)).unwrap_or_else(|| "-".to_string()),
-            high: p.high.as_ref().map(|h| format!("R$ {:.2}", h)).unwrap_or_else(|| "-".to_string()),
-            low: p.low.as_ref().map(|l| format!("R$ {:.2}", l)).unwrap_or_else(|| "-".to_string()),
+            open: p
+                .open
+                .as_ref()
+                .map(|o| format!("R$ {:.2}", o))
+                .unwrap_or_else(|| "-".to_string()),
+            high: p
+                .high
+                .as_ref()
+                .map(|h| format!("R$ {:.2}", h))
+                .unwrap_or_else(|| "-".to_string()),
+            low: p
+                .low
+                .as_ref()
+                .map(|l| format!("R$ {:.2}", l))
+                .unwrap_or_else(|| "-".to_string()),
             close: format!("R$ {:.2}", p.close),
-            volume: p.volume.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+            volume: p
+                .volume
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
         })
         .collect();
 
     let table = Table::new(rows).with(Style::rounded()).to_string();
     println!("\n{}", table);
-    println!("\n{} Total: {} price points", "✓".green().bold(), prices.len());
+    println!(
+        "\n{} Total: {} price points",
+        "✓".green().bold(),
+        prices.len()
+    );
 
     Ok(())
 }
@@ -844,7 +955,11 @@ async fn handle_actions_update() -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{} Fetching corporate actions for {} assets\n", "→".cyan().bold(), assets.len());
+    println!(
+        "\n{} Fetching corporate actions for {} assets\n",
+        "→".cyan().bold(),
+        assets.len()
+    );
 
     let mut total_actions = 0;
     let mut total_events = 0;
@@ -877,7 +992,12 @@ async fn handle_actions_update() -> Result<()> {
                         };
 
                         // Check for duplicates
-                        if !db::corporate_action_exists(&conn, asset.id.unwrap(), &action.ex_date, &action.action_type)? {
+                        if !db::corporate_action_exists(
+                            &conn,
+                            asset.id.unwrap(),
+                            &action.ex_date,
+                            &action.action_type,
+                        )? {
                             db::insert_corporate_action(&conn, &action)?;
                             count += 1;
                         }
@@ -898,7 +1018,7 @@ async fn handle_actions_update() -> Result<()> {
                             ex_date: brapi_event.ex_date,
                             event_type,
                             amount_per_quota: brapi_event.amount,
-                            total_amount: brapi_event.amount,  // Will be calculated based on holdings
+                            total_amount: brapi_event.amount, // Will be calculated based on holdings
                             withholding_tax: rust_decimal::Decimal::ZERO,
                             is_quota_pre_2026: None,
                             source: "BRAPI".to_string(),
@@ -923,7 +1043,10 @@ async fn handle_actions_update() -> Result<()> {
         }
     }
 
-    println!("\n{} Corporate actions update complete!", "✓".green().bold());
+    println!(
+        "\n{} Corporate actions update complete!",
+        "✓".green().bold()
+    );
     println!("  Actions: {}", total_actions.to_string().green());
     println!("  Events: {}", total_events.to_string().green());
 
@@ -934,7 +1057,10 @@ async fn handle_actions_update() -> Result<()> {
 async fn handle_actions_list(ticker: Option<&str>) -> Result<()> {
     use colored::Colorize;
 
-    println!("{} Listing corporate actions is not yet implemented", "ℹ".blue().bold());
+    println!(
+        "{} Listing corporate actions is not yet implemented",
+        "ℹ".blue().bold()
+    );
     if let Some(t) = ticker {
         println!("  Filter: {}", t);
     }
@@ -950,9 +1076,9 @@ async fn handle_action_add(
     date_str: &str,
     notes: Option<&str>,
 ) -> Result<()> {
-    use colored::Colorize;
-    use chrono::NaiveDate;
     use anyhow::Context;
+    use chrono::NaiveDate;
+    use colored::Colorize;
 
     info!("Adding manual corporate action for {}", ticker);
 
@@ -961,18 +1087,28 @@ async fn handle_action_add(
         "SPLIT" => db::CorporateActionType::Split,
         "REVERSE-SPLIT" => db::CorporateActionType::ReverseSplit,
         "BONUS" => db::CorporateActionType::Bonus,
-        _ => return Err(anyhow::anyhow!("Action type must be 'split', 'reverse-split', or 'bonus'")),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Action type must be 'split', 'reverse-split', or 'bonus'"
+            ))
+        }
     };
 
     // Parse ratio (from:to format, e.g., "1:2" or "10:1")
     let ratio_parts: Vec<&str> = ratio_str.split(':').collect();
     if ratio_parts.len() != 2 {
-        return Err(anyhow::anyhow!("Ratio must be in format 'from:to' (e.g., '1:2', '10:1')"));
+        return Err(anyhow::anyhow!(
+            "Ratio must be in format 'from:to' (e.g., '1:2', '10:1')"
+        ));
     }
 
-    let ratio_from: i32 = ratio_parts[0].trim().parse()
+    let ratio_from: i32 = ratio_parts[0]
+        .trim()
+        .parse()
         .context("Invalid ratio 'from' value. Must be an integer")?;
-    let ratio_to: i32 = ratio_parts[1].trim().parse()
+    let ratio_to: i32 = ratio_parts[1]
+        .trim()
+        .parse()
         .context("Invalid ratio 'to' value. Must be an integer")?;
 
     if ratio_from <= 0 || ratio_to <= 0 {
@@ -988,14 +1124,17 @@ async fn handle_action_add(
     let conn = db::open_db(None)?;
 
     // Get or create asset
-    let asset_type = db::AssetType::detect_from_ticker(ticker)
-        .unwrap_or(db::AssetType::Stock);
+    let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
 
     // Check if this corporate action already exists
     if db::corporate_action_exists(&conn, asset_id, &ex_date, &action_type)? {
-        println!("{} Corporate action already exists for {} on {}",
-            "⚠".yellow().bold(), ticker.cyan().bold(), ex_date);
+        println!(
+            "{} Corporate action already exists for {} on {}",
+            "⚠".yellow().bold(),
+            ticker.cyan().bold(),
+            ex_date
+        );
         return Ok(());
     }
 
@@ -1018,24 +1157,42 @@ async fn handle_action_add(
     let action_id = db::insert_corporate_action(&conn, &action)?;
 
     // Display confirmation
-    println!("\n{} Corporate action added successfully!", "✓".green().bold());
+    println!(
+        "\n{} Corporate action added successfully!",
+        "✓".green().bold()
+    );
     println!("  Action ID:      {}", action_id);
     println!("  Ticker:         {}", ticker.cyan().bold());
     println!("  Type:           {}", action_type.as_str());
-    println!("  Ratio:          {}:{} ({})", ratio_from, ratio_to,
+    println!(
+        "  Ratio:          {}:{} ({})",
+        ratio_from,
+        ratio_to,
         match action_type {
-            db::CorporateActionType::Split => format!("each share becomes {}", ratio_to as f64 / ratio_from as f64),
-            db::CorporateActionType::ReverseSplit => format!("{} shares become 1", ratio_from as f64 / ratio_to as f64),
-            db::CorporateActionType::Bonus => format!("{}% bonus", ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0),
-            db::CorporateActionType::CapitalReturn => format!("R$ {:.2} per share", ratio_from as f64 / 100.0),
+            db::CorporateActionType::Split =>
+                format!("each share becomes {}", ratio_to as f64 / ratio_from as f64),
+            db::CorporateActionType::ReverseSplit =>
+                format!("{} shares become 1", ratio_from as f64 / ratio_to as f64),
+            db::CorporateActionType::Bonus => format!(
+                "{}% bonus",
+                ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0
+            ),
+            db::CorporateActionType::CapitalReturn =>
+                format!("R$ {:.2} per share", ratio_from as f64 / 100.0),
         }
     );
     println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
-    println!("  Applied:        {}", "No (use 'interest actions apply' to apply)".yellow());
+    println!(
+        "  Applied:        {}",
+        "No (use 'interest actions apply' to apply)".yellow()
+    );
     if let Some(n) = notes {
         println!("  Notes:          {}", n);
     }
-    println!("\n{} Run this command to apply the action:", "→".blue().bold());
+    println!(
+        "\n{} Run this command to apply the action:",
+        "→".blue().bold()
+    );
     println!("  interest actions apply {}", ticker);
     println!();
 
@@ -1052,15 +1209,17 @@ async fn handle_action_scrape(
     use anyhow::Context;
     use colored::Colorize;
 
-    info!("Scraping corporate actions for {} from investing.com", ticker);
+    info!(
+        "Scraping corporate actions for {} from investing.com",
+        ticker
+    );
 
     // Initialize database to get asset info
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
     // Get or create asset
-    let asset_type = db::AssetType::detect_from_ticker(ticker)
-        .unwrap_or(db::AssetType::Stock);
+    let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
 
     // Determine URL
@@ -1078,7 +1237,8 @@ async fn handle_action_scrape(
         } else {
             // Try to get asset name from database
             let assets = db::get_all_assets(&conn)?;
-            let asset = assets.iter()
+            let asset = assets
+                .iter()
                 .find(|a| a.ticker.eq_ignore_ascii_case(ticker));
 
             let db_name = asset.and_then(|a| a.name.clone());
@@ -1087,7 +1247,10 @@ async fn handle_action_scrape(
                 name
             } else {
                 // Fetch company name from Yahoo Finance
-                println!("{} Fetching company name from Yahoo Finance...", "🔍".cyan().bold());
+                println!(
+                    "{} Fetching company name from Yahoo Finance...",
+                    "🔍".cyan().bold()
+                );
 
                 match pricing::yahoo::fetch_company_name(ticker).await {
                     Ok(fetched_name) => {
@@ -1106,13 +1269,19 @@ async fn handle_action_scrape(
                         fetched_name
                     }
                     Err(e) => {
-                        println!("{} Could not fetch company name from Yahoo Finance: {}",
-                            "⚠".yellow().bold(), e);
+                        println!(
+                            "{} Could not fetch company name from Yahoo Finance: {}",
+                            "⚠".yellow().bold(),
+                            e
+                        );
                         println!("  Please provide either:");
                         println!("    1. URL with --url flag");
                         println!("    2. Company name with --name flag");
                         println!("\n{} Example:", "→".blue().bold());
-                        println!("  interest actions scrape {} --name \"Advanced Micro Devices Inc\"", ticker);
+                        println!(
+                            "  interest actions scrape {} --name \"Advanced Micro Devices Inc\"",
+                            ticker
+                        );
                         return Err(anyhow::anyhow!("Could not determine company name"));
                     }
                 }
@@ -1126,18 +1295,26 @@ async fn handle_action_scrape(
         auto_url
     };
 
-    println!("\n{} Launching headless browser to scrape: {}", "🌐".cyan().bold(), scrape_url);
+    println!(
+        "\n{} Launching headless browser to scrape: {}",
+        "🌐".cyan().bold(),
+        scrape_url
+    );
     println!("  This may take 10-30 seconds to bypass Cloudflare...\n");
 
     // Create scraper and fetch data
     let scraper = crate::scraping::InvestingScraper::new()
         .context("Failed to create scraper. Ensure Chrome/Chromium is installed.")?;
 
-    let mut actions = scraper.scrape_corporate_actions(&scrape_url, &scrape_url)
+    let mut actions = scraper
+        .scrape_corporate_actions(&scrape_url, &scrape_url)
         .context("Failed to scrape corporate actions")?;
 
     if actions.is_empty() {
-        println!("{} No corporate actions found on the page", "ℹ".yellow().bold());
+        println!(
+            "{} No corporate actions found on the page",
+            "ℹ".yellow().bold()
+        );
         return Ok(());
     }
 
@@ -1147,10 +1324,15 @@ async fn handle_action_scrape(
     }
 
     // Display scraped actions
-    println!("{} Found {} corporate action(s):\n", "✓".green().bold(), actions.len());
+    println!(
+        "{} Found {} corporate action(s):\n",
+        "✓".green().bold(),
+        actions.len()
+    );
 
     for action in &actions {
-        println!("  {} {} {}:{} on {}",
+        println!(
+            "  {} {} {}:{} on {}",
             match action.action_type {
                 db::CorporateActionType::Split => "📈",
                 db::CorporateActionType::ReverseSplit => "📉",
@@ -1181,15 +1363,25 @@ async fn handle_action_scrape(
             saved_count += 1;
         }
 
-        println!("\n{} Saved {} action(s), skipped {} duplicate(s)",
-            "✓".green().bold(), saved_count, skipped_count);
+        println!(
+            "\n{} Saved {} action(s), skipped {} duplicate(s)",
+            "✓".green().bold(),
+            saved_count,
+            skipped_count
+        );
 
         if saved_count > 0 {
-            println!("\n{} Run this command to apply the actions:", "→".blue().bold());
+            println!(
+                "\n{} Run this command to apply the actions:",
+                "→".blue().bold()
+            );
             println!("  interest actions apply {}", ticker);
         }
     } else {
-        println!("\n{} Actions not saved. Use --save flag to save to database", "ℹ".blue().bold());
+        println!(
+            "\n{} Actions not saved. Use --save flag to save to database",
+            "ℹ".blue().bold()
+        );
     }
     println!();
 
@@ -1210,7 +1402,8 @@ async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
     let actions = if let Some(ticker) = ticker_filter {
         // Get asset ID for the ticker
         let assets = db::get_all_assets(&conn)?;
-        let asset = assets.iter()
+        let asset = assets
+            .iter()
             .find(|a| a.ticker.eq_ignore_ascii_case(ticker))
             .ok_or_else(|| anyhow::anyhow!("Ticker {} not found in database", ticker))?;
 
@@ -1227,17 +1420,23 @@ async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{} Found {} unapplied corporate action(s)\n",
-        "📋".cyan().bold(), actions.len());
+    println!(
+        "\n{} Found {} unapplied corporate action(s)\n",
+        "📋".cyan().bold(),
+        actions.len()
+    );
 
     // Apply each action
     for action in actions {
         let asset = db::get_all_assets(&conn)?
             .into_iter()
             .find(|a| a.id == Some(action.asset_id))
-            .ok_or_else(|| anyhow::anyhow!("Asset not found for action {}", action.id.unwrap_or(0)))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("Asset not found for action {}", action.id.unwrap_or(0))
+            })?;
 
-        println!("  {} Applying {} for {} (ex-date: {})",
+        println!(
+            "  {} Applying {} for {} (ex-date: {})",
             "→".blue(),
             action.action_type.as_str().cyan(),
             asset.ticker.cyan().bold(),
@@ -1245,12 +1444,20 @@ async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
         );
 
         // Apply the action
-        let adjusted_count = crate::corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
+        let adjusted_count =
+            crate::corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
 
-        println!("    {} Adjusted {} transaction(s)", "✓".green(), adjusted_count);
+        println!(
+            "    {} Adjusted {} transaction(s)",
+            "✓".green(),
+            adjusted_count
+        );
     }
 
-    println!("\n{} All corporate actions applied successfully!", "✓".green().bold());
+    println!(
+        "\n{} All corporate actions applied successfully!",
+        "✓".green().bold()
+    );
     println!();
 
     Ok(())
@@ -1298,7 +1505,10 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
 
     // Check if already applied
     if action.applied {
-        println!("\n{} Cannot delete applied corporate action!", "⚠".yellow().bold());
+        println!(
+            "\n{} Cannot delete applied corporate action!",
+            "⚠".yellow().bold()
+        );
         println!("  This action has already been applied to transactions.");
         println!("  You would need to manually revert the adjustments first.");
         return Err(anyhow::anyhow!("Cannot delete applied action"));
@@ -1317,9 +1527,15 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
     }
 
     // Delete from database
-    conn.execute("DELETE FROM corporate_actions WHERE id = ?1", rusqlite::params![action_id])?;
+    conn.execute(
+        "DELETE FROM corporate_actions WHERE id = ?1",
+        rusqlite::params![action_id],
+    )?;
 
-    println!("\n{} Corporate action deleted successfully!\n", "✓".green().bold());
+    println!(
+        "\n{} Corporate action deleted successfully!\n",
+        "✓".green().bold()
+    );
 
     Ok(())
 }
@@ -1333,14 +1549,17 @@ async fn handle_action_edit(
     notes: Option<&str>,
 ) -> Result<()> {
     use anyhow::Context;
-    use colored::Colorize;
     use chrono::NaiveDate;
+    use colored::Colorize;
 
     info!("Editing corporate action {}", action_id);
 
     // Validate that at least one field is provided
     if action_type.is_none() && ratio.is_none() && date.is_none() && notes.is_none() {
-        println!("\n{} No changes specified. Use --action-type, --ratio, --date, or --notes", "ℹ".yellow().bold());
+        println!(
+            "\n{} No changes specified. Use --action-type, --ratio, --date, or --notes",
+            "ℹ".yellow().bold()
+        );
         return Ok(());
     }
 
@@ -1373,7 +1592,10 @@ async fn handle_action_edit(
 
     // Check if already applied
     if action.applied {
-        println!("\n{} Cannot edit applied corporate action!", "⚠".yellow().bold());
+        println!(
+            "\n{} Cannot edit applied corporate action!",
+            "⚠".yellow().bold()
+        );
         println!("  This action has already been applied to transactions.");
         println!("  Delete and re-add it if you need to make changes.");
         return Err(anyhow::anyhow!("Cannot edit applied action"));
@@ -1385,7 +1607,11 @@ async fn handle_action_edit(
         .find(|a| a.id == Some(action.asset_id))
         .ok_or_else(|| anyhow::anyhow!("Asset not found for action"))?;
 
-    println!("\n{} Editing corporate action for {}\n", "✏".cyan().bold(), asset.ticker.cyan().bold());
+    println!(
+        "\n{} Editing corporate action for {}\n",
+        "✏".cyan().bold(),
+        asset.ticker.cyan().bold()
+    );
 
     // Apply updates
     let mut updates = Vec::new();
@@ -1393,7 +1619,8 @@ async fn handle_action_edit(
     if let Some(new_type) = action_type {
         let new_action_type = db::CorporateActionType::from_str(new_type)
             .context(format!("Invalid action type: {}", new_type))?;
-        println!("  Type:     {} → {}",
+        println!(
+            "  Type:     {} → {}",
             action.action_type.as_str().dimmed(),
             new_action_type.as_str().green()
         );
@@ -1404,14 +1631,21 @@ async fn handle_action_edit(
     if let Some(ratio_str) = ratio {
         let parts: Vec<&str> = ratio_str.split(':').collect();
         if parts.len() != 2 {
-            return Err(anyhow::anyhow!("Invalid ratio format. Use 'from:to' (e.g., '1:8')"));
+            return Err(anyhow::anyhow!(
+                "Invalid ratio format. Use 'from:to' (e.g., '1:8')"
+            ));
         }
-        let new_from: i32 = parts[0].trim().parse()
+        let new_from: i32 = parts[0]
+            .trim()
+            .parse()
             .context("Invalid ratio 'from' value")?;
-        let new_to: i32 = parts[1].trim().parse()
+        let new_to: i32 = parts[1]
+            .trim()
+            .parse()
             .context("Invalid ratio 'to' value")?;
 
-        println!("  Ratio:    {}:{} → {}:{}",
+        println!(
+            "  Ratio:    {}:{} → {}:{}",
             action.ratio_from.to_string().dimmed(),
             action.ratio_to.to_string().dimmed(),
             new_from.to_string().green(),
@@ -1427,7 +1661,8 @@ async fn handle_action_edit(
         let new_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
             .context("Invalid date format. Use YYYY-MM-DD")?;
 
-        println!("  Ex-date:  {} → {}",
+        println!(
+            "  Ex-date:  {} → {}",
             action.ex_date.format("%Y-%m-%d").to_string().dimmed(),
             new_date.format("%Y-%m-%d").to_string().green()
         );
@@ -1439,10 +1674,7 @@ async fn handle_action_edit(
 
     if let Some(new_notes) = notes {
         let old_notes = action.notes.as_deref().unwrap_or("(none)");
-        println!("  Notes:    {} → {}",
-            old_notes.dimmed(),
-            new_notes.green()
-        );
+        println!("  Notes:    {} → {}", old_notes.dimmed(), new_notes.green());
         action.notes = Some(new_notes.to_string());
         updates.push("notes");
     }
@@ -1463,16 +1695,19 @@ async fn handle_action_edit(
         ],
     )?;
 
-    println!("\n{} Corporate action updated successfully!\n", "✓".green().bold());
+    println!(
+        "\n{} Corporate action updated successfully!\n",
+        "✓".green().bold()
+    );
 
     Ok(())
 }
 
 /// Handle portfolio show command
 async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
-    use colored::Colorize;
-    use tabled::{Table, Tabled, settings::Style};
     use anyhow::Context;
+    use colored::Colorize;
+    use tabled::{settings::Style, Table, Tabled};
 
     info!("Generating portfolio report");
 
@@ -1482,8 +1717,10 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
 
     // Parse asset type filter if provided
     let asset_type_filter = if let Some(type_str) = asset_type {
-        Some(db::AssetType::from_str(type_str)
-            .context(format!("Invalid asset type: {}", type_str))?)
+        Some(
+            db::AssetType::from_str(type_str)
+                .context(format!("Invalid asset type: {}", type_str))?,
+        )
     } else {
         None
     };
@@ -1500,7 +1737,11 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
     // Display header
     if let Some(ref filter) = asset_type_filter {
         let filter_name: &db::AssetType = filter;
-        println!("\n{} Portfolio - {} only\n", "📊".cyan().bold(), filter_name.as_str().to_uppercase());
+        println!(
+            "\n{} Portfolio - {} only\n",
+            "📊".cyan().bold(),
+            filter_name.as_str().to_uppercase()
+        );
     } else {
         println!("\n{} Complete Portfolio\n", "📊".cyan().bold());
     }
@@ -1558,10 +1799,12 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
                 quantity: format!("{:.2}", p.quantity),
                 avg_cost: format!("R$ {:.2}", p.average_cost),
                 total_cost: format!("R$ {:.2}", p.total_cost),
-                price: p.current_price
+                price: p
+                    .current_price
                     .map(|pr| format!("R$ {:.2}", pr))
                     .unwrap_or_else(|| "-".to_string()),
-                value: p.current_value
+                value: p
+                    .current_value
                     .map(|v| format!("R$ {:.2}", v))
                     .unwrap_or_else(|| "-".to_string()),
                 pl: pl_str,
@@ -1575,16 +1818,24 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
 
     // Display summary
     println!("\n{} Summary", "📈".cyan().bold());
-    println!("  Total Cost:  {}", format!("R$ {:.2}", report.total_cost).cyan());
-    println!("  Total Value: {}", format!("R$ {:.2}", report.total_value).cyan());
+    println!(
+        "  Total Cost:  {}",
+        format!("R$ {:.2}", report.total_cost).cyan()
+    );
+    println!(
+        "  Total Value: {}",
+        format!("R$ {:.2}", report.total_value).cyan()
+    );
 
     if report.total_pl >= rust_decimal::Decimal::ZERO {
-        println!("  Total P&L:   {} ({})",
+        println!(
+            "  Total P&L:   {} ({})",
             format!("R$ {:.2}", report.total_pl).green().bold(),
             format!("{:.2}%", report.total_pl_pct).green().bold()
         );
     } else {
-        println!("  Total P&L:   {} ({})",
+        println!(
+            "  Total P&L:   {} ({})",
             format!("R$ {:.2}", report.total_pl).red().bold(),
             format!("{:.2}%", report.total_pl_pct).red().bold()
         );
@@ -1598,11 +1849,12 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
             println!("\n{} Asset Allocation", "🎯".cyan().bold());
 
             let mut alloc_vec: Vec<_> = allocation.iter().collect();
-            alloc_vec.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+            alloc_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
 
             for (asset_type, (value, pct)) in alloc_vec {
                 let type_ref: &db::AssetType = asset_type;
-                println!("  {}: {} ({:.2}%)",
+                println!(
+                    "  {}: {} ({:.2}%)",
                     type_ref.as_str().to_uppercase(),
                     format!("R$ {:.2}", value).cyan(),
                     pct
@@ -1617,15 +1869,17 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
 
 /// Handle tax calculation for a specific month
 async fn handle_tax_calculate(month_str: &str) -> Result<()> {
-    use colored::Colorize;
     use anyhow::Context;
+    use colored::Colorize;
 
     info!("Calculating swing trade tax for {}", month_str);
 
     // Parse month string (MM/YYYY)
     let parts: Vec<&str> = month_str.split('/').collect();
     if parts.len() != 2 {
-        return Err(anyhow::anyhow!("Invalid month format. Use MM/YYYY (e.g., 01/2025)"));
+        return Err(anyhow::anyhow!(
+            "Invalid month format. Use MM/YYYY (e.g., 01/2025)"
+        ));
     }
 
     let month: u32 = parts[0].parse().context("Invalid month number")?;
@@ -1643,19 +1897,45 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
     let calculations = tax::calculate_monthly_tax(&conn, year, month)?;
 
     if calculations.is_empty() {
-        println!("\n{} No sales found for {}/{}\n", "ℹ".blue().bold(), month, year);
+        println!(
+            "\n{} No sales found for {}/{}\n",
+            "ℹ".blue().bold(),
+            month,
+            year
+        );
         return Ok(());
     }
 
-    println!("\n{} Swing Trade Tax Calculation - {}/{}\n", "💰".cyan().bold(), month, year);
+    println!(
+        "\n{} Swing Trade Tax Calculation - {}/{}\n",
+        "💰".cyan().bold(),
+        month,
+        year
+    );
 
     // Display results by tax category
     for calc in &calculations {
-        println!("{} {}", "Tax Category:".bold(), calc.category.display_name());
-        println!("  Total Sales:      {}", format!("R$ {:.2}", calc.total_sales).cyan());
-        println!("  Total Cost Basis: {}", format!("R$ {:.2}", calc.total_cost_basis).cyan());
-        println!("  Gross Profit:     {}", format!("R$ {:.2}", calc.total_profit).green());
-        println!("  Gross Loss:       {}", format!("R$ {:.2}", calc.total_loss).red());
+        println!(
+            "{} {}",
+            "Tax Category:".bold(),
+            calc.category.display_name()
+        );
+        println!(
+            "  Total Sales:      {}",
+            format!("R$ {:.2}", calc.total_sales).cyan()
+        );
+        println!(
+            "  Total Cost Basis: {}",
+            format!("R$ {:.2}", calc.total_cost_basis).cyan()
+        );
+        println!(
+            "  Gross Profit:     {}",
+            format!("R$ {:.2}", calc.total_profit).green()
+        );
+        println!(
+            "  Gross Loss:       {}",
+            format!("R$ {:.2}", calc.total_loss).red()
+        );
 
         let net_str = if calc.net_profit >= rust_decimal::Decimal::ZERO {
             format!("R$ {:.2}", calc.net_profit).green()
@@ -1666,30 +1946,41 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
 
         // Show loss offset if applied
         if calc.loss_offset_applied > rust_decimal::Decimal::ZERO {
-            println!("  Loss Offset:      {} (from previous months)",
+            println!(
+                "  Loss Offset:      {} (from previous months)",
                 format!("R$ {:.2}", calc.loss_offset_applied).cyan()
             );
-            println!("  After Loss Offset: {}",
+            println!(
+                "  After Loss Offset: {}",
                 format!("R$ {:.2}", calc.profit_after_loss_offset).green()
             );
         }
 
         if calc.exemption_applied > rust_decimal::Decimal::ZERO {
-            println!("  Exemption:        {} (sales under R$20,000)",
+            println!(
+                "  Exemption:        {} (sales under R$20,000)",
                 format!("R$ {:.2}", calc.exemption_applied).yellow().bold()
             );
         }
 
         if calc.taxable_amount > rust_decimal::Decimal::ZERO {
-            println!("  Taxable Amount:   {}", format!("R$ {:.2}", calc.taxable_amount).yellow());
+            println!(
+                "  Taxable Amount:   {}",
+                format!("R$ {:.2}", calc.taxable_amount).yellow()
+            );
             let tax_rate_pct = calc.tax_rate * rust_decimal::Decimal::from(100);
-            println!("  Tax Rate:         {}", format!("{:.0}%", tax_rate_pct).yellow());
-            println!("  {} {}",
+            println!(
+                "  Tax Rate:         {}",
+                format!("{:.0}%", tax_rate_pct).yellow()
+            );
+            println!(
+                "  {} {}",
                 "Tax Due:".bold(),
                 format!("R$ {:.2}", calc.tax_due).red().bold()
             );
         } else if calc.profit_after_loss_offset < rust_decimal::Decimal::ZERO {
-            println!("  {} Loss to carry forward",
+            println!(
+                "  {} Loss to carry forward",
                 format!("R$ {:.2}", calc.net_profit.abs()).yellow().bold()
             );
         } else {
@@ -1700,12 +1991,11 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
     }
 
     // Summary
-    let total_tax: rust_decimal::Decimal = calculations.iter()
-        .map(|c| c.tax_due)
-        .sum();
+    let total_tax: rust_decimal::Decimal = calculations.iter().map(|c| c.tax_due).sum();
 
     if total_tax > rust_decimal::Decimal::ZERO {
-        println!("{} Total Tax Due for {}/{}: {}\n",
+        println!(
+            "{} Total Tax Due for {}/{}: {}\n",
             "📋".cyan().bold(),
             month,
             year,
@@ -1719,17 +2009,25 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
             println!("{} DARF Payments:\n", "💳".cyan().bold());
 
             for payment in &darf_payments {
-                println!("  {} Code {}: {}",
+                println!(
+                    "  {} Code {}: {}",
                     "DARF".yellow().bold(),
                     payment.darf_code,
                     payment.description
                 );
-                println!("    Amount:   {}", format!("R$ {:.2}", payment.tax_due).red());
-                println!("    Due Date: {}", payment.due_date.format("%d/%m/%Y").to_string().yellow());
+                println!(
+                    "    Amount:   {}",
+                    format!("R$ {:.2}", payment.tax_due).red()
+                );
+                println!(
+                    "    Due Date: {}",
+                    payment.due_date.format("%d/%m/%Y").to_string().yellow()
+                );
                 println!();
             }
 
-            println!("{} Payment due by {}\n",
+            println!(
+                "{} Payment due by {}\n",
                 "⏰".yellow(),
                 darf_payments[0].due_date.format("%d/%m/%Y")
             );
@@ -1753,28 +2051,58 @@ async fn handle_tax_report(year: i32) -> Result<()> {
     let report = tax::generate_annual_report(&conn, year)?;
 
     if report.monthly_summaries.is_empty() {
-        println!("\n{} No transactions found for year {}\n", "ℹ".blue().bold(), year);
+        println!(
+            "\n{} No transactions found for year {}\n",
+            "ℹ".blue().bold(),
+            year
+        );
         return Ok(());
     }
 
-    println!("\n{} Annual IRPF Tax Report - {}\n", "📊".cyan().bold(), year);
+    println!(
+        "\n{} Annual IRPF Tax Report - {}\n",
+        "📊".cyan().bold(),
+        year
+    );
 
     // Monthly breakdown
     println!("{}", "Monthly Summary:".bold());
     for summary in &report.monthly_summaries {
         println!("\n  {} ({}):", summary.month_name.bold(), summary.month);
-        println!("    Sales:  {}", format!("R$ {:.2}", summary.total_sales).cyan());
-        println!("    Profit: {}", format!("R$ {:.2}", summary.total_profit).green());
-        println!("    Loss:   {}", format!("R$ {:.2}", summary.total_loss).red());
-        println!("    Tax:    {}", format!("R$ {:.2}", summary.tax_due).yellow());
+        println!(
+            "    Sales:  {}",
+            format!("R$ {:.2}", summary.total_sales).cyan()
+        );
+        println!(
+            "    Profit: {}",
+            format!("R$ {:.2}", summary.total_profit).green()
+        );
+        println!(
+            "    Loss:   {}",
+            format!("R$ {:.2}", summary.total_loss).red()
+        );
+        println!(
+            "    Tax:    {}",
+            format!("R$ {:.2}", summary.tax_due).yellow()
+        );
     }
 
     // Annual totals
     println!("\n{} Annual Totals:", "📈".cyan().bold());
-    println!("  Total Sales:  {}", format!("R$ {:.2}", report.annual_total_sales).cyan());
-    println!("  Total Profit: {}", format!("R$ {:.2}", report.annual_total_profit).green());
-    println!("  Total Loss:   {}", format!("R$ {:.2}", report.annual_total_loss).red());
-    println!("  {} {}\n",
+    println!(
+        "  Total Sales:  {}",
+        format!("R$ {:.2}", report.annual_total_sales).cyan()
+    );
+    println!(
+        "  Total Profit: {}",
+        format!("R$ {:.2}", report.annual_total_profit).green()
+    );
+    println!(
+        "  Total Loss:   {}",
+        format!("R$ {:.2}", report.annual_total_loss).red()
+    );
+    println!(
+        "  {} {}\n",
         "Total Tax:".bold(),
         format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
     );
@@ -1783,7 +2111,8 @@ async fn handle_tax_report(year: i32) -> Result<()> {
     if !report.losses_to_carry_forward.is_empty() {
         println!("{} Losses to Carry Forward:", "📋".yellow().bold());
         for (category, loss) in &report.losses_to_carry_forward {
-            println!("  {}: {}",
+            println!(
+                "  {}: {}",
                 category.display_name(),
                 format!("R$ {:.2}", loss).yellow()
             );
@@ -1804,7 +2133,7 @@ async fn handle_tax_report(year: i32) -> Result<()> {
 /// Handle tax summary display
 async fn handle_tax_summary(year: i32) -> Result<()> {
     use colored::Colorize;
-    use tabled::{Table, Tabled, settings::Style};
+    use tabled::{settings::Style, Table, Tabled};
 
     info!("Generating tax summary for {}", year);
 
@@ -1816,7 +2145,11 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
     let report = tax::generate_annual_report(&conn, year)?;
 
     if report.monthly_summaries.is_empty() {
-        println!("\n{} No transactions found for year {}\n", "ℹ".blue().bold(), year);
+        println!(
+            "\n{} No transactions found for year {}\n",
+            "ℹ".blue().bold(),
+            year
+        );
         return Ok(());
     }
 
@@ -1854,10 +2187,20 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
 
     // Annual summary
     println!("\n{} Annual Total", "📈".cyan().bold());
-    println!("  Sales:  {}", format!("R$ {:.2}", report.annual_total_sales).cyan());
-    println!("  Profit: {}", format!("R$ {:.2}", report.annual_total_profit).green());
-    println!("  Loss:   {}", format!("R$ {:.2}", report.annual_total_loss).red());
-    println!("  {} {}\n",
+    println!(
+        "  Sales:  {}",
+        format!("R$ {:.2}", report.annual_total_sales).cyan()
+    );
+    println!(
+        "  Profit: {}",
+        format!("R$ {:.2}", report.annual_total_profit).green()
+    );
+    println!(
+        "  Loss:   {}",
+        format!("R$ {:.2}", report.annual_total_loss).red()
+    );
+    println!(
+        "  {} {}\n",
         "Tax:".bold(),
         format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
     );
@@ -1875,23 +2218,21 @@ async fn handle_transaction_add(
     fees_str: &str,
     notes: Option<&str>,
 ) -> Result<()> {
+    use anyhow::Context;
+    use chrono::NaiveDate;
     use colored::Colorize;
     use rust_decimal::Decimal;
     use std::str::FromStr;
-    use chrono::NaiveDate;
-    use anyhow::Context;
 
     info!("Adding manual transaction for {}", ticker);
 
     // Parse and validate inputs
-    let quantity = Decimal::from_str(quantity_str)
-        .context("Invalid quantity. Must be a decimal number")?;
+    let quantity =
+        Decimal::from_str(quantity_str).context("Invalid quantity. Must be a decimal number")?;
 
-    let price = Decimal::from_str(price_str)
-        .context("Invalid price. Must be a decimal number")?;
+    let price = Decimal::from_str(price_str).context("Invalid price. Must be a decimal number")?;
 
-    let fees = Decimal::from_str(fees_str)
-        .context("Invalid fees. Must be a decimal number")?;
+    let fees = Decimal::from_str(fees_str).context("Invalid fees. Must be a decimal number")?;
 
     let trade_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
         .context("Invalid date format. Use YYYY-MM-DD")?;
@@ -1924,8 +2265,7 @@ async fn handle_transaction_add(
     let conn = db::open_db(None)?;
 
     // Detect asset type from ticker
-    let asset_type = db::AssetType::detect_from_ticker(ticker)
-        .unwrap_or(db::AssetType::Stock);
+    let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
 
     // Upsert asset
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
@@ -1963,14 +2303,20 @@ async fn handle_transaction_add(
     println!("  Quantity:       {}", quantity);
     println!("  Price:          {}", format!("R$ {:.2}", price).cyan());
     println!("  Fees:           {}", format!("R$ {:.2}", fees).cyan());
-    println!("  Total:          {}", format!("R$ {:.2}", total_cost).cyan().bold());
+    println!(
+        "  Total:          {}",
+        format!("R$ {:.2}", total_cost).cyan().bold()
+    );
     if let Some(n) = notes {
         println!("  Notes:          {}", n);
     }
 
     if actions_applied > 0 {
-        println!("\n{} Auto-applied {} corporate action(s) to this transaction",
-            "ℹ".blue().bold(), actions_applied);
+        println!(
+            "\n{} Auto-applied {} corporate action(s) to this transaction",
+            "ℹ".blue().bold(),
+            actions_applied
+        );
         println!("  The quantity and price have been adjusted automatically.");
         println!("  Run 'interest portfolio show' to see the adjusted values.");
     }
@@ -1983,7 +2329,10 @@ async fn handle_transaction_add(
 async fn handle_process_terms() -> Result<()> {
     use colored::Colorize;
 
-    println!("{} Processing term contract liquidations...\n", "🔄".cyan().bold());
+    println!(
+        "{} Processing term contract liquidations...\n",
+        "🔄".cyan().bold()
+    );
 
     // Initialize database
     db::init_database(None)?;
@@ -1997,8 +2346,11 @@ async fn handle_process_terms() -> Result<()> {
         println!("\nTerm contracts are identified by transactions with notes containing");
         println!("'Term contract liquidation' and show the TICKERT → TICKER transition.");
     } else {
-        println!("\n{} Successfully processed {} term contract liquidation(s)!",
-            "✓".green().bold(), processed);
+        println!(
+            "\n{} Successfully processed {} term contract liquidation(s)!",
+            "✓".green().bold(),
+            processed
+        );
         println!("\nCost basis from TICKERT purchases has been matched to TICKER liquidations.");
     }
 
@@ -2025,17 +2377,24 @@ fn parse_factor(factor: &str) -> (i32, i32) {
 /// Handle inspect command - show Excel file structure
 async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> Result<()> {
     use anyhow::Context;
+    use calamine::{open_workbook, Data, Reader, Xlsx};
     use colored::Colorize;
-    use calamine::{open_workbook, Reader, Xlsx, Data};
     use std::collections::HashMap;
 
-    println!("{} Inspecting file: {}\n", "📊".cyan().bold(), file_path.green());
+    println!(
+        "{} Inspecting file: {}\n",
+        "📊".cyan().bold(),
+        file_path.green()
+    );
 
-    let mut workbook: Xlsx<_> = open_workbook(file_path)
-        .context("Failed to open Excel file")?;
+    let mut workbook: Xlsx<_> = open_workbook(file_path).context("Failed to open Excel file")?;
 
     let sheet_names = workbook.sheet_names().to_vec();
-    println!("{} Found {} sheet(s):", "📄".cyan().bold(), sheet_names.len());
+    println!(
+        "{} Found {} sheet(s):",
+        "📄".cyan().bold(),
+        sheet_names.len()
+    );
     for name in &sheet_names {
         println!("  • {}", name.yellow());
     }
@@ -2044,7 +2403,11 @@ async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> R
     // Inspect each sheet
     for sheet_name in sheet_names {
         println!("{}", "=".repeat(80).dimmed());
-        println!("{} Sheet: {}", "📋".cyan().bold(), sheet_name.yellow().bold());
+        println!(
+            "{} Sheet: {}",
+            "📋".cyan().bold(),
+            sheet_name.yellow().bold()
+        );
         println!("{}", "=".repeat(80).dimmed());
 
         match workbook.worksheet_range(&sheet_name) {
@@ -2056,8 +2419,11 @@ async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> R
                     continue;
                 }
 
-                println!("  {} rows, {} columns\n", rows.len(),
-                    rows.first().map(|r: &&[Data]| r.len()).unwrap_or(0));
+                println!(
+                    "  {} rows, {} columns\n",
+                    rows.len(),
+                    rows.first().map(|r: &&[Data]| r.len()).unwrap_or(0)
+                );
 
                 // Show first row (usually headers)
                 if let Some(header) = rows.first() {
@@ -2089,8 +2455,10 @@ async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> R
                 } else {
                     // Just show how many data rows
                     if rows.len() > 1 {
-                        println!("  {} data rows (use --full to see sample data)\n",
-                            (rows.len() - 1).to_string().yellow());
+                        println!(
+                            "  {} data rows (use --full to see sample data)\n",
+                            (rows.len() - 1).to_string().yellow()
+                        );
                     }
                 }
 
@@ -2100,7 +2468,8 @@ async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> R
 
                     let mut value_counts: HashMap<String, usize> = HashMap::new();
 
-                    for row in rows.iter().skip(1) {  // Skip header
+                    for row in rows.iter().skip(1) {
+                        // Skip header
                         if let Some(cell) = row.get(col_idx) {
                             let cell_str: String = cell.to_string();
                             if !cell_str.trim().is_empty() && cell_str != "-" {
@@ -2113,10 +2482,17 @@ async fn handle_inspect(file_path: &str, full: bool, column: Option<usize>) -> R
                     let mut sorted_values: Vec<_> = value_counts.into_iter().collect();
                     sorted_values.sort_by(|a, b| b.1.cmp(&a.1));
 
-                    println!("  Found {} unique values:\n", sorted_values.len().to_string().yellow());
+                    println!(
+                        "  Found {} unique values:\n",
+                        sorted_values.len().to_string().yellow()
+                    );
 
                     for (value, count) in sorted_values {
-                        println!("    {} → {} occurrences", value.green(), count.to_string().dimmed());
+                        println!(
+                            "    {} → {} occurrences",
+                            value.green(),
+                            count.to_string().dimmed()
+                        );
                     }
                     println!();
                 }

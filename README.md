@@ -65,6 +65,11 @@ interest transactions add A1MD34 buy 1000 50 2020-01-15 --notes "Pre-CEI purchas
 interest prices update
 ```
 
+### Formatting & Color Output
+
+- Use `--no-color` to disable ANSI colors (useful for piping).
+- Colors are disabled automatically when output is piped.
+
 ## Database
 
 **Location:** `~/.interest/data.db` (SQLite database)

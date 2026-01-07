@@ -2,9 +2,18 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "interest")]
-#[command(version, about = "Brazilian B3 investment tracker with tax calculations")]
-#[command(long_about = "Track your Brazilian stock exchange investments (stocks, FII, FIAGRO, FI-INFRA) with automatic price updates, performance analysis, and tax calculations.")]
+#[command(
+    version,
+    about = "Brazilian B3 investment tracker with tax calculations"
+)]
+#[command(
+    long_about = "Track your Brazilian stock exchange investments (stocks, FII, FIAGRO, FI-INFRA) with automatic price updates, performance analysis, and tax calculations."
+)]
 pub struct Cli {
+    /// Disable colorized/ANSI output
+    #[arg(long = "no-color", global = true)]
+    pub no_color: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
