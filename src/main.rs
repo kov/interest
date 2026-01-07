@@ -15,8 +15,35 @@ use cli::{
     ActionCommands, Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands,
     TransactionCommands,
 };
+use serde::Serialize;
 use std::io::IsTerminal;
 use tracing::info;
+
+// JSON response utilities
+#[derive(Serialize)]
+struct JsonResponse<T> {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn json_success<T: Serialize>(data: T) -> String {
+    serde_json::to_string_pretty(&JsonResponse {
+        success: true,
+        data: Some(data),
+        error: None,
+    })
+    .unwrap_or_else(|e| {
+        format!(
+            r#"{{"success": false, "error": "JSON serialization error: {}"}}"#,
+            e
+        )
+    })
+}
+
+// Note: json_error removed as unused; add back when standardized error JSON is needed
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,10 +52,13 @@ async fn main() -> Result<()> {
 
     // Determine color usage: disable when requested or when stdout is not a TTY (piped)
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let disable_color = cli.no_color || !stdout_is_tty;
+    let disable_color = cli.no_color || !stdout_is_tty || cli.json;
 
-    // Initialize logging with ANSI disabled when color is disabled
-    tracing_subscriber::fmt().with_ansi(!disable_color).init();
+    // Initialize logging - always write to stderr to keep stdout clean
+    tracing_subscriber::fmt()
+        .with_ansi(!disable_color)
+        .with_writer(std::io::stderr)
+        .init();
 
     // Disable colored crate globally when needed
     if disable_color {
@@ -36,7 +66,7 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Import { file, dry_run } => handle_import(&file, dry_run).await,
+        Commands::Import { file, dry_run } => handle_import(&file, dry_run, cli.json).await,
 
         Commands::ImportIrpf {
             file,
@@ -46,7 +76,7 @@ async fn main() -> Result<()> {
 
         Commands::Portfolio { action } => match action {
             PortfolioCommands::Show { asset_type } => {
-                handle_portfolio_show(asset_type.as_deref()).await
+                handle_portfolio_show(asset_type.as_deref(), cli.json).await
             }
             PortfolioCommands::Performance { period } => {
                 println!("Showing performance for period: {}", period);
@@ -83,8 +113,12 @@ async fn main() -> Result<()> {
                 save,
             } => handle_action_scrape(&ticker, url.as_deref(), name.as_deref(), save).await,
             ActionCommands::Update => handle_actions_update().await,
-            ActionCommands::List { ticker } => handle_actions_list(ticker.as_deref()).await,
-            ActionCommands::Apply { ticker } => handle_action_apply(ticker.as_deref()).await,
+            ActionCommands::List { ticker } => {
+                handle_actions_list(ticker.as_deref(), cli.json).await
+            }
+            ActionCommands::Apply { ticker } => {
+                handle_action_apply(ticker.as_deref(), cli.json).await
+            }
             ActionCommands::Delete { id } => handle_action_delete(id).await,
             ActionCommands::Edit {
                 id,
@@ -134,7 +168,7 @@ async fn main() -> Result<()> {
 }
 
 /// Handle import command with automatic format detection
-async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
+async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Result<()> {
     use colored::Colorize;
     use rusqlite::OptionalExtension;
     use tabled::{settings::Style, Table, Tabled};
@@ -298,11 +332,14 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
         importers::ImportResult::Movimentacao(entries) => {
             // Handle Movimentacao format
             info!("Detected Movimentacao format");
-            println!(
-                "\n{} Found {} movimentacao entries\n",
-                "✓".green().bold(),
-                entries.len()
-            );
+
+            if !json_output {
+                println!(
+                    "\n{} Found {} movimentacao entries\n",
+                    "✓".green().bold(),
+                    entries.len()
+                );
+            }
 
             // Categorize entries
             let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
@@ -315,24 +352,26 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
                 .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
                 .collect();
 
-            println!("{} Summary:", "📊".cyan().bold());
-            println!(
-                "  {} Trades (buy/sell/term)",
-                trades.len().to_string().green()
-            );
-            println!(
-                "  {} Corporate actions (splits, bonuses, mergers)",
-                corporate_actions.len().to_string().yellow()
-            );
-            println!(
-                "  {} Income events (dividends, yields, amortization)",
-                income_events.len().to_string().cyan()
-            );
-            println!("  {} Other movements", other.len().to_string().dimmed());
-            println!();
+            if !json_output {
+                println!("{} Summary:", "📊".cyan().bold());
+                println!(
+                    "  {} Trades (buy/sell/term)",
+                    trades.len().to_string().green()
+                );
+                println!(
+                    "  {} Corporate actions (splits, bonuses, mergers)",
+                    corporate_actions.len().to_string().yellow()
+                );
+                println!(
+                    "  {} Income events (dividends, yields, amortization)",
+                    income_events.len().to_string().cyan()
+                );
+                println!("  {} Other movements", other.len().to_string().dimmed());
+                println!();
+            }
 
             // Show preview of trades
-            if !trades.is_empty() {
+            if !json_output && !trades.is_empty() {
                 println!("{} Sample trades:", "💰".cyan().bold());
 
                 #[derive(Tabled)]
@@ -372,7 +411,7 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             }
 
             // Show preview of corporate actions
-            if !corporate_actions.is_empty() {
+            if !json_output && !corporate_actions.is_empty() {
                 println!("{} Corporate actions:", "🏢".cyan().bold());
 
                 for action in corporate_actions.iter().take(5) {
@@ -387,7 +426,7 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             }
 
             // Show preview of income events
-            if !income_events.is_empty() {
+            if !json_output && !income_events.is_empty() {
                 println!("{} Income events:", "💵".cyan().bold());
 
                 for event in income_events.iter().take(5) {
@@ -423,11 +462,18 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
-            println!(
-                "{} Importing trades and corporate actions...",
-                "⏳".cyan().bold()
-            );
+            if !json_output {
+                println!(
+                    "{} Importing trades and corporate actions...",
+                    "⏳".cyan().bold()
+                );
+            }
             let stats = importers::import_movimentacao_entries(&conn, entries, true)?;
+
+            if json_output {
+                println!("{}", json_success(stats));
+                return Ok(());
+            }
 
             println!("\n{} Import complete!", "✓".green().bold());
             println!("  {} Trades:", "💰".cyan());
@@ -1056,16 +1102,109 @@ async fn handle_actions_update() -> Result<()> {
 }
 
 /// Handle listing corporate actions
-async fn handle_actions_list(ticker: Option<&str>) -> Result<()> {
+async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<()> {
     use colored::Colorize;
+    use tabled::{settings::Style, Table, Tabled};
 
-    println!(
-        "{} Listing corporate actions is not yet implemented",
-        "ℹ".blue().bold()
-    );
-    if let Some(t) = ticker {
-        println!("  Filter: {}", t);
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    let results = db::list_corporate_actions(&conn, ticker)?;
+
+    if results.is_empty() {
+        if json_output {
+            #[derive(Serialize)]
+            struct Empty {
+                actions: Vec<()>,
+            }
+            println!("{}", json_success(&Empty { actions: vec![] }));
+        } else {
+            println!("{} No corporate actions found", "ℹ".blue().bold());
+            if let Some(t) = ticker {
+                println!("  For ticker: {}", t);
+            }
+        }
+        return Ok(());
     }
+
+    if json_output {
+        #[derive(Serialize)]
+        struct JsonAction {
+            id: i64,
+            ticker: String,
+            action_type: String,
+            ratio: String,
+            ex_date: String,
+            applied: bool,
+            source: String,
+            notes: Option<String>,
+        }
+
+        #[derive(Serialize)]
+        struct JsonActionList {
+            actions: Vec<JsonAction>,
+        }
+
+        let actions = results
+            .iter()
+            .map(|(action, asset)| JsonAction {
+                id: action.id.unwrap(),
+                ticker: asset.ticker.clone(),
+                action_type: action.action_type.as_str().to_string(),
+                ratio: format!("{}:{}", action.ratio_from, action.ratio_to),
+                ex_date: action.ex_date.format("%Y-%m-%d").to_string(),
+                applied: action.applied,
+                source: action.source.clone(),
+                notes: action.notes.clone(),
+            })
+            .collect();
+
+        println!("{}", json_success(&JsonActionList { actions }));
+        return Ok(());
+    }
+
+    // Formatted output
+    println!("\n{} Corporate Actions\n", "🏢".cyan().bold());
+
+    #[derive(Tabled)]
+    struct ActionRow {
+        #[tabled(rename = "ID")]
+        id: String,
+        #[tabled(rename = "Ticker")]
+        ticker: String,
+        #[tabled(rename = "Type")]
+        action_type: String,
+        #[tabled(rename = "Ratio")]
+        ratio: String,
+        #[tabled(rename = "Ex-Date")]
+        ex_date: String,
+        #[tabled(rename = "Applied")]
+        applied: String,
+        #[tabled(rename = "Source")]
+        source: String,
+    }
+
+    let rows: Vec<ActionRow> = results
+        .iter()
+        .map(|(action, asset)| ActionRow {
+            id: action.id.unwrap().to_string(),
+            ticker: asset.ticker.clone(),
+            action_type: action.action_type.as_str().to_string(),
+            ratio: format!("{}:{}", action.ratio_from, action.ratio_to),
+            ex_date: action.ex_date.format("%d/%m/%Y").to_string(),
+            applied: if action.applied {
+                "✓".green().to_string()
+            } else {
+                "○".yellow().to_string()
+            },
+            source: action.source.clone(),
+        })
+        .collect();
+
+    let table = Table::new(rows).with(Style::rounded()).to_string();
+    println!("{}", table);
+
+    println!("\n{} {} total actions", "ℹ".blue().bold(), results.len());
 
     Ok(())
 }
@@ -1391,7 +1530,7 @@ async fn handle_action_scrape(
 }
 
 /// Handle apply corporate actions command
-async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
+async fn handle_action_apply(ticker_filter: Option<&str>, json_output: bool) -> Result<()> {
     use colored::Colorize;
 
     info!("Applying corporate actions");
@@ -1415,18 +1554,44 @@ async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
     };
 
     if actions.is_empty() {
-        println!("{} No unapplied corporate actions found", "ℹ".blue().bold());
-        if let Some(t) = ticker_filter {
-            println!("  Filter: {}", t);
+        if json_output {
+            #[derive(Serialize)]
+            struct EmptyApply {
+                applied_actions: Vec<()>,
+            }
+            println!(
+                "{}",
+                json_success(&EmptyApply {
+                    applied_actions: vec![]
+                })
+            );
+        } else {
+            println!("{} No unapplied corporate actions found", "ℹ".blue().bold());
+            if let Some(t) = ticker_filter {
+                println!("  Filter: {}", t);
+            }
         }
         return Ok(());
     }
 
-    println!(
-        "\n{} Found {} unapplied corporate action(s)\n",
-        "📋".cyan().bold(),
-        actions.len()
-    );
+    #[derive(Serialize)]
+    struct AppliedAction {
+        action_id: i64,
+        ticker: String,
+        action_type: String,
+        ex_date: String,
+        adjusted_transactions: usize,
+    }
+
+    let mut applied = Vec::new();
+
+    if !json_output {
+        println!(
+            "\n{} Found {} unapplied corporate action(s)\n",
+            "📋".cyan().bold(),
+            actions.len()
+        );
+    }
 
     // Apply each action
     for action in actions {
@@ -1437,30 +1602,55 @@ async fn handle_action_apply(ticker_filter: Option<&str>) -> Result<()> {
                 anyhow::anyhow!("Asset not found for action {}", action.id.unwrap_or(0))
             })?;
 
-        println!(
-            "  {} Applying {} for {} (ex-date: {})",
-            "→".blue(),
-            action.action_type.as_str().cyan(),
-            asset.ticker.cyan().bold(),
-            action.ex_date.format("%Y-%m-%d")
-        );
+        if !json_output {
+            println!(
+                "  {} Applying {} for {} (ex-date: {})",
+                "→".blue(),
+                action.action_type.as_str().cyan(),
+                asset.ticker.cyan().bold(),
+                action.ex_date.format("%Y-%m-%d")
+            );
+        }
 
         // Apply the action
         let adjusted_count =
             crate::corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
 
-        println!(
-            "    {} Adjusted {} transaction(s)",
-            "✓".green(),
-            adjusted_count
-        );
+        applied.push(AppliedAction {
+            action_id: action.id.unwrap(),
+            ticker: asset.ticker.clone(),
+            action_type: action.action_type.as_str().to_string(),
+            ex_date: action.ex_date.format("%Y-%m-%d").to_string(),
+            adjusted_transactions: adjusted_count,
+        });
+
+        if !json_output {
+            println!(
+                "    {} Adjusted {} transaction(s)",
+                "✓".green(),
+                adjusted_count
+            );
+        }
     }
 
-    println!(
-        "\n{} All corporate actions applied successfully!",
-        "✓".green().bold()
-    );
-    println!();
+    if json_output {
+        #[derive(Serialize)]
+        struct ApplyResult {
+            applied_actions: Vec<AppliedAction>,
+        }
+        println!(
+            "{}",
+            json_success(&ApplyResult {
+                applied_actions: applied
+            })
+        );
+    } else {
+        println!(
+            "\n{} All corporate actions applied successfully!",
+            "✓".green().bold()
+        );
+        println!();
+    }
 
     Ok(())
 }
@@ -1711,7 +1901,7 @@ async fn handle_action_edit(
 }
 
 /// Handle portfolio show command
-async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
+async fn handle_portfolio_show(asset_type: Option<&str>, json_output: bool) -> Result<()> {
     use colored::Colorize;
     use tabled::{settings::Style, Table, Tabled};
 
@@ -1736,8 +1926,82 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
     let report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
 
     if report.positions.is_empty() {
-        println!("{} No positions found", "ℹ".blue().bold());
-        println!("Import transactions first using: interest import <file>");
+        if json_output {
+            #[derive(Serialize)]
+            struct EmptyPortfolio {
+                positions: Vec<()>,
+                total_cost: String,
+                total_value: String,
+                total_pl: String,
+                total_pl_pct: String,
+            }
+            println!(
+                "{}",
+                json_success(&EmptyPortfolio {
+                    positions: vec![],
+                    total_cost: "0.00".to_string(),
+                    total_value: "0.00".to_string(),
+                    total_pl: "0.00".to_string(),
+                    total_pl_pct: "0.00".to_string(),
+                })
+            );
+        } else {
+            println!("{} No positions found", "ℹ".blue().bold());
+            println!("Import transactions first using: interest import <file>");
+        }
+        return Ok(());
+    }
+
+    if json_output {
+        // Serialize the report for JSON output
+        #[derive(Serialize)]
+        struct JsonPosition {
+            ticker: String,
+            asset_type: String,
+            quantity: String,
+            average_cost: String,
+            total_cost: String,
+            current_price: Option<String>,
+            current_value: Option<String>,
+            unrealized_pl: Option<String>,
+            unrealized_pl_pct: Option<String>,
+        }
+
+        #[derive(Serialize)]
+        struct JsonPortfolio {
+            positions: Vec<JsonPosition>,
+            total_cost: String,
+            total_value: String,
+            total_pl: String,
+            total_pl_pct: String,
+        }
+
+        let positions = report
+            .positions
+            .iter()
+            .map(|p| JsonPosition {
+                ticker: p.asset.ticker.clone(),
+                asset_type: p.asset.asset_type.as_str().to_string(),
+                quantity: p.quantity.to_string(),
+                average_cost: p.average_cost.to_string(),
+                total_cost: p.total_cost.to_string(),
+                current_price: p.current_price.map(|pr| pr.to_string()),
+                current_value: p.current_value.map(|v| v.to_string()),
+                unrealized_pl: p.unrealized_pl.map(|pl| pl.to_string()),
+                unrealized_pl_pct: p.unrealized_pl_pct.map(|pl| pl.to_string()),
+            })
+            .collect();
+
+        println!(
+            "{}",
+            json_success(&JsonPortfolio {
+                positions,
+                total_cost: report.total_cost.to_string(),
+                total_value: report.total_value.to_string(),
+                total_pl: report.total_pl.to_string(),
+                total_pl_pct: report.total_pl_pct.to_string(),
+            })
+        );
         return Ok(());
     }
 

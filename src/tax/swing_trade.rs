@@ -85,7 +85,6 @@ impl TaxCategory {
         }
     }
 
-
     /// Returns DARF code for this tax category (Brazilian federal tax payment form)
     /// All capital gains use code 6015, but are reported separately
     pub fn darf_code(&self) -> Option<&'static str> {
@@ -121,7 +120,7 @@ impl FromStr for TaxCategory {
             "FIAGRO_SWING" => Ok(TaxCategory::FiagroSwingTrade),
             "FIAGRO_DAY" => Ok(TaxCategory::FiagroDayTrade),
             "FI_INFRA" => Ok(TaxCategory::FiInfra),
-            _ => Err(())
+            _ => Err(()),
         }
     }
 }
@@ -386,7 +385,9 @@ fn get_transactions_before(
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: row.get::<_, String>(2)?.parse::<TransactionType>()
+                transaction_type: row
+                    .get::<_, String>(2)?
+                    .parse::<TransactionType>()
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
@@ -554,7 +555,9 @@ fn get_transactions_up_to_month(
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: row.get::<_, String>(2)?.parse::<TransactionType>()
+                transaction_type: row
+                    .get::<_, String>(2)?
+                    .parse::<TransactionType>()
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,

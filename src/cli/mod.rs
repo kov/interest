@@ -14,6 +14,10 @@ pub struct Cli {
     #[arg(long = "no-color", global = true)]
     pub no_color: bool,
 
+    /// Output results in JSON format
+    #[arg(long = "json", global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

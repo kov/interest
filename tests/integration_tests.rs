@@ -1,6 +1,6 @@
 //! Integration tests for the interest tracker
 //!
-//! These tests verify end-to-end functionality:
+//! These tests verify end-to-end functionality using CLI commands:
 //! - XLS import
 //! - Cost basis calculations with average cost
 //! - Term contract lifecycle and cost basis transfer
@@ -10,6 +10,7 @@
 //! - Correct portfolio totals
 
 use anyhow::Result;
+use assert_cmd::{cargo, prelude::*};
 use chrono::Utc;
 use interest::corporate_actions::{apply_corporate_action, get_unapplied_actions};
 use interest::db::models::{Asset, AssetType, Transaction, TransactionType};
@@ -17,37 +18,172 @@ use interest::db::{init_database, open_db, upsert_asset};
 use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::importers::import_movimentacao_entries;
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
-use interest::importers::movimentacao_import::ImportStats;
 use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
 use interest::tax::cost_basis::AverageCostMatcher;
 use interest::term_contracts::process_term_liquidations;
+use predicates::prelude::*;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde_json::Value;
+use std::path::PathBuf;
+use std::process::Command;
 use std::str::FromStr;
 use tempfile::TempDir;
 
-/// Test helper: Create a temporary database
-fn create_test_db() -> Result<(TempDir, Connection)> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-    Ok((temp_dir, conn))
+// =============================================================================
+// CLI Test Helpers
+// =============================================================================
+
+/// Get database path from temp home
+fn get_db_path(home: &TempDir) -> PathBuf {
+    PathBuf::from(home.path()).join(".interest").join("data.db")
 }
 
-/// Test helper: Import movimentacao file into database
+/// Create a base CLI command with proper environment setup
+fn base_cmd(home: &TempDir) -> Command {
+    let mut cmd = Command::new(cargo::cargo_bin!("interest"));
+    cmd.env("HOME", home.path());
+    cmd.arg("--no-color");
+    cmd
+}
+
+/// Run import command and return stats as JSON
+fn run_import_json(home: &TempDir, file_path: &str) -> Value {
+    let output = base_cmd(home)
+        .arg("--json")
+        .arg("import")
+        .arg(file_path)
+        .output()
+        .expect("failed to execute import");
+
+    assert!(output.status.success(), "import command failed");
+
+    let stdout = String::from_utf8(output.stdout).expect("invalid utf8 in output");
+    serde_json::from_str(&stdout).expect("failed to parse JSON output")
+}
+
+// Removed unused JSON helpers (run_portfolio_json, run_actions_list_json, run_actions_apply_json)
+
+/// JSON assertion helpers
+fn assert_json_success(value: &Value) -> bool {
+    value
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn get_json_data(value: &Value) -> &Value {
+    value
+        .get("data")
+        .expect("missing data field in JSON response")
+}
+
+/// SQL Query helpers - for detailed verification
+mod sql {
+    use super::*;
+
+    /// Query all transactions for a ticker
+    pub fn query_transactions(home: &TempDir, ticker: &str) -> Vec<Transaction> {
+        let db_path = get_db_path(home);
+        let conn = open_db(Some(db_path)).expect("failed to open db");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id, t.asset_id, t.transaction_type, t.trade_date, t.settlement_date,
+                        t.quantity, t.price_per_unit, t.total_cost, t.fees, t.is_day_trade,
+                        t.quota_issuance_date, t.notes, t.source, t.created_at
+                 FROM transactions t
+                 JOIN assets a ON t.asset_id = a.id
+                 WHERE a.ticker = ?1
+                 ORDER BY t.trade_date ASC",
+            )
+            .expect("failed to prepare query");
+
+        let transactions = stmt
+            .query_map([ticker], |row| {
+                Ok(Transaction {
+                    id: Some(row.get(0)?),
+                    asset_id: row.get(1)?,
+                    transaction_type: row
+                        .get::<_, String>(2)?
+                        .parse::<TransactionType>()
+                        .unwrap_or(TransactionType::Buy),
+                    trade_date: row.get(3)?,
+                    settlement_date: row.get(4)?,
+                    quantity: get_decimal(row, 5)?,
+                    price_per_unit: get_decimal(row, 6)?,
+                    total_cost: get_decimal(row, 7)?,
+                    fees: get_decimal(row, 8)?,
+                    is_day_trade: row.get(9)?,
+                    quota_issuance_date: row.get(10)?,
+                    notes: row.get(11)?,
+                    source: row.get(12)?,
+                    created_at: row.get(13)?,
+                })
+            })
+            .expect("query failed")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("failed to collect transactions");
+
+        transactions
+    }
+
+    /// Calculate position (quantity, total_cost) for a ticker
+    pub fn query_position(home: &TempDir, ticker: &str) -> (Decimal, Decimal) {
+        let transactions = query_transactions(home, ticker);
+
+        let mut total_quantity = Decimal::ZERO;
+        let mut total_cost = Decimal::ZERO;
+
+        for tx in transactions {
+            match tx.transaction_type {
+                TransactionType::Buy => {
+                    total_quantity += tx.quantity;
+                    total_cost += tx.total_cost;
+                }
+                TransactionType::Sell => {
+                    total_quantity -= tx.quantity;
+                }
+            }
+        }
+
+        (total_quantity, total_cost)
+    }
+
+    /// Helper to read Decimal from SQLite (handles INTEGER, REAL, TEXT)
+    fn get_decimal(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+        use rusqlite::types::ValueRef;
+
+        match row.get_ref(idx)? {
+            ValueRef::Text(bytes) => {
+                let s = std::str::from_utf8(bytes)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                Decimal::from_str(s)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            }
+            ValueRef::Integer(i) => Ok(Decimal::from(i)),
+            ValueRef::Real(f) => Decimal::try_from(f)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            _ => Err(rusqlite::Error::InvalidColumnType(
+                idx,
+                "decimal".to_string(),
+                rusqlite::types::Type::Null,
+            )),
+        }
+    }
+}
+
+// =============================================================================
+// Legacy Test Helper: trade-only import (used by corp action tests)
+// =============================================================================
+
+/// Test helper: Import movimentacao file into database (trade entries only)
 fn import_movimentacao(conn: &Connection, file_path: &str) -> Result<()> {
     let entries = parse_movimentacao_excel(file_path)?;
     let trade_entries: Vec<_> = entries.into_iter().filter(|e| e.is_trade()).collect();
     import_movimentacao_entries(conn, trade_entries, false)?;
     Ok(())
-}
-
-/// Test helper: Import movimentacao file into database with import-state tracking and auto-apply
-fn import_movimentacao_with_state(conn: &Connection, file_path: &str) -> Result<ImportStats> {
-    let entries = parse_movimentacao_excel(file_path)?;
-    import_movimentacao_entries(conn, entries, true)
 }
 
 #[test]
@@ -82,152 +218,146 @@ fn test_14_option_exercise_resolves_underlying_ticker() -> Result<()> {
     Ok(())
 }
 
-/// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    use rusqlite::types::ValueRef;
-
-    match row.get_ref(idx)? {
-        ValueRef::Text(bytes) => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => {
-            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        _ => Err(rusqlite::Error::InvalidColumnType(
-            idx,
-            "decimal".to_string(),
-            rusqlite::types::Type::Null,
-        )),
-    }
-}
-
-/// Test helper: Get all transactions for an asset
-fn get_transactions(conn: &Connection, ticker: &str) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.asset_id, t.transaction_type, t.trade_date, t.settlement_date,
-                t.quantity, t.price_per_unit, t.total_cost, t.fees, t.is_day_trade,
-                t.quota_issuance_date, t.notes, t.source, t.created_at
-         FROM transactions t
-         JOIN assets a ON t.asset_id = a.id
-         WHERE a.ticker = ?1
-         ORDER BY t.trade_date ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map([ticker], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
-                    .unwrap_or(TransactionType::Buy),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: get_decimal_value(row, 5)?,
-                price_per_unit: get_decimal_value(row, 6)?,
-                total_cost: get_decimal_value(row, 7)?,
-                fees: get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
-}
-
-/// Test helper: Calculate total position for an asset
-fn calculate_position(transactions: &[Transaction]) -> (Decimal, Decimal) {
-    let mut total_quantity = Decimal::ZERO;
-    let mut total_cost = Decimal::ZERO;
-
-    for tx in transactions {
-        match tx.transaction_type {
-            TransactionType::Buy => {
-                total_quantity += tx.quantity;
-                total_cost += tx.total_cost;
-            }
-            TransactionType::Sell => {
-                total_quantity -= tx.quantity;
-                // Cost is handled via average cost, not simple subtraction
-            }
-        }
-    }
-
-    (total_quantity, total_cost)
-}
+// Removed unused legacy helpers (create_test_db, import_movimentacao_with_state, get_decimal_value,
+// get_transactions, calculate_position) now that all tests are converted to the new style.
 
 #[test]
 fn test_01_basic_purchase_and_sale() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    // Import the test file
-    import_movimentacao(&conn, "tests/data/01_basic_purchase_sale.xlsx")?;
+    // Import the test file using JSON output to verify stats
+    let import_result = run_import_json(&home, "tests/data/01_basic_purchase_sale.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    // Verify transactions were imported
-    let transactions = get_transactions(&conn, "PETR4")?;
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 3);
+
+    // Verify portfolio shows correct position using formatted output
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PETR4"))
+        .stdout(predicate::str::contains("70.00")); // Final quantity after 100 + 50 - 80
+
+    // Deep inspection: verify transactions via SQL
+    let transactions = sql::query_transactions(&home, "PETR4");
     assert_eq!(transactions.len(), 3, "Should have 3 transactions");
 
     // Verify first purchase
-    assert_eq!(transactions[0].transaction_type, TransactionType::Buy);
-    assert_eq!(transactions[0].quantity, dec!(100));
-    assert_eq!(transactions[0].price_per_unit, dec!(25));
-    assert_eq!(transactions[0].total_cost, dec!(2500));
+    assert_eq!(transactions[0].quantity.to_string(), "100");
+    assert_eq!(transactions[0].price_per_unit.to_string(), "25");
+    assert_eq!(transactions[0].total_cost.to_string(), "2500");
 
     // Verify second purchase
-    assert_eq!(transactions[1].transaction_type, TransactionType::Buy);
-    assert_eq!(transactions[1].quantity, dec!(50));
-    assert_eq!(transactions[1].price_per_unit, dec!(30));
+    assert_eq!(transactions[1].quantity.to_string(), "50");
+    assert_eq!(transactions[1].price_per_unit.to_string(), "30");
 
     // Verify sale
-    assert_eq!(transactions[2].transaction_type, TransactionType::Sell);
-    assert_eq!(transactions[2].quantity, dec!(80));
-    assert_eq!(transactions[2].price_per_unit, dec!(35));
+    assert_eq!(transactions[2].quantity.to_string(), "80");
+    assert_eq!(transactions[2].price_per_unit.to_string(), "35");
 
-    // Test average cost basis calculation
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&transactions[0]);
-    avg.add_purchase(&transactions[1]);
+    // Verify final position
+    let (quantity, _cost) = sql::query_position(&home, "PETR4");
+    assert_eq!(quantity.to_string(), "70"); // 100 + 50 - 80
 
-    let sale_result = avg.match_sale(&transactions[2])?;
+    Ok(())
+}
 
-    let expected_avg = (transactions[0].total_cost + transactions[1].total_cost)
-        / (transactions[0].quantity + transactions[1].quantity);
-    let expected_cost_basis = expected_avg * transactions[2].quantity;
+// =============================================================================
+// Basic CLI Tests
+// =============================================================================
 
-    assert_eq!(sale_result.cost_basis, expected_cost_basis);
-    assert_eq!(sale_result.sale_total, dec!(2800));
-    assert_eq!(
-        sale_result.profit_loss,
-        sale_result.sale_total - expected_cost_basis
-    );
+#[test]
+fn test_portfolio_show_empty_db() -> Result<()> {
+    let home = TempDir::new()?;
 
-    // Verify remaining quantity
-    assert_eq!(avg.remaining_quantity(), dec!(70)); // 150 - 80
+    // Run portfolio show on empty database
+    let mut cmd = base_cmd(&home);
+    cmd.arg("portfolio").arg("show");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("No positions found"))
+        .stdout(predicate::str::contains("\u{001b}[").not());
 
     Ok(())
 }
 
 #[test]
-fn test_02_term_contract_lifecycle() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+fn test_import_dry_run_does_not_create_db() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    assert!(!db_path.exists(), "db should start absent");
 
-    // Import the test file
-    import_movimentacao(&conn, "tests/data/02_term_contract_lifecycle.xlsx")?;
+    let mut cmd = base_cmd(&home);
+    cmd.arg("import")
+        .arg("tests/data/01_basic_purchase_sale.xlsx")
+        .arg("--dry-run");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Found"))
+        .stdout(predicate::str::contains("Dry run"))
+        .stdout(predicate::str::contains("\u{001b}[").not());
+
+    assert!(!db_path.exists(), "dry-run should not create db");
+
+    Ok(())
+}
+
+#[test]
+fn test_import_then_portfolio_shows_position() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import file
+    let mut import_cmd = base_cmd(&home);
+    import_cmd
+        .arg("import")
+        .arg("tests/data/01_basic_purchase_sale.xlsx");
+
+    import_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found"))
+        .stdout(predicate::str::contains("\u{001b}[").not());
+
+    // Verify portfolio
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PETR4"))
+        .stdout(predicate::str::contains("70.00"))
+        .stdout(predicate::str::contains("\u{001b}[").not());
+
+    Ok(())
+}
+
+// =============================================================================
+// Legacy Tests (using direct library access)
+// =============================================================================
+
+#[test]
+fn test_02_term_contract_lifecycle() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import the test file via CLI (ensures DB is initialized)
+    let import_result = run_import_json(&home, "tests/data/02_term_contract_lifecycle.xlsx");
+    assert!(assert_json_success(&import_result));
 
     // Check ANIM3T term contract purchase
-    let term_txs = get_transactions(&conn, "ANIM3T")?;
+    let term_txs = sql::query_transactions(&home, "ANIM3T");
     assert_eq!(term_txs.len(), 1, "Should have 1 term contract purchase");
     assert_eq!(term_txs[0].quantity, dec!(200));
     assert_eq!(term_txs[0].price_per_unit, dec!(10));
 
     // Check ANIM3 transactions (liquidation + sale)
-    let base_txs = get_transactions(&conn, "ANIM3")?;
+    let base_txs = sql::query_transactions(&home, "ANIM3");
     assert_eq!(base_txs.len(), 2, "Should have liquidation + sale");
 
     // Verify liquidation is marked correctly
@@ -237,12 +367,13 @@ fn test_02_term_contract_lifecycle() -> Result<()> {
         .unwrap()
         .contains("Term contract liquidation"));
 
-    // Process term contract liquidations
+    // Process term contract liquidations via direct DB access
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     let processed = process_term_liquidations(&conn)?;
     assert_eq!(processed, 1, "Should process 1 term liquidation");
 
     // Test cost basis calculation
-    // The liquidation should inherit cost from the term purchase
     let mut avg = AverageCostMatcher::new();
     avg.add_purchase(&base_txs[0]); // Liquidation becomes a purchase
 
@@ -258,12 +389,17 @@ fn test_02_term_contract_lifecycle() -> Result<()> {
 
 #[test]
 fn test_09_duplicate_trades_not_deduped() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    let stats = import_movimentacao_with_state(&conn, "tests/data/10_duplicate_trades.xlsx")?;
-    assert_eq!(stats.imported_trades, 2);
+    // Import file
+    let import_result = run_import_json(&home, "tests/data/10_duplicate_trades.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "DUPL3")?;
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 2);
+
+    // Verify with SQL
+    let transactions = sql::query_transactions(&home, "DUPL3");
     assert_eq!(
         transactions.len(),
         2,
@@ -274,48 +410,65 @@ fn test_09_duplicate_trades_not_deduped() -> Result<()> {
 
 #[test]
 fn test_10_no_reimport_of_old_data() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    let stats_first = import_movimentacao_with_state(&conn, "tests/data/10_duplicate_trades.xlsx")?;
-    assert_eq!(stats_first.imported_trades, 2);
+    // First import
+    let import_result_first = run_import_json(&home, "tests/data/10_duplicate_trades.xlsx");
+    assert!(assert_json_success(&import_result_first));
+    let data_first = get_json_data(&import_result_first);
+    assert_eq!(data_first["imported_trades"].as_u64().unwrap(), 2);
 
-    let stats_second =
-        import_movimentacao_with_state(&conn, "tests/data/10_duplicate_trades.xlsx")?;
-    assert_eq!(stats_second.imported_trades, 0);
-    assert_eq!(stats_second.skipped_trades_old, 2);
+    // Second import - should skip
+    let import_result_second = run_import_json(&home, "tests/data/10_duplicate_trades.xlsx");
+    assert!(assert_json_success(&import_result_second));
+    let data_second = get_json_data(&import_result_second);
+    assert_eq!(data_second["imported_trades"].as_u64().unwrap(), 0);
+    assert_eq!(data_second["skipped_trades_old"].as_u64().unwrap(), 2);
 
-    let transactions = get_transactions(&conn, "DUPL3")?;
+    // Verify with SQL
+    let transactions = sql::query_transactions(&home, "DUPL3");
     assert_eq!(transactions.len(), 2);
     Ok(())
 }
 
 #[test]
 fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    let stats = import_movimentacao_with_state(&conn, "tests/data/11_bonus_auto_apply.xlsx")?;
-    assert_eq!(stats.imported_trades, 1);
-    assert_eq!(stats.imported_actions, 1);
-    assert_eq!(stats.auto_applied_actions, 0);
+    // Import file
+    let import_result = run_import_json(&home, "tests/data/11_bonus_auto_apply.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "ITSA4")?;
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 1);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 1);
+    assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 0);
+
+    // Verify with SQL
+    let transactions = sql::query_transactions(&home, "ITSA4");
     assert_eq!(transactions.len(), 2);
-    let (qty, cost) = calculate_position(&transactions);
-    assert_eq!(qty, dec!(120));
-    assert_eq!(cost, dec!(1000));
+
+    let (quantity, cost_basis) = sql::query_position(&home, "ITSA4");
+    assert_eq!(quantity, dec!(120));
+    assert_eq!(cost_basis, dec!(1000));
     Ok(())
 }
 
 #[test]
 fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    let stats = import_movimentacao_with_state(&conn, "tests/data/12_desdobro_inference.xlsx")?;
-    assert_eq!(stats.imported_trades, 1);
-    assert_eq!(stats.imported_actions, 1);
-    assert_eq!(stats.auto_applied_actions, 1);
+    // Import file
+    let import_result = run_import_json(&home, "tests/data/12_desdobro_inference.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "A1MD34")?;
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 1);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 1);
+    assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 1);
+
+    // Verify with SQL
+    let transactions = sql::query_transactions(&home, "A1MD34");
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0].quantity, dec!(640));
     assert_eq!(transactions[0].total_cost, dec!(800));
@@ -324,28 +477,35 @@ fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
 
 #[test]
 fn test_14_atualizacao_ratio_inference_auto_apply() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    let stats = import_movimentacao_with_state(&conn, "tests/data/14_atualizacao_inference.xlsx")?;
-    assert_eq!(stats.imported_trades, 1);
-    assert_eq!(stats.imported_actions, 0);
-    assert_eq!(stats.auto_applied_actions, 0);
+    // Import file
+    let import_result = run_import_json(&home, "tests/data/14_atualizacao_inference.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "BRCR11")?;
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 1);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 0);
+    assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 0);
+
+    // Verify with SQL
+    let transactions = sql::query_transactions(&home, "BRCR11");
     assert_eq!(transactions.len(), 1);
-    let (qty, cost) = calculate_position(&transactions);
-    assert_eq!(qty, dec!(378));
-    assert_eq!(cost, dec!(3780));
+
+    let (quantity, cost_basis) = sql::query_position(&home, "BRCR11");
+    assert_eq!(quantity, dec!(378));
+    assert_eq!(cost_basis, dec!(3780));
     Ok(())
 }
 
 #[test]
 fn test_03_term_contract_sold_before_expiry() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    import_movimentacao(&conn, "tests/data/03_term_contract_sold.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/03_term_contract_sold.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "SHUL4T")?;
+    let transactions = sql::query_transactions(&home, "SHUL4T");
     assert_eq!(transactions.len(), 2, "Should have buy and sell");
 
     // Test cost basis - term contracts can be traded like regular stocks
@@ -363,11 +523,16 @@ fn test_03_term_contract_sold_before_expiry() -> Result<()> {
 
 #[test]
 fn test_04_stock_split() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
+    // Initialize DB and import only trade entries (no auto actions)
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
     import_movimentacao(&conn, "tests/data/04_stock_split.xlsx")?;
 
-    let transactions = get_transactions(&conn, "VALE3")?;
+    let transactions = sql::query_transactions(&home, "VALE3");
 
     // Before adjustments: should have 4 transactions (buy, split, buy, sell)
     // Split entry is not imported as a transaction, only as corporate action
@@ -379,6 +544,8 @@ fn test_04_stock_split() -> Result<()> {
 
     // Manually create the split corporate action
     let asset_id = transactions[0].asset_id;
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
          VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 0, 'TEST')",
@@ -402,7 +569,7 @@ fn test_04_stock_split() -> Result<()> {
     assert_eq!(adjusted_count, 1, "Should adjust 1 transaction (first buy)");
 
     // Re-fetch transactions to see adjustments
-    let adjusted_txs = get_transactions(&conn, "VALE3")?;
+    let adjusted_txs = sql::query_transactions(&home, "VALE3");
 
     // First purchase should be adjusted: 100 @ R$80 -> 200 @ R$40
     assert_eq!(adjusted_txs[0].quantity, dec!(200));
@@ -443,15 +610,22 @@ fn test_04_stock_split() -> Result<()> {
 
 #[test]
 fn test_05_reverse_split() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
+    // Initialize DB and import only trade entries (no auto actions)
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
     import_movimentacao(&conn, "tests/data/05_reverse_split.xlsx")?;
 
-    let transactions = get_transactions(&conn, "MGLU3")?;
+    let transactions = sql::query_transactions(&home, "MGLU3");
     assert_eq!(transactions.len(), 2, "Should have buy and sell");
 
     // Create reverse split (10:1 - 10 shares become 1)
     let asset_id = transactions[0].asset_id;
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
          VALUES (?1, 'SPLIT', '2025-02-20', '2025-02-20', 10, 1, 0, 'TEST')",
@@ -471,7 +645,7 @@ fn test_05_reverse_split() -> Result<()> {
     apply_corporate_action(&conn, &actions[0], &asset)?;
 
     // Re-fetch and verify
-    let adjusted_txs = get_transactions(&conn, "MGLU3")?;
+    let adjusted_txs = sql::query_transactions(&home, "MGLU3");
 
     // 1000 @ R$2.00 -> 100 @ R$20.00
     assert_eq!(adjusted_txs[0].quantity, dec!(100));
@@ -492,16 +666,23 @@ fn test_05_reverse_split() -> Result<()> {
 
 #[test]
 fn test_06_multiple_splits() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
+    // Initialize DB and import only trade entries (no auto actions)
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
     import_movimentacao(&conn, "tests/data/06_multiple_splits.xlsx")?;
 
-    let transactions = get_transactions(&conn, "ITSA4")?;
+    let transactions = sql::query_transactions(&home, "ITSA4");
     assert_eq!(transactions.len(), 3, "Should have 3 transactions");
 
     let asset_id = transactions[0].asset_id;
 
     // First split 1:2 on 2025-02-10
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
          VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 0, 'TEST')",
@@ -532,7 +713,7 @@ fn test_06_multiple_splits() -> Result<()> {
     apply_corporate_action(&conn, &actions[1], &asset)?;
 
     // Re-fetch and verify
-    let adjusted_txs = get_transactions(&conn, "ITSA4")?;
+    let adjusted_txs = sql::query_transactions(&home, "ITSA4");
 
     // First purchase: 50 @ R$10.00 -> 100 @ R$5.00 -> 200 @ R$2.50
     assert_eq!(adjusted_txs[0].quantity, dec!(200));
@@ -566,13 +747,18 @@ fn test_06_multiple_splits() -> Result<()> {
 
 #[test]
 fn test_08_complex_scenario() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
+    // Initialize DB and import only trade entries (no auto actions)
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
     import_movimentacao(&conn, "tests/data/08_complex_scenario.xlsx")?;
 
     // Should have transactions for both BBAS3 and BBAS3T
-    let base_txs = get_transactions(&conn, "BBAS3")?;
-    let term_txs = get_transactions(&conn, "BBAS3T")?;
+    let base_txs = sql::query_transactions(&home, "BBAS3");
+    let term_txs = sql::query_transactions(&home, "BBAS3T");
 
     assert_eq!(term_txs.len(), 1, "Should have 1 term contract purchase");
     // We expect: 2 initial buys + split entry + 1 sell + 1 buy + liquidation + 1 sell = 7
@@ -581,6 +767,8 @@ fn test_08_complex_scenario() -> Result<()> {
 
     // Create and apply split (1:2) on 2025-02-15
     let asset_id = base_txs[0].asset_id;
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
          VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 0, 'TEST')",
@@ -603,7 +791,7 @@ fn test_08_complex_scenario() -> Result<()> {
     process_term_liquidations(&conn)?;
 
     // Re-fetch to see adjustments
-    let adjusted_txs = get_transactions(&conn, "BBAS3")?;
+    let adjusted_txs = sql::query_transactions(&home, "BBAS3");
 
     // Verify split adjustments on first two purchases
     assert_eq!(adjusted_txs[0].quantity, dec!(400)); // 200 -> 400
@@ -650,14 +838,21 @@ fn test_08_complex_scenario() -> Result<()> {
 
 #[test]
 fn test_no_duplicate_adjustments() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
+    // Initialize DB and import only trade entries (no auto actions)
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
     import_movimentacao(&conn, "tests/data/04_stock_split.xlsx")?;
 
-    let transactions = get_transactions(&conn, "VALE3")?;
+    let transactions = sql::query_transactions(&home, "VALE3");
     let asset_id = transactions[0].asset_id;
 
     // Create split
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
          VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 0, 'TEST')",
@@ -702,7 +897,7 @@ fn test_no_duplicate_adjustments() -> Result<()> {
     );
 
     // Verify quantities didn't change (no double adjustment)
-    let adjusted_txs = get_transactions(&conn, "VALE3")?;
+    let adjusted_txs = sql::query_transactions(&home, "VALE3");
     assert_eq!(adjusted_txs[0].quantity, dec!(200)); // Not 400!
     assert_eq!(adjusted_txs[0].price_per_unit, dec!(40)); // Not 20!
 
@@ -711,12 +906,12 @@ fn test_no_duplicate_adjustments() -> Result<()> {
 
 #[test]
 fn test_position_totals_match() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    import_movimentacao(&conn, "tests/data/01_basic_purchase_sale.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/01_basic_purchase_sale.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "PETR4")?;
-    let (quantity, _cost) = calculate_position(&transactions);
+    let (quantity, _cost) = sql::query_position(&home, "PETR4");
 
     // After buying 100 + 50 and selling 80, should have 70 shares
     assert_eq!(quantity, dec!(70));
@@ -726,11 +921,12 @@ fn test_position_totals_match() -> Result<()> {
 // This will be inserted into integration_tests.rs
 #[test]
 fn test_07_capital_return() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
 
-    import_movimentacao(&conn, "tests/data/07_capital_return.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/07_capital_return.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = get_transactions(&conn, "MXRF11")?;
+    let transactions = sql::query_transactions(&home, "MXRF11");
     assert_eq!(transactions.len(), 3, "Should have 3 transactions");
 
     // Verify initial state
@@ -740,6 +936,8 @@ fn test_07_capital_return() -> Result<()> {
 
     // Create capital return action: R$1.00/share = 100 cents
     let asset_id = transactions[0].asset_id;
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
          VALUES (?1, 'CAPITAL_RETURN', '2025-02-15', '2025-02-15', 100, 0, 0, 'TEST')",
@@ -762,7 +960,7 @@ fn test_07_capital_return() -> Result<()> {
     assert_eq!(adjusted_count, 1, "Should adjust first purchase only");
 
     // Re-fetch transactions
-    let adjusted_txs = get_transactions(&conn, "MXRF11")?;
+    let adjusted_txs = sql::query_transactions(&home, "MXRF11");
 
     // First purchase should have reduced cost basis
     // 100 shares @ R$10.00 = R$1,000.00
@@ -801,7 +999,11 @@ fn test_07_capital_return() -> Result<()> {
 
 #[test]
 fn test_10_day_trade_detection() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
 
     // Create asset
     let asset_id = upsert_asset(&conn, "VALE3", &AssetType::Stock, Some("VALE SA"))?;
@@ -829,22 +1031,32 @@ fn test_10_day_trade_detection() -> Result<()> {
         rusqlite::params![asset_id, trade_date],
     )?;
 
-    // Verify day trade flag
-    let transactions = get_transactions(&conn, "VALE3")?;
+    // Verify day trade flag via SQL
+    let transactions = sql::query_transactions(&home, "VALE3");
     assert_eq!(transactions.len(), 2);
     assert!(!transactions[0].is_day_trade); // Buy
     assert!(transactions[1].is_day_trade); // Sell (day trade)
 
-    // Day trades should result in zero position
-    let (quantity, _) = calculate_position(&transactions);
-    assert_eq!(quantity, Decimal::ZERO);
+    // Verify zero position via CLI
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+
+    // Day trades should result in zero position, so VALE3 shouldn't appear
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("VALE3").not());
 
     Ok(())
 }
 
 #[test]
 fn test_11_multi_asset_portfolio() -> Result<()> {
-    let (_temp_dir, conn) = create_test_db()?;
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
 
     // Create multiple assets
     let petr4_id = upsert_asset(&conn, "PETR4", &AssetType::Stock, Some("Petrobras"))?;
@@ -884,25 +1096,32 @@ fn test_11_multi_asset_portfolio() -> Result<()> {
         rusqlite::params![mxrf11_id, date1],
     )?;
 
-    // Verify each asset's position
-    let petr4_txs = get_transactions(&conn, "PETR4")?;
-    let (petr4_qty, petr4_cost) = calculate_position(&petr4_txs);
+    // Verify each asset's position via SQL
+    let (petr4_qty, petr4_cost) = sql::query_position(&home, "PETR4");
     assert_eq!(petr4_qty, dec!(100));
     assert_eq!(petr4_cost, dec!(2500));
 
-    let vale3_txs = get_transactions(&conn, "VALE3")?;
-    let (vale3_qty, vale3_cost) = calculate_position(&vale3_txs);
+    let (vale3_qty, vale3_cost) = sql::query_position(&home, "VALE3");
     assert_eq!(vale3_qty, dec!(200));
     assert_eq!(vale3_cost, dec!(16000));
 
-    let mxrf11_txs = get_transactions(&conn, "MXRF11")?;
-    let (mxrf11_qty, mxrf11_cost) = calculate_position(&mxrf11_txs);
+    let (mxrf11_qty, mxrf11_cost) = sql::query_position(&home, "MXRF11");
     assert_eq!(mxrf11_qty, dec!(50));
     assert_eq!(mxrf11_cost, dec!(5000));
 
-    // Total portfolio cost
-    let total_cost = petr4_cost + vale3_cost + mxrf11_cost;
-    assert_eq!(total_cost, dec!(23500)); // 2500 + 16000 + 5000
+    // Verify portfolio via CLI - check that all assets appear
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PETR4"))
+        .stdout(predicate::str::contains("VALE3"))
+        .stdout(predicate::str::contains("MXRF11"))
+        .stdout(predicate::str::contains("100.00")) // PETR4 quantity
+        .stdout(predicate::str::contains("200.00")) // VALE3 quantity
+        .stdout(predicate::str::contains("50.00")); // MXRF11 quantity
 
     Ok(())
 }

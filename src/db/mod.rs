@@ -416,6 +416,101 @@ pub fn corporate_action_exists(
     Ok(count > 0)
 }
 
+/// List corporate actions with optional ticker filter
+pub fn list_corporate_actions(
+    conn: &Connection,
+    ticker: Option<&str>,
+) -> Result<Vec<(CorporateAction, Asset)>> {
+    let query = if ticker.is_some() {
+        "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
+                ca.ratio_from, ca.ratio_to, ca.applied, ca.source, ca.notes, ca.created_at,
+                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+         FROM corporate_actions ca
+         JOIN assets a ON ca.asset_id = a.id
+         WHERE a.ticker = ?1
+         ORDER BY ca.ex_date DESC"
+    } else {
+        "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
+                ca.ratio_from, ca.ratio_to, ca.applied, ca.source, ca.notes, ca.created_at,
+                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+         FROM corporate_actions ca
+         JOIN assets a ON ca.asset_id = a.id
+         ORDER BY ca.ex_date DESC"
+    };
+
+    let mut stmt = conn.prepare(query)?;
+
+    let results = if let Some(t) = ticker {
+        stmt.query_map([t], |row| {
+            Ok((
+                CorporateAction {
+                    id: Some(row.get(0)?),
+                    asset_id: row.get(1)?,
+                    action_type: row
+                        .get::<_, String>(2)?
+                        .parse::<CorporateActionType>()
+                        .unwrap_or(CorporateActionType::Split),
+                    event_date: row.get(3)?,
+                    ex_date: row.get(4)?,
+                    ratio_from: row.get(5)?,
+                    ratio_to: row.get(6)?,
+                    applied: row.get(7)?,
+                    source: row.get(8)?,
+                    notes: row.get(9)?,
+                    created_at: row.get(10)?,
+                },
+                Asset {
+                    id: Some(row.get(11)?),
+                    ticker: row.get(12)?,
+                    asset_type: row
+                        .get::<_, String>(13)?
+                        .parse::<AssetType>()
+                        .unwrap_or(AssetType::Stock),
+                    name: row.get(14)?,
+                    created_at: row.get(15)?,
+                    updated_at: row.get(16)?,
+                },
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], |row| {
+            Ok((
+                CorporateAction {
+                    id: Some(row.get(0)?),
+                    asset_id: row.get(1)?,
+                    action_type: row
+                        .get::<_, String>(2)?
+                        .parse::<CorporateActionType>()
+                        .unwrap_or(CorporateActionType::Split),
+                    event_date: row.get(3)?,
+                    ex_date: row.get(4)?,
+                    ratio_from: row.get(5)?,
+                    ratio_to: row.get(6)?,
+                    applied: row.get(7)?,
+                    source: row.get(8)?,
+                    notes: row.get(9)?,
+                    created_at: row.get(10)?,
+                },
+                Asset {
+                    id: Some(row.get(11)?),
+                    ticker: row.get(12)?,
+                    asset_type: row
+                        .get::<_, String>(13)?
+                        .parse::<AssetType>()
+                        .unwrap_or(AssetType::Stock),
+                    name: row.get(14)?,
+                    created_at: row.get(15)?,
+                    updated_at: row.get(16)?,
+                },
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    Ok(results)
+}
+
 /// Insert income event
 pub fn insert_income_event(conn: &Connection, event: &IncomeEvent) -> Result<i64> {
     conn.execute(

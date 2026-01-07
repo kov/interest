@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
+use serde::Serialize;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
@@ -8,7 +9,7 @@ use crate::corporate_actions;
 use crate::db;
 use crate::importers::MovimentacaoEntry;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct ImportStats {
     pub imported_trades: usize,
     pub skipped_trades: usize,
