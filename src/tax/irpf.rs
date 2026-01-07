@@ -4,7 +4,8 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use super::loss_carryforward::{
-    compute_year_fingerprint, earliest_transaction_year, load_snapshots, upsert_snapshot,
+    clear_year_losses, compute_year_fingerprint, earliest_transaction_year, load_snapshots,
+    record_loss, upsert_snapshot,
 };
 use super::swing_trade::{calculate_monthly_tax, TaxCategory};
 use tracing::debug;
@@ -18,6 +19,7 @@ pub struct MonthlyIrpfSummary {
     pub total_sales: Decimal,
     pub total_profit: Decimal,
     pub total_loss: Decimal,
+    pub total_loss_offset_applied: Decimal,
     pub tax_due: Decimal,
     #[allow(dead_code)]
     pub by_category: HashMap<TaxCategory, CategoryMonthSummary>,
@@ -29,6 +31,8 @@ pub struct MonthlyIrpfSummary {
 pub struct CategoryMonthSummary {
     pub sales: Decimal,
     pub profit_loss: Decimal,
+    pub loss_offset_applied: Decimal,
+    pub exemption_applied: Decimal,
     pub tax_due: Decimal,
 }
 
@@ -83,6 +87,7 @@ fn compute_annual_report_with_carry(
     conn: &Connection,
     year: i32,
     starting_carry: HashMap<TaxCategory, Decimal>,
+    record_losses: bool,
 ) -> Result<(AnnualTaxReport, HashMap<TaxCategory, Decimal>)> {
     let mut monthly_summaries = Vec::new();
     let mut annual_total_sales = Decimal::ZERO;
@@ -103,12 +108,14 @@ fn compute_annual_report_with_carry(
         let mut month_sales = Decimal::ZERO;
         let mut month_profit = Decimal::ZERO;
         let mut month_loss = Decimal::ZERO;
+        let mut month_loss_offset = Decimal::ZERO;
         let mut month_tax = Decimal::ZERO;
         let mut by_category: HashMap<TaxCategory, CategoryMonthSummary> = HashMap::new();
 
         for calc in month_calculations {
             month_sales += calc.total_sales;
             month_tax += calc.tax_due;
+            month_loss_offset += calc.loss_offset_applied;
 
             let net_pl = calc.net_profit;
             if net_pl > Decimal::ZERO {
@@ -117,11 +124,18 @@ fn compute_annual_report_with_carry(
                 month_loss += net_pl.abs();
             }
 
+            // Record loss to ledger only during recomputation, not on cache hits
+            if record_losses && calc.total_loss > Decimal::ZERO {
+                record_loss(conn, year, month, &calc.category, calc.total_loss)?;
+            }
+
             by_category.insert(
                 calc.category.clone(),
                 CategoryMonthSummary {
                     sales: calc.total_sales,
                     profit_loss: calc.net_profit,
+                    loss_offset_applied: calc.loss_offset_applied,
+                    exemption_applied: calc.exemption_applied,
                     tax_due: calc.tax_due,
                 },
             );
@@ -138,6 +152,7 @@ fn compute_annual_report_with_carry(
             total_sales: month_sales,
             total_profit: month_profit,
             total_loss: month_loss,
+            total_loss_offset_applied: month_loss_offset,
             tax_due: month_tax,
             by_category,
         });
@@ -260,7 +275,7 @@ where
             "Using cached carry for target year; skipping recomputation"
         );
         progress(ReportProgress::TargetCacheHit { year });
-        let (report, _) = compute_annual_report_with_carry(conn, year, carry_before_target)?;
+        let (report, _) = compute_annual_report_with_carry(conn, year, carry_before_target, false)?;
         return Ok(report);
     }
 
@@ -272,10 +287,17 @@ where
     progress(ReportProgress::RecomputeStart {
         from_year: recompute_start,
     });
+
+    // Clear loss ledger for all years being recomputed to avoid stale data
+    for y in recompute_start..=year {
+        clear_year_losses(conn, y)?;
+    }
+
     let mut last_report = None;
     for y in recompute_start..=year {
         let fingerprint = compute_year_fingerprint(conn, y)?;
-        let (report, ending_carry) = compute_annual_report_with_carry(conn, y, carry.clone())?;
+        let (report, ending_carry) =
+            compute_annual_report_with_carry(conn, y, carry.clone(), true)?;
         upsert_snapshot(conn, y, &fingerprint, &ending_carry)?;
         debug!(
             target_year = year,
@@ -293,7 +315,7 @@ where
     if recompute_start > year {
         // The carry at this point is the ending carry of the last snapshot at or before target
         // We still need to compute the target year report using that carry as starting point
-        let (report, _) = compute_annual_report_with_carry(conn, year, carry)?;
+        let (report, _) = compute_annual_report_with_carry(conn, year, carry, false)?;
         return Ok(report);
     }
 
@@ -324,26 +346,33 @@ pub fn export_to_csv(report: &AnnualTaxReport) -> String {
     let mut csv = String::new();
 
     // Header
-    csv.push_str("Mês,Vendas Totais,Lucro,Prejuízo,Imposto Devido\n");
+    csv.push_str("Mês,Vendas Totais,Lucro,Prejuízo,Prejuízo Compensado,Imposto Devido\n");
 
     // Monthly rows
     for summary in &report.monthly_summaries {
         csv.push_str(&format!(
-            "{},{:.2},{:.2},{:.2},{:.2}\n",
+            "{},{:.2},{:.2},{:.2},{:.2},{:.2}\n",
             summary.month_name,
             summary.total_sales,
             summary.total_profit,
             summary.total_loss,
+            summary.total_loss_offset_applied,
             summary.tax_due
         ));
     }
 
     // Total row
+    let total_loss_offset: Decimal = report
+        .monthly_summaries
+        .iter()
+        .map(|s| s.total_loss_offset_applied)
+        .sum();
     csv.push_str(&format!(
-        "\nTOTAL ANUAL,{:.2},{:.2},{:.2},{:.2}\n",
+        "\nTOTAL ANUAL,{:.2},{:.2},{:.2},{:.2},{:.2}\n",
         report.annual_total_sales,
         report.annual_total_profit,
         report.annual_total_loss,
+        total_loss_offset,
         report.annual_total_tax
     ));
 

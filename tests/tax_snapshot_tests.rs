@@ -1,9 +1,12 @@
 use anyhow::Result;
 use chrono::NaiveDate;
 use interest::db::{init_database, open_db, upsert_asset, AssetType, TransactionType};
-use interest::tax::{generate_annual_report_with_progress, ReportProgress};
+use interest::tax::swing_trade::TaxCategory;
+use interest::tax::{calculate_monthly_tax, generate_annual_report_with_progress, ReportProgress};
+use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::collections::HashMap;
 use tempfile::NamedTempFile;
 
 // Helpers
@@ -279,6 +282,219 @@ fn test_year_fingerprint_stable_across_order() -> Result<()> {
     assert!(ev_b2
         .iter()
         .any(|e| matches!(e, ReportProgress::TargetCacheHit { year } if *year == 2025)));
+
+    Ok(())
+}
+
+#[test]
+fn test_carry_not_consumed_on_exempt_stock_profit() -> Result<()> {
+    let temp_db = create_test_db()?;
+    let db_path = temp_db.path();
+
+    let stock_id = insert_asset(db_path, "BBAS3", AssetType::Stock)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(),
+        dec!(100),
+        dec!(10),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+        dec!(100),
+        dec!(11),
+        false,
+    )?;
+
+    let conn = open_db(Some(db_path.to_path_buf()))?;
+    let mut carry: HashMap<TaxCategory, Decimal> = HashMap::new();
+    carry.insert(TaxCategory::StockSwingTrade, dec!(500));
+
+    let results = calculate_monthly_tax(&conn, 2025, 1, &mut carry)?;
+    let calc = results
+        .iter()
+        .find(|c| matches!(c.category, TaxCategory::StockSwingTrade))
+        .expect("swing trade result present");
+
+    assert_eq!(calc.loss_offset_applied, dec!(0));
+    assert_eq!(calc.exemption_applied, dec!(100));
+    assert!(calc.tax_due.is_zero());
+    assert_eq!(
+        *carry.get(&TaxCategory::StockSwingTrade).unwrap(),
+        dec!(500)
+    );
+
+    Ok(())
+}
+#[test]
+fn test_loss_ledger_persisted_during_recomputation() -> Result<()> {
+    let temp_db = create_test_db()?;
+    let db_path = temp_db.path();
+
+    let stock_id = insert_asset(db_path, "STOCK1", AssetType::Stock)?;
+    // Small loss in Jan, then a larger profit in Mar to be offset
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(),
+        dec!(100),
+        dec!(10),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+        dec!(100),
+        dec!(8),
+        false,
+    )?;
+
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 3, 1).unwrap(),
+        dec!(100),
+        dec!(10),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 3, 15).unwrap(),
+        dec!(100),
+        dec!(12),
+        false,
+    )?;
+
+    let conn = open_db(Some(db_path.to_path_buf()))?;
+
+    // First run: generate report which should persist loss ledger
+    let report1 = generate_annual_report_with_progress(&conn, 2025, |_| {})?;
+
+    // Check that loss_carryforward entries were recorded
+    let loss_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM loss_carryforward WHERE year = 2025",
+        [],
+        |row| row.get(0),
+    )?;
+    eprintln!("First run loss count: {}", loss_count);
+    assert!(
+        loss_count >= 1,
+        "loss ledger should have entries after first run"
+    );
+
+    // Verify Jan loss was recorded
+    let jan_loss_sum: Option<Option<Decimal>> = conn
+        .query_row(
+            "SELECT SUM(CAST(loss_amount AS REAL)) FROM loss_carryforward WHERE year = 2025 AND month = 1",
+            [],
+            |row| {
+                let val: Option<f64> = row.get(0)?;
+                Ok(val.map(|f| Decimal::try_from(f).unwrap_or(Decimal::ZERO)))
+            },
+        )
+        .optional()?;
+    assert!(
+        jan_loss_sum.is_some() && jan_loss_sum.unwrap().is_some(),
+        "January loss should be recorded in ledger"
+    );
+
+    // Second run: should use cache (no recomputation) so losses NOT re-written
+    let report2 = generate_annual_report_with_progress(&conn, 2025, |_| {})?;
+
+    // Reports should match (no recomputation)
+    assert_eq!(
+        report1.annual_total_profit, report2.annual_total_profit,
+        "cached report should match first report"
+    );
+
+    // On cache hit, loss ledger is NOT touched (cached path skips compute_annual_report_with_carry)
+    // So the count stays the same: losses written once on first run, not modified on second
+    let loss_count_after_cache: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM loss_carryforward WHERE year = 2025",
+        [],
+        |row| row.get(0),
+    )?;
+    eprintln!("Second run loss count: {}", loss_count_after_cache);
+    assert_eq!(
+        loss_count, loss_count_after_cache,
+        "loss ledger should not be modified on cache hit"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_loss_ledger_cleared_on_invalidation() -> Result<()> {
+    let temp_db = create_test_db()?;
+    let db_path = temp_db.path();
+
+    let stock_id = insert_asset(db_path, "STOCK2", AssetType::Stock)?;
+    // Initial trades in 2025
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(),
+        dec!(100),
+        dec!(10),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+        dec!(100),
+        dec!(9),
+        false,
+    )?;
+
+    let conn = open_db(Some(db_path.to_path_buf()))?;
+
+    // First run
+    let _ = generate_annual_report_with_progress(&conn, 2025, |_| {})?;
+
+    let _loss_count_before: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM loss_carryforward WHERE year = 2025",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Add a new trade to invalidate cache
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+        dec!(50),
+        dec!(10),
+        false,
+    )?;
+
+    // Second run: should recompute and rebuild ledger
+    let _ = generate_annual_report_with_progress(&conn, 2025, |_| {})?;
+
+    // Loss entries should be present (rebuilt)
+    let loss_count_after: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM loss_carryforward WHERE year = 2025",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(
+        loss_count_after >= 1,
+        "loss ledger should be rebuilt after invalidation"
+    );
 
     Ok(())
 }

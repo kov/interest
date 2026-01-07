@@ -293,29 +293,7 @@ pub fn calculate_monthly_tax(
         // Calculate net profit/loss
         let net_profit = total_profit - total_loss;
 
-        // Apply loss carryforward from in-memory map
-        let starting_carry = carryforward
-            .get(&category)
-            .cloned()
-            .unwrap_or(Decimal::ZERO);
-        let loss_offset_applied = if net_profit > Decimal::ZERO {
-            net_profit.min(starting_carry)
-        } else {
-            Decimal::ZERO
-        };
-        let profit_after_loss_offset = net_profit - loss_offset_applied;
-
-        let mut new_carry = starting_carry - loss_offset_applied;
-        if profit_after_loss_offset < Decimal::ZERO {
-            new_carry += profit_after_loss_offset.abs();
-        }
-        if new_carry.is_zero() {
-            carryforward.remove(&category);
-        } else {
-            carryforward.insert(category.clone(), new_carry);
-        }
-
-        // Apply exemption threshold (only to positive profit)
+        // Determine exemptable portion (only stock swing trades under R$20k sales)
         let exemption_threshold = category.monthly_exemption_threshold();
         let stock_sales_total: Decimal = sales
             .iter()
@@ -327,21 +305,44 @@ pub fn calculate_monthly_tax(
             .filter(|sale| sale.asset_type == AssetType::Stock)
             .map(|sale| sale.profit_loss)
             .sum();
-
-        let (exemption_applied, taxable_amount) = if profit_after_loss_offset <= Decimal::ZERO {
-            // Loss or break-even - no tax
-            (Decimal::ZERO, Decimal::ZERO)
-        } else if exemption_threshold > Decimal::ZERO && stock_sales_total <= exemption_threshold {
-            // Exempt only the stock profit portion when stock sales are under R$20k.
-            let exemption = if stock_profit_total > Decimal::ZERO {
-                stock_profit_total.min(profit_after_loss_offset)
-            } else {
-                Decimal::ZERO
-            };
-            (exemption, profit_after_loss_offset - exemption)
+        let exemptable_profit = if category == TaxCategory::StockSwingTrade
+            && net_profit > Decimal::ZERO
+            && stock_sales_total <= exemption_threshold
+            && stock_profit_total > Decimal::ZERO
+        {
+            stock_profit_total.min(net_profit)
         } else {
-            // No exemption, full tax
-            (Decimal::ZERO, profit_after_loss_offset)
+            Decimal::ZERO
+        };
+        let profit_after_exemption = net_profit - exemptable_profit;
+
+        // Apply loss carryforward only to the taxable portion (after exemption)
+        let starting_carry = carryforward
+            .get(&category)
+            .cloned()
+            .unwrap_or(Decimal::ZERO);
+        let loss_offset_applied = if profit_after_exemption > Decimal::ZERO {
+            profit_after_exemption.min(starting_carry)
+        } else {
+            Decimal::ZERO
+        };
+        let profit_after_loss_offset = profit_after_exemption - loss_offset_applied;
+
+        let mut new_carry = starting_carry - loss_offset_applied;
+        if profit_after_loss_offset < Decimal::ZERO {
+            new_carry += profit_after_loss_offset.abs();
+        }
+        if new_carry.is_zero() {
+            carryforward.remove(&category);
+        } else {
+            carryforward.insert(category.clone(), new_carry);
+        }
+
+        // Taxable amount excludes exempt stock profit; carry is untouched by exempt gains
+        let (exemption_applied, taxable_amount) = if profit_after_loss_offset <= Decimal::ZERO {
+            (exemptable_profit, Decimal::ZERO)
+        } else {
+            (exemptable_profit, profit_after_loss_offset)
         };
 
         // Calculate tax

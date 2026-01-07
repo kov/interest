@@ -289,6 +289,14 @@ pub fn earliest_transaction_year(conn: &Connection) -> Result<Option<i32>> {
     Ok(year)
 }
 
+/// Clear all loss_carryforward entries for a given year.
+/// Called before recomputing a year to avoid stale ledger entries.
+/// Snapshots prevent recomputation unless transactions changed, so this is safe.
+pub fn clear_year_losses(conn: &Connection, year: i32) -> Result<()> {
+    conn.execute("DELETE FROM loss_carryforward WHERE year = ?1", [year])?;
+    Ok(())
+}
+
 /// Helper to read Decimal from SQLite
 fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
     // Try to get as String first (for TEXT storage)

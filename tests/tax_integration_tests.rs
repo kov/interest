@@ -571,6 +571,26 @@ fn test_loss_carryforward_single_category() -> Result<()> {
         false,
     )?;
 
+    // Month 3: Large profit over R$20k (taxable, carry IS consumed)
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 3, 5).unwrap(),
+        dec!(600),
+        dec!(30.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 3, 20).unwrap(),
+        dec!(600),
+        dec!(36.00),
+        false,
+    )?; // Sales: 21600 (over R$20k), Profit: 3600
+
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
     // Month 1 - should record loss
@@ -582,16 +602,29 @@ fn test_loss_carryforward_single_category() -> Result<()> {
     assert_eq!(m1.loss_offset_applied, dec!(0)); // No previous losses to apply
     assert_eq!(m1.tax_due, dec!(0)); // No tax on loss
 
-    // Month 2 - should apply previous loss
+    // Month 2 - should NOT apply loss because profit is exempt (under R$20k)
     let calc_month2 = calculate_monthly_tax(&conn, 2025, 2, &mut carry)?;
     assert_eq!(calc_month2.len(), 1);
     let m2 = &calc_month2[0];
     assert_eq!(m2.net_profit, dec!(1500.00)); // Raw profit
-    assert_eq!(m2.loss_offset_applied, dec!(1000.00)); // Previous loss applied
-    assert_eq!(m2.profit_after_loss_offset, dec!(500.00)); // 1500 - 1000
-                                                           // Under R$20k, so exempt
-    assert_eq!(m2.exemption_applied, dec!(500.00));
+    assert_eq!(m2.loss_offset_applied, dec!(0)); // NO loss applied - profit is exempt
+    assert_eq!(m2.exemption_applied, dec!(1500.00)); // Entire profit exempt (under R$20k)
+    assert_eq!(m2.taxable_amount, dec!(0)); // Nothing taxable after exemption
     assert_eq!(m2.tax_due, dec!(0));
+    // Carry should still be 1000 (not consumed on exempt profit)
+    assert_eq!(carry.get(&TaxCategory::StockSwingTrade), Some(&dec!(1000)));
+
+    // Month 3 - NOW sales volume exceeds R$20k, carry should be applied
+    let calc_month3 = calculate_monthly_tax(&conn, 2025, 3, &mut carry)?;
+    assert_eq!(calc_month3.len(), 1);
+    let m3 = &calc_month3[0];
+    assert_eq!(m3.net_profit, dec!(3600.00)); // 600 shares * (36 - 30) = R$3600
+    assert_eq!(m3.loss_offset_applied, dec!(1000.00)); // Carry IS applied (sales >R$20k)
+    assert_eq!(m3.taxable_amount, dec!(2600.00)); // 3600 - 1000
+    assert_eq!(m3.exemption_applied, dec!(0)); // No exemption (sales >R$20k)
+    assert_eq!(m3.tax_due, dec!(390.00)); // 15% of 2600
+                                          // Carry should be consumed
+    assert_eq!(carry.get(&TaxCategory::StockSwingTrade), None); // All consumed
 
     Ok(())
 }
@@ -664,6 +697,26 @@ fn test_loss_carryforward_partial_offset() -> Result<()> {
         false,
     )?;
 
+    // Month 4: Large profit over R$20k (taxable, carry IS consumed partially)
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 4, 5).unwrap(),
+        dec!(400),
+        dec!(50.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 4, 20).unwrap(),
+        dec!(400),
+        dec!(57.00),
+        false,
+    )?; // Sales: 22800 (over R$20k), Profit: 2800
+
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
     // Month 1: Record R$5,000 loss
@@ -671,23 +724,36 @@ fn test_loss_carryforward_partial_offset() -> Result<()> {
     let calc_month1 = calculate_monthly_tax(&conn, 2025, 1, &mut carry)?;
     assert_eq!(calc_month1[0].net_profit, dec!(-5000.00));
 
-    // Month 2: Apply R$2,000 of the R$5,000 loss
+    // Month 2: Profit, but NOT offset (profit is exempt under R$20k)
     let calc_month2 = calculate_monthly_tax(&conn, 2025, 2, &mut carry)?;
     let m2 = &calc_month2[0];
     assert_eq!(m2.net_profit, dec!(2000.00));
-    assert_eq!(m2.loss_offset_applied, dec!(2000.00)); // Partial offset
-    assert_eq!(m2.profit_after_loss_offset, dec!(0)); // Fully offset
+    assert_eq!(m2.loss_offset_applied, dec!(0)); // NO offset - profit is exempt
+    assert_eq!(m2.taxable_amount, dec!(0)); // Nothing taxable after exemption
+    assert_eq!(m2.exemption_applied, dec!(2000.00)); // Entire profit exempt
     assert_eq!(m2.tax_due, dec!(0));
 
-    // Month 3: Apply remaining R$3,000 of loss, leaving R$1,000 profit
+    // Month 3: Profit, also exempt
     let calc_month3 = calculate_monthly_tax(&conn, 2025, 3, &mut carry)?;
     let m3 = &calc_month3[0];
     assert_eq!(m3.net_profit, dec!(4000.00));
-    assert_eq!(m3.loss_offset_applied, dec!(3000.00)); // Remaining loss applied
-    assert_eq!(m3.profit_after_loss_offset, dec!(1000.00)); // 4000 - 3000
-                                                            // Under R$20k, so exempt
-    assert_eq!(m3.exemption_applied, dec!(1000.00));
+    assert_eq!(m3.loss_offset_applied, dec!(0)); // NO offset - profit is exempt
+    assert_eq!(m3.taxable_amount, dec!(0)); // Nothing taxable after exemption
+    assert_eq!(m3.exemption_applied, dec!(4000.00)); // Entire profit exempt
     assert_eq!(m3.tax_due, dec!(0));
+    // Carry should still contain R$5,000 loss
+    assert_eq!(carry.get(&TaxCategory::StockSwingTrade), Some(&dec!(5000)));
+
+    // Month 4: Large profit - now carry IS consumed
+    let calc_month4 = calculate_monthly_tax(&conn, 2025, 4, &mut carry)?;
+    let m4 = &calc_month4[0];
+    assert_eq!(m4.net_profit, dec!(2800.00));
+    assert_eq!(m4.loss_offset_applied, dec!(2800.00)); // Carry applied (partial)
+    assert_eq!(m4.taxable_amount, dec!(0)); // Fully offset
+    assert_eq!(m4.exemption_applied, dec!(0)); // No exemption (large sale)
+    assert_eq!(m4.tax_due, dec!(0)); // No tax on zeroed profit
+                                     // Remaining carry: 5000 - 2800 = 2200
+    assert_eq!(carry.get(&TaxCategory::StockSwingTrade), Some(&dec!(2200)));
 
     Ok(())
 }
@@ -740,7 +806,7 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
         true,
     )?;
 
-    // Month 3: Swing trade profit of R$1,500 (should offset previous swing loss)
+    // Month 3: Swing trade profit of R$1,500 (exempt, under R$20k sales)
     insert_transaction(
         db_path,
         stock_id,
@@ -759,6 +825,26 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
         dec!(40.00),
         false,
     )?;
+
+    // Month 4: Large swing trade profit (over R$20k sales, carry gets applied)
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 4, 5).unwrap(),
+        dec!(500),
+        dec!(35.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 4, 20).unwrap(),
+        dec!(500),
+        dec!(45.00),
+        false,
+    )?; // Sales: 22500 (over R$20k), Profit: 5000
 
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
@@ -779,18 +865,33 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
     assert_eq!(day_trade.profit_after_loss_offset, dec!(500.00));
     assert_eq!(day_trade.tax_due, dec!(100.00)); // 20% of 500
 
-    // Month 3: Swing trade profit - should offset previous swing loss
+    // Month 3: Swing trade profit - still exempt (under R$20k sales)
     let calc_month3 = calculate_monthly_tax(&conn, 2025, 3, &mut carry)?;
     let swing_trade = calc_month3
         .iter()
         .find(|c| c.category == TaxCategory::StockSwingTrade)
         .expect("Swing trade not found");
     assert_eq!(swing_trade.net_profit, dec!(1500.00));
-    assert_eq!(swing_trade.loss_offset_applied, dec!(1000.00)); // Previous swing loss applied
-    assert_eq!(swing_trade.profit_after_loss_offset, dec!(500.00));
-    // Under R$20k, so exempt
-    assert_eq!(swing_trade.exemption_applied, dec!(500.00));
+    assert_eq!(swing_trade.loss_offset_applied, dec!(0)); // No offset - profit is exempt
+    assert_eq!(swing_trade.taxable_amount, dec!(0)); // Exempt
+    assert_eq!(swing_trade.exemption_applied, dec!(1500.00)); // Entire profit exempt
     assert_eq!(swing_trade.tax_due, dec!(0));
+    // Carry should still be 1000 (not consumed on exempt profit)
+    assert_eq!(carry.get(&TaxCategory::StockSwingTrade), Some(&dec!(1000)));
+
+    // Month 4: Large swing trade profit - now carry IS applied (over R$20k sales)
+    let calc_month4 = calculate_monthly_tax(&conn, 2025, 4, &mut carry)?;
+    let swing_trade_m4 = calc_month4
+        .iter()
+        .find(|c| c.category == TaxCategory::StockSwingTrade)
+        .expect("Swing trade not found in month 4");
+    assert_eq!(swing_trade_m4.net_profit, dec!(5000.00));
+    assert_eq!(swing_trade_m4.loss_offset_applied, dec!(1000.00)); // Previous swing loss applied
+    assert_eq!(swing_trade_m4.taxable_amount, dec!(4000.00)); // 5000 - 1000
+    assert_eq!(swing_trade_m4.exemption_applied, dec!(0)); // No exemption (large sale)
+    assert_eq!(swing_trade_m4.tax_due, dec!(600.00)); // 15% of 4000
+                                                      // Carry should be consumed
+    assert_eq!(carry.get(&TaxCategory::StockSwingTrade), None); // All consumed
 
     Ok(())
 }
