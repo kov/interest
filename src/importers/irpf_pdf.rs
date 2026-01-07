@@ -18,10 +18,10 @@ use crate::db::models::{Transaction, TransactionType};
 #[derive(Debug, Clone)]
 pub struct IrpfPosition {
     pub ticker: String,
-    pub year: i32,              // IRPF year (e.g., 2018)
-    pub quantity: Decimal,      // Shares held at year-end
-    pub total_cost: Decimal,    // Cost basis from IRPF
-    pub average_cost: Decimal,  // Calculated: total_cost / quantity
+    pub year: i32,             // IRPF year (e.g., 2018)
+    pub quantity: Decimal,     // Shares held at year-end
+    pub total_cost: Decimal,   // Cost basis from IRPF
+    pub average_cost: Decimal, // Calculated: total_cost / quantity
     #[allow(dead_code)]
     pub cnpj: Option<String>,
 }
@@ -57,12 +57,12 @@ pub fn parse_irpf_pdf<P: AsRef<Path>>(path: P, year: i32) -> Result<Vec<IrpfPosi
     info!("Parsing IRPF PDF: {:?} for year {}", path, year);
 
     // Extract text from PDF
-    let text = extract_text(path)
-        .context("Failed to extract text from PDF")?;
+    let text = extract_text(path).context("Failed to extract text from PDF")?;
 
     // Find the "DECLARAÇÃO DE BENS E DIREITOS" section
-    if !text.contains("DECLARAÇÃO DE BENS E DIREITOS") &&
-       !text.contains("DECLARACAO DE BENS E DIREITOS") {
+    if !text.contains("DECLARAÇÃO DE BENS E DIREITOS")
+        && !text.contains("DECLARACAO DE BENS E DIREITOS")
+    {
         return Err(anyhow!(
             "PDF does not contain 'DECLARAÇÃO DE BENS E DIREITOS' section. \
              This may not be an IRPF PDF."
@@ -104,26 +104,41 @@ fn parse_positions_from_text(text: &str, year: i32) -> Result<Vec<IrpfPosition>>
 
             match parse_code_31_line(line, year) {
                 Ok(Some(position)) => {
-                    info!("Extracted position: {} {} shares @ R${:.2} = R${:.2}",
-                        position.ticker, position.quantity, position.average_cost, position.total_cost);
+                    info!(
+                        "Extracted position: {} {} shares @ R${:.2} = R${:.2}",
+                        position.ticker,
+                        position.quantity,
+                        position.average_cost,
+                        position.total_cost
+                    );
                     positions.push(position);
                 }
                 Ok(None) => {
                     // Entry didn't match target year, skip silently
                 }
                 Err(e) => {
-                    warn!("Failed to parse Code 31 line '{}': {}",
-                        if line.len() > 50 { &line[..50] } else { line }, e);
+                    warn!(
+                        "Failed to parse Code 31 line '{}': {}",
+                        if line.len() > 50 { &line[..50] } else { line },
+                        e
+                    );
                     // Continue processing other entries
                 }
             }
         }
     }
 
-    info!("Extracted {} positions from IRPF for year {}", positions.len(), year);
+    info!(
+        "Extracted {} positions from IRPF for year {}",
+        positions.len(),
+        year
+    );
 
     if positions.is_empty() {
-        warn!("No positions found for year {}. Check that the PDF is for the correct year.", year);
+        warn!(
+            "No positions found for year {}. Check that the PDF is for the correct year.",
+            year
+        );
     }
 
     Ok(positions)
@@ -139,7 +154,8 @@ fn parse_code_31_line(discrim: &str, target_year: i32) -> Result<Option<IrpfPosi
     // Examples: "ITSA4 1926 (2018)", "ANIM3 500 (2017) 1300 (2018)", "A1MD34 100 (2018)"
     // Supports: regular stocks (4 letters + digits), BDRs (1+ letters + digits), units (ending in 11)
     let ticker_regex = Regex::new(r"^([A-Z]\d?[A-Z]{0,3}\d{1,2}[A-Z]?)")?;
-    let ticker = ticker_regex.captures(discrim)
+    let ticker = ticker_regex
+        .captures(discrim)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
         .ok_or_else(|| anyhow!("Could not extract ticker from: {}", discrim))?;
@@ -154,8 +170,7 @@ fn parse_code_31_line(discrim: &str, target_year: i32) -> Result<Option<IrpfPosi
             return Ok(None);
         }
     };
-    let quantity = Decimal::from_str(quantity_str)
-        .context("Failed to parse quantity")?;
+    let quantity = Decimal::from_str(quantity_str).context("Failed to parse quantity")?;
 
     // Extract cost basis for the target year
     // The discriminação line ends with two values: "value1 value2"
@@ -172,24 +187,29 @@ fn parse_code_31_line(discrim: &str, target_year: i32) -> Result<Option<IrpfPosi
         .filter_map(|m| m.as_str().parse::<i32>().ok())
         .collect();
 
-    let latest_year = years.iter().max().copied()
+    let latest_year = years
+        .iter()
+        .max()
+        .copied()
         .ok_or_else(|| anyhow!("No years found in discriminação"))?;
 
     // Extract the last two decimal values from the discriminação line
     let values_regex = Regex::new(r"([0-9.,]+)\s+([0-9.,]+)\s*$")?;
-    let captures = values_regex.captures(discrim)
+    let captures = values_regex
+        .captures(discrim)
         .ok_or_else(|| anyhow!("Could not find cost values in discriminação"))?;
 
     // Determine which value to use based on target year
     // value1 is for (latest_year - 1), value2 is for latest_year
     let cost_str = if target_year == latest_year {
-        captures.get(2)  // Second value for latest year
+        captures.get(2) // Second value for latest year
     } else if target_year == latest_year - 1 {
-        captures.get(1)  // First value for previous year
+        captures.get(1) // First value for previous year
     } else {
-        return Ok(None);  // Target year not covered by these values
-    }.map(|m| m.as_str())
-        .ok_or_else(|| anyhow!("Could not extract cost for year {}", target_year))?;
+        return Ok(None); // Target year not covered by these values
+    }
+    .map(|m| m.as_str())
+    .ok_or_else(|| anyhow!("Could not extract cost for year {}", target_year))?;
 
     // Parse cost (Brazilian format: 1.234,56 → 1234.56)
     let total_cost = parse_brazilian_decimal(cost_str)?;
@@ -244,8 +264,7 @@ fn parse_brazilian_decimal(s: &str) -> Result<Decimal> {
         }
     };
 
-    Decimal::from_str(&normalized)
-        .context(format!("Failed to parse decimal: {}", s))
+    Decimal::from_str(&normalized).context(format!("Failed to parse decimal: {}", s))
 }
 
 #[cfg(test)]
@@ -254,9 +273,18 @@ mod tests {
 
     #[test]
     fn test_parse_brazilian_decimal() {
-        assert_eq!(parse_brazilian_decimal("1.234,56").unwrap(), Decimal::new(123456, 2));
-        assert_eq!(parse_brazilian_decimal("20,245.73").unwrap(), Decimal::new(2024573, 2));
-        assert_eq!(parse_brazilian_decimal("100").unwrap(), Decimal::new(100, 0));
+        assert_eq!(
+            parse_brazilian_decimal("1.234,56").unwrap(),
+            Decimal::new(123456, 2)
+        );
+        assert_eq!(
+            parse_brazilian_decimal("20,245.73").unwrap(),
+            Decimal::new(2024573, 2)
+        );
+        assert_eq!(
+            parse_brazilian_decimal("100").unwrap(),
+            Decimal::new(100, 0)
+        );
     }
 
     #[test]
@@ -284,7 +312,10 @@ mod tests {
         assert_eq!(result.ticker, "ITSA4");
         assert_eq!(result.quantity, Decimal::new(1926, 0));
         assert_eq!(result.total_cost, Decimal::new(2024573, 2)); // 20245.73
-        assert_eq!(result.average_cost, Decimal::new(2024573, 2) / Decimal::new(1926, 0));
+        assert_eq!(
+            result.average_cost,
+            Decimal::new(2024573, 2) / Decimal::new(1926, 0)
+        );
     }
 
     #[test]
@@ -363,10 +394,25 @@ mod tests {
     #[test]
     fn test_decimal_formats() {
         // Test various decimal formats
-        assert_eq!(parse_brazilian_decimal("20,245.73").unwrap(), Decimal::new(2024573, 2));
-        assert_eq!(parse_brazilian_decimal("20.245,73").unwrap(), Decimal::new(2024573, 2));
-        assert_eq!(parse_brazilian_decimal("1234.56").unwrap(), Decimal::new(123456, 2));
-        assert_eq!(parse_brazilian_decimal("1234,56").unwrap(), Decimal::new(123456, 2));
-        assert_eq!(parse_brazilian_decimal("1,234,567.89").unwrap(), Decimal::new(123456789, 2));
+        assert_eq!(
+            parse_brazilian_decimal("20,245.73").unwrap(),
+            Decimal::new(2024573, 2)
+        );
+        assert_eq!(
+            parse_brazilian_decimal("20.245,73").unwrap(),
+            Decimal::new(2024573, 2)
+        );
+        assert_eq!(
+            parse_brazilian_decimal("1234.56").unwrap(),
+            Decimal::new(123456, 2)
+        );
+        assert_eq!(
+            parse_brazilian_decimal("1234,56").unwrap(),
+            Decimal::new(123456, 2)
+        );
+        assert_eq!(
+            parse_brazilian_decimal("1,234,567.89").unwrap(),
+            Decimal::new(123456789, 2)
+        );
     }
 }

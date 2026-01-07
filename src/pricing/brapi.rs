@@ -105,7 +105,7 @@ pub struct BrapiCorporateAction {
     pub action_type: CorporateActionType,
     pub approved_date: NaiveDate,
     pub ex_date: NaiveDate,
-    pub factor: String,  // e.g., "1:2", "10%", etc.
+    pub factor: String, // e.g., "1:2", "10%", etc.
     pub remarks: Option<String>,
 }
 
@@ -113,7 +113,7 @@ pub struct BrapiCorporateAction {
 #[derive(Debug, Clone, Serialize)]
 pub struct BrapiIncomeEvent {
     pub ticker: String,
-    pub event_type: String,  // "DIVIDEND", "JCP", "RENDIMENTO"
+    pub event_type: String, // "DIVIDEND", "JCP", "RENDIMENTO"
     pub payment_date: NaiveDate,
     pub ex_date: Option<NaiveDate>,
     pub amount: Decimal,
@@ -124,7 +124,11 @@ pub struct BrapiIncomeEvent {
 pub async fn fetch_quote(
     ticker: &str,
     include_dividends: bool,
-) -> Result<(BrapiPriceData, Option<Vec<BrapiCorporateAction>>, Option<Vec<BrapiIncomeEvent>>)> {
+) -> Result<(
+    BrapiPriceData,
+    Option<Vec<BrapiCorporateAction>>,
+    Option<Vec<BrapiIncomeEvent>>,
+)> {
     info!("Fetching quote for {} from Brapi.dev", ticker);
 
     let client = Client::builder()
@@ -165,17 +169,17 @@ pub async fn fetch_quote(
         ticker: ticker.to_string(),
         price: quote
             .regular_market_price
-            .and_then(|p| Decimal::from_f64_retain(p))
+            .and_then(Decimal::from_f64_retain)
             .ok_or_else(|| anyhow!("No price available"))?,
         open: quote
             .regular_market_open
-            .and_then(|p| Decimal::from_f64_retain(p)),
+            .and_then(Decimal::from_f64_retain),
         high: quote
             .regular_market_day_high
-            .and_then(|p| Decimal::from_f64_retain(p)),
+            .and_then(Decimal::from_f64_retain),
         low: quote
             .regular_market_day_low
-            .and_then(|p| Decimal::from_f64_retain(p)),
+            .and_then(Decimal::from_f64_retain),
         volume: quote.regular_market_volume,
         currency: quote.currency.unwrap_or_else(|| "BRL".to_string()),
     };
@@ -229,8 +233,11 @@ fn parse_stock_dividend(sd: &StockDividend, ticker: &str) -> Option<BrapiCorpora
         CorporateActionType::Split
     } else if label.contains("GRUPAMENTO") || remarks.contains("GRUPAMENTO") {
         CorporateActionType::ReverseSplit
-    } else if label.contains("BONIFICAÇÃO") || label.contains("BONIFICACAO")
-        || remarks.contains("BONIFICAÇÃO") || remarks.contains("BONIFICACAO") {
+    } else if label.contains("BONIFICAÇÃO")
+        || label.contains("BONIFICACAO")
+        || remarks.contains("BONIFICAÇÃO")
+        || remarks.contains("BONIFICACAO")
+    {
         CorporateActionType::Bonus
     } else {
         // Unknown type, skip
@@ -256,10 +263,12 @@ fn parse_stock_dividend(sd: &StockDividend, ticker: &str) -> Option<BrapiCorpora
 /// Parse cash dividend
 fn parse_cash_dividend(cd: &CashDividend, ticker: &str) -> Option<BrapiIncomeEvent> {
     let payment_date = parse_brapi_date(&cd.payment_date).ok()?;
-    let ex_date = cd.last_date_prior.as_ref().and_then(|d| parse_brapi_date(d).ok());
+    let ex_date = cd
+        .last_date_prior
+        .as_ref()
+        .and_then(|d| parse_brapi_date(d).ok());
 
-    let amount = cd.rate
-        .and_then(|r| Decimal::from_f64_retain(r))?;
+    let amount = cd.rate.and_then(Decimal::from_f64_retain)?;
 
     // Determine event type from label
     let label = cd.label.as_deref().unwrap_or("").to_uppercase();

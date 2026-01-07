@@ -1,8 +1,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
-use tracing::{info, warn};
 use std::collections::HashMap;
+use tracing::{info, warn};
 
 use crate::corporate_actions;
 use crate::db;
@@ -111,7 +111,10 @@ pub fn import_movimentacao_entries(
 
     for entry in actions {
         if entry.ticker.is_none() {
-            warn!("Skipping corporate action with no ticker: {:?}", entry.product);
+            warn!(
+                "Skipping corporate action with no ticker: {:?}",
+                entry.product
+            );
             skipped_actions += 1;
             continue;
         }
@@ -257,9 +260,7 @@ pub fn import_movimentacao_entries(
                     Err(e) => {
                         warn!(
                             "Failed to auto-apply corporate action for {} on {}: {}",
-                            ticker,
-                            action.event_date,
-                            e
+                            ticker, action.event_date, e
                         );
                         errors += 1;
                     }
@@ -277,7 +278,10 @@ pub fn import_movimentacao_entries(
                     fees: Decimal::ZERO,
                     is_day_trade: false,
                     quota_issuance_date: None,
-                    notes: Some(format!("Desdobro credit from movimentacao: {}", entry.product)),
+                    notes: Some(format!(
+                        "Desdobro credit from movimentacao: {}",
+                        entry.product
+                    )),
                     source: "MOVIMENTACAO".to_string(),
                     created_at: chrono::Utc::now(),
                 };
@@ -335,7 +339,10 @@ pub fn import_movimentacao_entries(
                         imported_trades += 1;
                     }
                     Err(e) => {
-                        warn!("Error inserting Atualização subscription transaction: {}", e);
+                        warn!(
+                            "Error inserting Atualização subscription transaction: {}",
+                            e
+                        );
                         errors += 1;
                     }
                 }
@@ -394,9 +401,7 @@ pub fn import_movimentacao_entries(
                 Err(e) => {
                     warn!(
                         "Failed to auto-apply corporate action for {} on {}: {}",
-                        ticker,
-                        action.event_date,
-                        e
+                        ticker, action.event_date, e
                     );
                     errors += 1;
                 }
@@ -404,8 +409,7 @@ pub fn import_movimentacao_entries(
         } else {
             info!(
                 "Skipping auto-apply for {} on {} (ratio 1:1)",
-                ticker,
-                action.event_date
+                ticker, action.event_date
             );
         }
     }
@@ -529,134 +533,6 @@ fn is_receipt_like_ticker(ticker: &str) -> bool {
         || ticker.ends_with("15")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::NaiveDate;
-
-    fn entry(
-        date: (i32, u32, u32),
-        movement_type: &str,
-        product: &str,
-        ticker: &str,
-        direction: &str,
-        quantity: i64,
-    ) -> MovimentacaoEntry {
-        MovimentacaoEntry {
-            direction: direction.to_string(),
-            date: NaiveDate::from_ymd_opt(date.0, date.1, date.2).unwrap(),
-            movement_type: movement_type.to_string(),
-            product: product.to_string(),
-            ticker: Some(ticker.to_string()),
-            institution: "TEST".to_string(),
-            quantity: Some(Decimal::from(quantity)),
-            unit_price: None,
-            operation_value: None,
-        }
-    }
-
-    #[test]
-    fn matches_subscription_receipt_for_update() {
-        let entries = vec![
-            entry(
-                (2020, 7, 13),
-                "Recibo de Subscrição",
-                "BRCR13 - FDO INV IMOB - FII BTG PACTUAL CORPORATE OFFICE FUND",
-                "BRCR13",
-                "Credito",
-                22,
-            ),
-            entry(
-                (2020, 9, 14),
-                "Atualização",
-                "BRCR11 - FDO INV IMOB - FII BTG PACTUAL CORPORATE OFFICE FUND",
-                "BRCR11",
-                "Credito",
-                22,
-            ),
-        ];
-
-        let receipt_index = build_subscription_receipts_index(&entries);
-        let update_entry = &entries[1];
-        let match_result = match_subscription_receipt(&receipt_index, update_entry, Decimal::from(22));
-
-        assert!(match_result.is_some());
-        assert_eq!(match_result.unwrap().tickers, vec!["BRCR13".to_string()]);
-    }
-
-    #[test]
-    fn matches_receipt_like_transfer_for_update() {
-        let entries = vec![
-            entry(
-                (2023, 6, 30),
-                "Transferência - Liquidação",
-                "CDII12 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
-                "CDII12",
-                "Credito",
-                304,
-            ),
-            entry(
-                (2023, 6, 28),
-                "Direito de Subscrição",
-                "CDII12 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
-                "CDII12",
-                "Credito",
-                3,
-            ),
-            entry(
-                (2023, 7, 11),
-                "Direitos de Subscrição - Exercido",
-                "CDII12 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
-                "CDII12",
-                "Debito",
-                307,
-            ),
-            entry(
-                (2023, 8, 7),
-                "Atualização",
-                "CDII11 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
-                "CDII11",
-                "Credito",
-                307,
-            ),
-        ];
-
-        let receipt_index = build_subscription_receipts_index(&entries);
-        let update_entry = &entries[2];
-        let match_result = match_subscription_receipt(&receipt_index, update_entry, Decimal::from(307));
-
-        assert!(match_result.is_some());
-    }
-
-    #[test]
-    fn ignores_snapshot_updates_without_receipt_match() {
-        let entries = vec![
-            entry(
-                (2024, 4, 12),
-                "Rendimento",
-                "BRCR11 - FDO INV IMOB - FII BTG PACTUAL CORP. OFFICE FUND",
-                "BRCR11",
-                "Credito",
-                802,
-            ),
-            entry(
-                (2024, 4, 16),
-                "Atualização",
-                "BRCR11 - FDO INV IMOB - FII BTG PACTUAL CORP. OFFICE FUND",
-                "BRCR11",
-                "Credito",
-                1433,
-            ),
-        ];
-
-        let receipt_index = build_subscription_receipts_index(&entries);
-        let update_entry = &entries[1];
-        let match_result = match_subscription_receipt(&receipt_index, update_entry, Decimal::from(1433));
-
-        assert!(match_result.is_none());
-    }
-}
-
 fn match_subscription_receipt(
     receipt_index: &HashMap<String, Vec<ReceiptEntry>>,
     entry: &MovimentacaoEntry,
@@ -669,8 +545,7 @@ fn match_subscription_receipt(
     let candidates: Vec<_> = receipts
         .iter()
         .filter(|receipt| {
-            receipt.date <= entry.date
-                && (entry.date - receipt.date).num_days() <= lookback_days
+            receipt.date <= entry.date && (entry.date - receipt.date).num_days() <= lookback_days
         })
         .collect();
 
@@ -697,7 +572,7 @@ fn match_subscription_receipt(
 }
 
 fn normalized_product_description(product: &str) -> String {
-    let desc = product.splitn(2, " - ").nth(1).unwrap_or(product);
+    let desc = product.split_once(" - ").map(|x| x.1).unwrap_or(product);
     desc.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -764,4 +639,135 @@ fn infer_split_ratio_from_credit(
     }
 
     Ok(Some((1, selected_ratio.unwrap())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn entry(
+        date: (i32, u32, u32),
+        movement_type: &str,
+        product: &str,
+        ticker: &str,
+        direction: &str,
+        quantity: i64,
+    ) -> MovimentacaoEntry {
+        MovimentacaoEntry {
+            direction: direction.to_string(),
+            date: NaiveDate::from_ymd_opt(date.0, date.1, date.2).unwrap(),
+            movement_type: movement_type.to_string(),
+            product: product.to_string(),
+            ticker: Some(ticker.to_string()),
+            institution: "TEST".to_string(),
+            quantity: Some(Decimal::from(quantity)),
+            unit_price: None,
+            operation_value: None,
+        }
+    }
+
+    #[test]
+    fn matches_subscription_receipt_for_update() {
+        let entries = vec![
+            entry(
+                (2020, 7, 13),
+                "Recibo de Subscrição",
+                "BRCR13 - FDO INV IMOB - FII BTG PACTUAL CORPORATE OFFICE FUND",
+                "BRCR13",
+                "Credito",
+                22,
+            ),
+            entry(
+                (2020, 9, 14),
+                "Atualização",
+                "BRCR11 - FDO INV IMOB - FII BTG PACTUAL CORPORATE OFFICE FUND",
+                "BRCR11",
+                "Credito",
+                22,
+            ),
+        ];
+
+        let receipt_index = build_subscription_receipts_index(&entries);
+        let update_entry = &entries[1];
+        let match_result =
+            match_subscription_receipt(&receipt_index, update_entry, Decimal::from(22));
+
+        assert!(match_result.is_some());
+        assert_eq!(match_result.unwrap().tickers, vec!["BRCR13".to_string()]);
+    }
+
+    #[test]
+    fn matches_receipt_like_transfer_for_update() {
+        let entries = vec![
+            entry(
+                (2023, 6, 30),
+                "Transferência - Liquidação",
+                "CDII12 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
+                "CDII12",
+                "Credito",
+                304,
+            ),
+            entry(
+                (2023, 6, 28),
+                "Direito de Subscrição",
+                "CDII12 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
+                "CDII12",
+                "Credito",
+                3,
+            ),
+            entry(
+                (2023, 7, 11),
+                "Direitos de Subscrição - Exercido",
+                "CDII12 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
+                "CDII12",
+                "Debito",
+                307,
+            ),
+            entry(
+                (2023, 8, 7),
+                "Atualização",
+                "CDII11 - SPARTA INFRA CDI FIC FI INFRA RENDA FIXA CP",
+                "CDII11",
+                "Credito",
+                307,
+            ),
+        ];
+
+        let receipt_index = build_subscription_receipts_index(&entries);
+        let update_entry = &entries[2];
+        let match_result =
+            match_subscription_receipt(&receipt_index, update_entry, Decimal::from(307));
+
+        assert!(match_result.is_some());
+    }
+
+    #[test]
+    fn ignores_snapshot_updates_without_receipt_match() {
+        let entries = vec![
+            entry(
+                (2024, 4, 12),
+                "Rendimento",
+                "BRCR11 - FDO INV IMOB - FII BTG PACTUAL CORP. OFFICE FUND",
+                "BRCR11",
+                "Credito",
+                802,
+            ),
+            entry(
+                (2024, 4, 16),
+                "Atualização",
+                "BRCR11 - FDO INV IMOB - FII BTG PACTUAL CORP. OFFICE FUND",
+                "BRCR11",
+                "Credito",
+                1433,
+            ),
+        ];
+
+        let receipt_index = build_subscription_receipts_index(&entries);
+        let update_entry = &entries[1];
+        let match_result =
+            match_subscription_receipt(&receipt_index, update_entry, Decimal::from(1433));
+
+        assert!(match_result.is_none());
+    }
 }

@@ -5,20 +5,20 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
 use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
 use super::loss_carryforward;
+use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
 
 /// Tax category for operations
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TaxCategory {
-    StockSwingTrade,   // 15%, R$20k exemption
-    StockDayTrade,     // 20%, no exemption
-    FiiSwingTrade,     // 20%, no exemption
-    FiiDayTrade,       // 20%, no exemption
-    FiagroSwingTrade,  // 20%, no exemption
-    FiagroDayTrade,    // 20%, no exemption
-    FiInfra,           // Exempt
+    StockSwingTrade,  // 15%, R$20k exemption
+    StockDayTrade,    // 20%, no exemption
+    FiiSwingTrade,    // 20%, no exemption
+    FiiDayTrade,      // 20%, no exemption
+    FiagroSwingTrade, // 20%, no exemption
+    FiagroDayTrade,   // 20%, no exemption
+    FiInfra,          // Exempt
 }
 
 impl TaxCategory {
@@ -44,15 +44,15 @@ impl TaxCategory {
             TaxCategory::FiiSwingTrade => Decimal::from_str("0.20").unwrap(),   // 20%
             TaxCategory::FiiDayTrade => Decimal::from_str("0.20").unwrap(),     // 20%
             TaxCategory::FiagroSwingTrade => Decimal::from_str("0.20").unwrap(), // 20%
-            TaxCategory::FiagroDayTrade => Decimal::from_str("0.20").unwrap(),   // 20%
-            TaxCategory::FiInfra => Decimal::ZERO, // Exempt
+            TaxCategory::FiagroDayTrade => Decimal::from_str("0.20").unwrap(),  // 20%
+            TaxCategory::FiInfra => Decimal::ZERO,                              // Exempt
         }
     }
 
     pub fn monthly_exemption_threshold(&self) -> Decimal {
         match self {
             TaxCategory::StockSwingTrade => Decimal::from(20000), // R$20,000
-            _ => Decimal::ZERO, // No exemption for others
+            _ => Decimal::ZERO,                                   // No exemption for others
         }
     }
 
@@ -103,7 +103,7 @@ impl TaxCategory {
     pub fn darf_code(&self) -> Option<&'static str> {
         match self {
             TaxCategory::FiInfra => None, // Exempt, no DARF needed
-            _ => Some("6015"), // Capital gains code
+            _ => Some("6015"),            // Capital gains code
         }
     }
 
@@ -134,8 +134,8 @@ pub struct MonthlyTaxCalculation {
     pub total_profit: Decimal,
     pub total_loss: Decimal,
     pub net_profit: Decimal,
-    pub loss_offset_applied: Decimal,  // Amount of previous losses applied
-    pub profit_after_loss_offset: Decimal,  // Net profit after applying previous losses
+    pub loss_offset_applied: Decimal, // Amount of previous losses applied
+    pub profit_after_loss_offset: Decimal, // Net profit after applying previous losses
     pub exemption_applied: Decimal,
     pub taxable_amount: Decimal,
     pub tax_rate: Decimal,
@@ -158,9 +158,15 @@ pub fn calculate_monthly_tax(
 
     let month_start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
     let month_end = if month == 12 {
-        NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap().pred_opt().unwrap()
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap()
     } else {
-        NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap().pred_opt().unwrap()
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap()
     };
 
     let mut assets_by_ticker = HashMap::new();
@@ -230,7 +236,7 @@ pub fn calculate_monthly_tax(
                         // Determine category based on asset type and day trade flag
                         let category = TaxCategory::from_asset_and_trade_type(
                             &asset.asset_type,
-                            tx.is_day_trade
+                            tx.is_day_trade,
                         );
 
                         let mut sale = if tx.is_day_trade {
@@ -239,8 +245,9 @@ pub fn calculate_monthly_tax(
                             swing_matcher.match_sale(&tx)?
                         };
                         sale.asset_type = asset.asset_type.clone();
-                        sales_by_category.entry(category)
-                            .or_insert_with(Vec::new)
+                        sales_by_category
+                            .entry(category)
+                            .or_default()
                             .push(sale);
                     } else if tx.trade_date > month_end {
                         // We've passed the target month, no need to process further
@@ -369,7 +376,7 @@ fn get_transactions_before(
                 quota_issuance_date, notes, source, created_at
          FROM transactions
          WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC, id ASC"
+         ORDER BY trade_date ASC, id ASC",
     )?;
 
     let transactions = stmt
@@ -430,7 +437,13 @@ fn build_rename_carryover_transaction(
     }
 
     let mut total_cost = matcher.average_cost() * quantity;
-    apply_actions_to_carryover(conn, target_asset_id, effective_date, &mut quantity, &mut total_cost)?;
+    apply_actions_to_carryover(
+        conn,
+        target_asset_id,
+        effective_date,
+        &mut quantity,
+        &mut total_cost,
+    )?;
     if quantity <= Decimal::ZERO {
         return Ok(None);
     }
@@ -485,8 +498,8 @@ fn apply_actions_to_carryover(
         .collect::<Result<Vec<_>, _>>()?;
 
     for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
-        let action_type = CorporateActionType::from_str(&action_type_str)
-            .unwrap_or(CorporateActionType::Split);
+        let action_type =
+            CorporateActionType::from_str(&action_type_str).unwrap_or(CorporateActionType::Split);
         let ratio_from = Decimal::from(ratio_from);
         let ratio_to = Decimal::from(ratio_to);
 
@@ -513,9 +526,15 @@ fn get_transactions_up_to_month(
     month: u32,
 ) -> Result<Vec<Transaction>> {
     let end_date = if month == 12 {
-        NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap().pred_opt().unwrap()
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap()
     } else {
-        NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap().pred_opt().unwrap()
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap()
     };
 
     let mut stmt = conn.prepare(
@@ -524,7 +543,7 @@ fn get_transactions_up_to_month(
                 quota_issuance_date, notes, source, created_at
          FROM transactions
          WHERE asset_id = ?1 AND trade_date <= ?2
-         ORDER BY trade_date ASC, id ASC"
+         ORDER BY trade_date ASC, id ASC",
     )?;
 
     let transactions = stmt
@@ -574,7 +593,7 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
     Err(rusqlite::Error::InvalidColumnType(
         idx,
         "quantity".to_string(),
-        rusqlite::types::Type::Null
+        rusqlite::types::Type::Null,
     ))
 }
 
@@ -596,10 +615,7 @@ mod tests {
             TaxCategory::FiiSwingTrade.tax_rate(),
             Decimal::from_str("0.20").unwrap()
         );
-        assert_eq!(
-            TaxCategory::FiInfra.tax_rate(),
-            Decimal::ZERO
-        );
+        assert_eq!(TaxCategory::FiInfra.tax_rate(), Decimal::ZERO);
     }
 
     #[test]

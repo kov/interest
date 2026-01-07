@@ -27,7 +27,7 @@ pub fn get_losses_for_category(
         "SELECT id, year, month, tax_category, loss_amount, remaining_amount
          FROM loss_carryforward
          WHERE tax_category = ?1 AND remaining_amount > 0
-         ORDER BY year ASC, month ASC"
+         ORDER BY year ASC, month ASC",
     )?;
 
     let losses = stmt
@@ -106,7 +106,7 @@ pub fn record_loss(
             month,
             category.as_str(),
             loss_amount.to_string(),
-            loss_amount.to_string(),  // Initially, all of it remains
+            loss_amount.to_string(), // Initially, all of it remains
         ],
     )?;
 
@@ -115,23 +115,18 @@ pub fn record_loss(
 
 /// Get total remaining losses by category
 #[allow(dead_code)]
-pub fn get_total_losses_by_category(
-    conn: &Connection,
-) -> Result<HashMap<TaxCategory, Decimal>> {
+pub fn get_total_losses_by_category(conn: &Connection) -> Result<HashMap<TaxCategory, Decimal>> {
     let mut stmt = conn.prepare(
         "SELECT tax_category, SUM(remaining_amount) as total
          FROM loss_carryforward
          WHERE remaining_amount > 0
-         GROUP BY tax_category"
+         GROUP BY tax_category",
     )?;
 
     let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
 
     let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
     for row in rows {
@@ -168,7 +163,7 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
     Err(rusqlite::Error::InvalidColumnType(
         idx,
         "decimal".to_string(),
-        rusqlite::types::Type::Null
+        rusqlite::types::Type::Null,
     ))
 }
 

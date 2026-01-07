@@ -9,8 +9,8 @@
 
 use anyhow::Result;
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use rusqlite::Connection;
+use rust_decimal::Decimal;
 use std::str::FromStr;
 use tracing::{info, warn};
 
@@ -24,12 +24,12 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
         ValueRef::Text(bytes) => {
             let s = std::str::from_utf8(bytes)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
         }
         ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        ValueRef::Real(f) => {
+            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
         _ => Err(rusqlite::Error::InvalidColumnType(
             idx,
             "decimal".to_string(),
@@ -40,8 +40,14 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
 
 /// Check if a ticker is a term contract (ends with 'T')
 pub fn is_term_contract(ticker: &str) -> bool {
-    ticker.len() >= 5 && ticker.ends_with('T')
-        && ticker.chars().rev().nth(1).map(|c| c.is_numeric()).unwrap_or(false)
+    ticker.len() >= 5
+        && ticker.ends_with('T')
+        && ticker
+            .chars()
+            .rev()
+            .nth(1)
+            .map(|c| c.is_numeric())
+            .unwrap_or(false)
 }
 
 /// Get the base ticker from a term contract ticker
@@ -185,7 +191,8 @@ pub fn process_term_liquidations(conn: &Connection) -> Result<usize> {
 
     for (_liquidation_id, base_ticker, liquidation_date, quantity, _price, _notes) in liquidations {
         // Match this liquidation to term purchases
-        let matches = match_liquidation_to_purchases(conn, &base_ticker, liquidation_date, quantity)?;
+        let matches =
+            match_liquidation_to_purchases(conn, &base_ticker, liquidation_date, quantity)?;
 
         if matches.is_empty() {
             warn!(
@@ -238,15 +245,15 @@ mod tests {
 
         assert!(!is_term_contract("ANIM3"));
         assert!(!is_term_contract("PETR4"));
-        assert!(!is_term_contract("TEST"));  // Doesn't end in digit+T
-        assert!(!is_term_contract("T"));      // Too short
+        assert!(!is_term_contract("TEST")); // Doesn't end in digit+T
+        assert!(!is_term_contract("T")); // Too short
     }
 
     #[test]
     fn test_get_base_ticker() {
         assert_eq!(get_base_ticker("ANIM3T"), "ANIM3");
         assert_eq!(get_base_ticker("PETR4T"), "PETR4");
-        assert_eq!(get_base_ticker("ANIM3"), "ANIM3");  // Already base ticker
+        assert_eq!(get_base_ticker("ANIM3"), "ANIM3"); // Already base ticker
     }
 
     #[test]

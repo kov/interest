@@ -93,7 +93,9 @@ pub fn apply_corporate_action(
         action.ratio_to
     );
 
-    let action_id = action.id.ok_or_else(|| anyhow::anyhow!("Corporate action must have an ID"))?;
+    let action_id = action
+        .id
+        .ok_or_else(|| anyhow::anyhow!("Corporate action must have an ID"))?;
 
     // Get all transactions for this asset before the ex-date that haven't been adjusted yet
     let mut stmt = conn.prepare(
@@ -106,33 +108,39 @@ pub fn apply_corporate_action(
                SELECT 1 FROM corporate_action_adjustments caa
                WHERE caa.action_id = ?3 AND caa.transaction_id = t.id
            )
-         ORDER BY t.trade_date ASC"
+         ORDER BY t.trade_date ASC",
     )?;
 
     let transactions = stmt
-        .query_map(rusqlite::params![action.asset_id, action.ex_date, action_id], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
-                    .unwrap_or(TransactionType::Buy),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: get_decimal_value(row, 5)?,
-                price_per_unit: get_decimal_value(row, 6)?,
-                total_cost: get_decimal_value(row, 7)?,
-                fees: get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
+        .query_map(
+            rusqlite::params![action.asset_id, action.ex_date, action_id],
+            |row| {
+                Ok(Transaction {
+                    id: Some(row.get(0)?),
+                    asset_id: row.get(1)?,
+                    transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                        .unwrap_or(TransactionType::Buy),
+                    trade_date: row.get(3)?,
+                    settlement_date: row.get(4)?,
+                    quantity: get_decimal_value(row, 5)?,
+                    price_per_unit: get_decimal_value(row, 6)?,
+                    total_cost: get_decimal_value(row, 7)?,
+                    fees: get_decimal_value(row, 8)?,
+                    is_day_trade: row.get(9)?,
+                    quota_issuance_date: row.get(10)?,
+                    notes: row.get(11)?,
+                    source: row.get(12)?,
+                    created_at: row.get(13)?,
+                })
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
 
     if transactions.is_empty() {
-        info!("No unadjusted transactions found before ex-date {}", action.ex_date);
+        info!(
+            "No unadjusted transactions found before ex-date {}",
+            action.ex_date
+        );
         // Mark as applied anyway
         mark_action_as_applied(conn, action_id)?;
         return Ok(0);
@@ -193,7 +201,9 @@ pub fn apply_corporate_action(
         }
 
         for tx in &transactions {
-            let tx_id = tx.id.ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
+            let tx_id = tx
+                .id
+                .ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
             conn.execute(
                 "INSERT INTO corporate_action_adjustments
                  (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
@@ -216,7 +226,9 @@ pub fn apply_corporate_action(
     // Adjust each transaction
     let mut adjusted_count = 0;
     for tx in transactions {
-        let tx_id = tx.id.ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
+        let tx_id = tx
+            .id
+            .ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
 
         let old_quantity = tx.quantity;
         let old_price = tx.price_per_unit;
@@ -313,18 +325,12 @@ pub fn apply_corporate_action(
 /// applies them in chronological order.
 ///
 /// Returns the number of actions applied.
-pub fn apply_actions_to_transaction(
-    conn: &Connection,
-    transaction_id: i64,
-) -> Result<usize> {
+pub fn apply_actions_to_transaction(conn: &Connection, transaction_id: i64) -> Result<usize> {
     // Get the transaction details
-    let mut stmt = conn.prepare(
-        "SELECT asset_id, trade_date FROM transactions WHERE id = ?1"
-    )?;
+    let mut stmt = conn.prepare("SELECT asset_id, trade_date FROM transactions WHERE id = ?1")?;
 
-    let (asset_id, trade_date): (i64, chrono::NaiveDate) = stmt.query_row([transaction_id], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-    })?;
+    let (asset_id, trade_date): (i64, chrono::NaiveDate) =
+        stmt.query_row([transaction_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
     // Find all applied corporate actions for this asset with ex-date after trade_date
     let mut actions_stmt = conn.prepare(
@@ -332,7 +338,7 @@ pub fn apply_actions_to_transaction(
                 applied, source, notes, created_at
          FROM corporate_actions
          WHERE asset_id = ?1 AND ex_date > ?2 AND applied = 1
-         ORDER BY ex_date ASC"
+         ORDER BY ex_date ASC",
     )?;
 
     let actions = actions_stmt
@@ -359,13 +365,13 @@ pub fn apply_actions_to_transaction(
     }
 
     // Get the current transaction state
-    let mut tx_stmt = conn.prepare(
-        "SELECT quantity, price_per_unit FROM transactions WHERE id = ?1"
-    )?;
+    let mut tx_stmt =
+        conn.prepare("SELECT quantity, price_per_unit FROM transactions WHERE id = ?1")?;
 
-    let (mut quantity, mut price): (Decimal, Decimal) = tx_stmt.query_row([transaction_id], |row| {
-        Ok((get_decimal_value(row, 0)?, get_decimal_value(row, 1)?))
-    })?;
+    let (mut quantity, mut price): (Decimal, Decimal) = tx_stmt
+        .query_row([transaction_id], |row| {
+            Ok((get_decimal_value(row, 0)?, get_decimal_value(row, 1)?))
+        })?;
 
     let mut applied_count = 0;
 
@@ -471,17 +477,12 @@ pub fn apply_actions_to_transaction(
     if applied_count > 0 {
         conn.execute(
             "UPDATE transactions SET quantity = ?1, price_per_unit = ?2 WHERE id = ?3",
-            rusqlite::params![
-                quantity.to_string(),
-                price.to_string(),
-                transaction_id
-            ],
+            rusqlite::params![quantity.to_string(), price.to_string(), transaction_id],
         )?;
 
         info!(
             "Auto-applied {} corporate action(s) to transaction {}",
-            applied_count,
-            transaction_id
+            applied_count, transaction_id
         );
     }
 
@@ -505,17 +506,17 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
         ValueRef::Text(bytes) => {
             let s = std::str::from_utf8(bytes)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
         }
         ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        ValueRef::Real(f) => {
+            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
         _ => Err(rusqlite::Error::InvalidColumnType(
             idx,
             "decimal".to_string(),
-            rusqlite::types::Type::Null
-        ))
+            rusqlite::types::Type::Null,
+        )),
     }
 }
 

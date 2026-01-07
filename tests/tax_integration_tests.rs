@@ -95,8 +95,8 @@ fn test_stock_swing_trade_under_exemption() -> Result<()> {
     let calc = &calculations[0];
     assert_eq!(calc.category, TaxCategory::StockSwingTrade);
     assert_eq!(calc.total_sales, dec!(1500.00)); // 50 * 30
-    assert_eq!(calc.total_cost_basis, dec!(1250.00));  // 50 * 25
-    assert_eq!(calc.net_profit, dec!(250.00));   // 1500 - 1250
+    assert_eq!(calc.total_cost_basis, dec!(1250.00)); // 50 * 25
+    assert_eq!(calc.net_profit, dec!(250.00)); // 1500 - 1250
 
     // Sales under R$20k should be exempt
     assert_eq!(calc.exemption_applied, dec!(250.00));
@@ -145,7 +145,7 @@ fn test_stock_swing_trade_over_exemption() -> Result<()> {
     let calc = &calculations[0];
     assert_eq!(calc.category, TaxCategory::StockSwingTrade);
     assert_eq!(calc.total_sales, dec!(30000.00));
-    assert_eq!(calc.total_cost_basis, dec!(25000.00));  // 500 * 50
+    assert_eq!(calc.total_cost_basis, dec!(25000.00)); // 500 * 50
     assert_eq!(calc.net_profit, dec!(5000.00));
 
     // Over R$20k - no exemption
@@ -245,7 +245,7 @@ fn test_fii_always_taxable_20_percent() -> Result<()> {
     let calc = &calculations[0];
     assert_eq!(calc.category, TaxCategory::FiiSwingTrade);
     assert_eq!(calc.total_sales, dec!(600.00));
-    assert_eq!(calc.total_cost_basis, dec!(500.00));  // 50 * 10
+    assert_eq!(calc.total_cost_basis, dec!(500.00)); // 50 * 10
     assert_eq!(calc.net_profit, dec!(100.00));
 
     // FII has NO exemption threshold
@@ -341,7 +341,11 @@ fn test_fi_infra_fully_exempt() -> Result<()> {
     let calculations = calculate_monthly_tax(&conn, 2025, 6)?;
 
     // FI-Infra should be skipped entirely
-    assert_eq!(calculations.len(), 0, "FI-Infra sales should not generate tax calculations");
+    assert_eq!(
+        calculations.len(),
+        0,
+        "FI-Infra sales should not generate tax calculations"
+    );
 
     Ok(())
 }
@@ -356,22 +360,64 @@ fn test_multi_category_same_month() -> Result<()> {
     let fii_id = insert_asset(db_path, "MXRF11", AssetType::Fii)?;
 
     // Stock swing trade: Buy 100 @ R$20, Sell 50 @ R$25 = R$1,250 sales
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(), dec!(100), dec!(20.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 7, 15).unwrap(), dec!(50), dec!(25.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+        dec!(100),
+        dec!(20.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 7, 15).unwrap(),
+        dec!(50),
+        dec!(25.00),
+        false,
+    )?;
 
     // Stock day trade: Buy 100 @ R$10, Sell 100 @ R$11 = R$1,100 sales
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 7, 20).unwrap(), dec!(100), dec!(10.00), true)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 7, 20).unwrap(), dec!(100), dec!(11.00), true)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 7, 20).unwrap(),
+        dec!(100),
+        dec!(10.00),
+        true,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 7, 20).unwrap(),
+        dec!(100),
+        dec!(11.00),
+        true,
+    )?;
 
     // FII: Buy 100 @ R$10, Sell 50 @ R$12 = R$600 sales
-    insert_transaction(db_path, fii_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 7, 5).unwrap(), dec!(100), dec!(10.00), false)?;
-    insert_transaction(db_path, fii_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 7, 25).unwrap(), dec!(50), dec!(12.00), false)?;
+    insert_transaction(
+        db_path,
+        fii_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 7, 5).unwrap(),
+        dec!(100),
+        dec!(10.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        fii_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 7, 25).unwrap(),
+        dec!(50),
+        dec!(12.00),
+        false,
+    )?;
 
     // Calculate tax for July 2025
     let conn = open_db(Some(db_path.to_path_buf()))?;
@@ -381,13 +427,16 @@ fn test_multi_category_same_month() -> Result<()> {
     assert_eq!(calculations.len(), 3);
 
     // Find each category
-    let stock_swing = calculations.iter()
+    let stock_swing = calculations
+        .iter()
         .find(|c| c.category == TaxCategory::StockSwingTrade)
         .expect("Stock swing trade not found");
-    let stock_day = calculations.iter()
+    let stock_day = calculations
+        .iter()
         .find(|c| c.category == TaxCategory::StockDayTrade)
         .expect("Stock day trade not found");
-    let fii_swing = calculations.iter()
+    let fii_swing = calculations
+        .iter()
         .find(|c| c.category == TaxCategory::FiiSwingTrade)
         .expect("FII swing trade not found");
 
@@ -474,16 +523,44 @@ fn test_loss_carryforward_single_category() -> Result<()> {
     let stock_id = insert_asset(db_path, "AMER3", AssetType::Stock)?;
 
     // Month 1: Buy 100 @ R$50, Sell 100 @ R$40 = Loss of R$1,000
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(), dec!(100), dec!(50.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(), dec!(100), dec!(40.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(),
+        dec!(100),
+        dec!(50.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(),
+        dec!(100),
+        dec!(40.00),
+        false,
+    )?;
 
     // Month 2: Buy 100 @ R$30, Sell 100 @ R$45 = Profit of R$1,500
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 2, 5).unwrap(), dec!(100), dec!(30.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 2, 20).unwrap(), dec!(100), dec!(45.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 2, 5).unwrap(),
+        dec!(100),
+        dec!(30.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 2, 20).unwrap(),
+        dec!(100),
+        dec!(45.00),
+        false,
+    )?;
 
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
@@ -502,7 +579,7 @@ fn test_loss_carryforward_single_category() -> Result<()> {
     assert_eq!(m2.net_profit, dec!(1500.00)); // Raw profit
     assert_eq!(m2.loss_offset_applied, dec!(1000.00)); // Previous loss applied
     assert_eq!(m2.profit_after_loss_offset, dec!(500.00)); // 1500 - 1000
-    // Under R$20k, so exempt
+                                                           // Under R$20k, so exempt
     assert_eq!(m2.exemption_applied, dec!(500.00));
     assert_eq!(m2.tax_due, dec!(0));
 
@@ -518,22 +595,64 @@ fn test_loss_carryforward_partial_offset() -> Result<()> {
     let stock_id = insert_asset(db_path, "PETR4", AssetType::Stock)?;
 
     // Month 1: Loss of R$5,000
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(), dec!(100), dec!(100.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(), dec!(100), dec!(50.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(),
+        dec!(100),
+        dec!(100.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(),
+        dec!(100),
+        dec!(50.00),
+        false,
+    )?;
 
     // Month 2: Profit of R$2,000 (less than previous loss)
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 2, 5).unwrap(), dec!(100), dec!(30.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 2, 20).unwrap(), dec!(100), dec!(50.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 2, 5).unwrap(),
+        dec!(100),
+        dec!(30.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 2, 20).unwrap(),
+        dec!(100),
+        dec!(50.00),
+        false,
+    )?;
 
     // Month 3: Profit of R$4,000
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 3, 5).unwrap(), dec!(100), dec!(40.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 3, 20).unwrap(), dec!(100), dec!(80.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 3, 5).unwrap(),
+        dec!(100),
+        dec!(40.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 3, 20).unwrap(),
+        dec!(100),
+        dec!(80.00),
+        false,
+    )?;
 
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
@@ -555,7 +674,7 @@ fn test_loss_carryforward_partial_offset() -> Result<()> {
     assert_eq!(m3.net_profit, dec!(4000.00));
     assert_eq!(m3.loss_offset_applied, dec!(3000.00)); // Remaining loss applied
     assert_eq!(m3.profit_after_loss_offset, dec!(1000.00)); // 4000 - 3000
-    // Under R$20k, so exempt
+                                                            // Under R$20k, so exempt
     assert_eq!(m3.exemption_applied, dec!(1000.00));
     assert_eq!(m3.tax_due, dec!(0));
 
@@ -571,22 +690,64 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
     let stock_id = insert_asset(db_path, "MGLU3", AssetType::Stock)?;
 
     // Month 1: Swing trade loss of R$1,000
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(), dec!(100), dec!(20.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(), dec!(100), dec!(10.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 1, 5).unwrap(),
+        dec!(100),
+        dec!(20.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(),
+        dec!(100),
+        dec!(10.00),
+        false,
+    )?;
 
     // Month 2: Day trade profit of R$500 (should NOT offset swing trade loss)
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(), dec!(100), dec!(15.00), true)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(), dec!(100), dec!(20.00), true)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(),
+        dec!(100),
+        dec!(15.00),
+        true,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(),
+        dec!(100),
+        dec!(20.00),
+        true,
+    )?;
 
     // Month 3: Swing trade profit of R$1,500 (should offset previous swing loss)
-    insert_transaction(db_path, stock_id, TransactionType::Buy,
-        NaiveDate::from_ymd_opt(2025, 3, 5).unwrap(), dec!(100), dec!(25.00), false)?;
-    insert_transaction(db_path, stock_id, TransactionType::Sell,
-        NaiveDate::from_ymd_opt(2025, 3, 20).unwrap(), dec!(100), dec!(40.00), false)?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Buy,
+        NaiveDate::from_ymd_opt(2025, 3, 5).unwrap(),
+        dec!(100),
+        dec!(25.00),
+        false,
+    )?;
+    insert_transaction(
+        db_path,
+        stock_id,
+        TransactionType::Sell,
+        NaiveDate::from_ymd_opt(2025, 3, 20).unwrap(),
+        dec!(100),
+        dec!(40.00),
+        false,
+    )?;
 
     let conn = open_db(Some(db_path.to_path_buf()))?;
 
@@ -597,7 +758,8 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
 
     // Month 2: Day trade profit - NO offset (different category)
     let calc_month2 = calculate_monthly_tax(&conn, 2025, 2)?;
-    let day_trade = calc_month2.iter()
+    let day_trade = calc_month2
+        .iter()
         .find(|c| c.category == TaxCategory::StockDayTrade)
         .expect("Day trade not found");
     assert_eq!(day_trade.net_profit, dec!(500.00));
@@ -607,7 +769,8 @@ fn test_loss_carryforward_separate_categories() -> Result<()> {
 
     // Month 3: Swing trade profit - should offset previous swing loss
     let calc_month3 = calculate_monthly_tax(&conn, 2025, 3)?;
-    let swing_trade = calc_month3.iter()
+    let swing_trade = calc_month3
+        .iter()
         .find(|c| c.category == TaxCategory::StockSwingTrade)
         .expect("Swing trade not found");
     assert_eq!(swing_trade.net_profit, dec!(1500.00));

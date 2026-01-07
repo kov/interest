@@ -33,7 +33,6 @@ struct Meta {
     symbol: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct Indicators {
     quote: Vec<Quote>,
@@ -129,8 +128,7 @@ pub async fn fetch_current_price(ticker: &str) -> Result<PriceData> {
 
     Ok(PriceData {
         ticker: ticker.to_string(),
-        price: Decimal::from_f64_retain(price)
-            .ok_or_else(|| anyhow!("Invalid price value"))?,
+        price: Decimal::from_f64_retain(price).ok_or_else(|| anyhow!("Invalid price value"))?,
         currency,
         timestamp: chrono::Utc::now(),
     })
@@ -241,17 +239,16 @@ pub async fn fetch_historical_prices(
             open: opens
                 .get(i)
                 .and_then(|&v| v)
-                .and_then(|v| Decimal::from_f64_retain(v)),
+                .and_then(Decimal::from_f64_retain),
             high: highs
                 .get(i)
                 .and_then(|&v| v)
-                .and_then(|v| Decimal::from_f64_retain(v)),
+                .and_then(Decimal::from_f64_retain),
             low: lows
                 .get(i)
                 .and_then(|&v| v)
-                .and_then(|v| Decimal::from_f64_retain(v)),
-            close: Decimal::from_f64_retain(close)
-                .ok_or_else(|| anyhow!("Invalid close price"))?,
+                .and_then(Decimal::from_f64_retain),
+            close: Decimal::from_f64_retain(close).ok_or_else(|| anyhow!("Invalid close price"))?,
             volume: volumes.get(i).and_then(|&v| v),
         });
     }
@@ -269,10 +266,7 @@ pub async fn fetch_company_name(ticker: &str) -> Result<String> {
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()?;
 
-    let url = format!(
-        "https://finance.yahoo.com/quote/{}",
-        symbol
-    );
+    let url = format!("https://finance.yahoo.com/quote/{}", symbol);
 
     let response = client
         .get(&url)
@@ -315,7 +309,9 @@ pub async fn fetch_company_name(ticker: &str) -> Result<String> {
         }
     }
 
-    Err(anyhow!("Could not extract company name from Yahoo Finance page"))
+    Err(anyhow!(
+        "Could not extract company name from Yahoo Finance page"
+    ))
 }
 
 #[cfg(test)]

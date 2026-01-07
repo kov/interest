@@ -232,7 +232,7 @@ async fn handle_import(file_path: &str, dry_run: bool) -> Result<()> {
 
                 // Detect asset type from ticker
                 let (normalized_ticker, notes_override) =
-                    importers::cei_excel::resolve_option_exercise_ticker(raw_tx, &asset_exists)?;
+                    importers::cei_excel::resolve_option_exercise_ticker(raw_tx, asset_exists)?;
                 let asset_type = db::AssetType::detect_from_ticker(&normalized_ticker)
                     .unwrap_or(db::AssetType::Stock);
 
@@ -1885,7 +1885,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
     let month: u32 = parts[0].parse().context("Invalid month number")?;
     let year: i32 = parts[1].parse().context("Invalid year")?;
 
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(anyhow::anyhow!("Month must be between 01 and 12"));
     }
 

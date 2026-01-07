@@ -17,16 +17,14 @@ fn create_workbook_with_header() -> Workbook {
     worksheet.set_name("Movimentação").unwrap();
 
     // Header row
-    let headers = vec![
-        "Entrada/Saída",
+    let headers = ["Entrada/Saída",
         "Data",
         "Movimentação",
         "Produto",
         "Instituição",
         "Quantidade",
         "Preço unitário",
-        "Valor da Operação",
-    ];
+        "Valor da Operação"];
 
     for (col, header) in headers.iter().enumerate() {
         worksheet.write_string(0, col as u16, *header).unwrap();
@@ -70,20 +68,28 @@ fn generate_13_ofertas_publicas() {
     }
 
     worksheet.write_string(1, 0, "06/11/2023").unwrap();
-    worksheet.write_string(1, 1, "AMBIPAR PARTICIPACOES E EMPREENDIMENTOS S/A").unwrap();
+    worksheet
+        .write_string(1, 1, "AMBIPAR PARTICIPACOES E EMPREENDIMENTOS S/A")
+        .unwrap();
     worksheet.write_string(1, 2, "OUTRO").unwrap();
     worksheet.write_string(1, 3, "Ambipar S.A. (P)").unwrap();
-    worksheet.write_string(1, 4, "XP INVESTIMENTOS CCTVM S/A").unwrap();
+    worksheet
+        .write_string(1, 4, "XP INVESTIMENTOS CCTVM S/A")
+        .unwrap();
     worksheet.write_number(1, 5, 1064.0).unwrap();
     worksheet.write_number(1, 6, 13.25).unwrap();
     worksheet.write_number(1, 7, 14098.0).unwrap();
     worksheet.write_string(1, 8, "AMBP3L").unwrap();
     worksheet.write_number(1, 9, 15.0).unwrap();
-    worksheet.write_string(1, 10, "Acionista compra até o LSP").unwrap();
+    worksheet
+        .write_string(1, 10, "Acionista compra até o LSP")
+        .unwrap();
     worksheet.write_number(1, 11, 1064.0).unwrap();
     worksheet.write_number(1, 12, 0.0).unwrap();
 
-    workbook.save("tests/data/13_ofertas_publicas.xlsx").unwrap();
+    workbook
+        .save("tests/data/13_ofertas_publicas.xlsx")
+        .unwrap();
     println!("✓ Created: 13_ofertas_publicas.xlsx");
 }
 
@@ -105,7 +111,9 @@ fn generate_12_desdobro_inference() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "20/11/2022").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "A1MD34 - ADVANCED MICRO DEVICES INC").unwrap();
+    worksheet
+        .write_string(1, 3, "A1MD34 - ADVANCED MICRO DEVICES INC")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 80.0).unwrap();
     worksheet.write_number(1, 6, 10.0).unwrap();
@@ -115,13 +123,17 @@ fn generate_12_desdobro_inference() {
     worksheet.write_string(2, 0, "Credito").unwrap();
     worksheet.write_string(2, 1, "22/11/2022").unwrap();
     worksheet.write_string(2, 2, "Desdobro").unwrap();
-    worksheet.write_string(2, 3, "A1MD34 - ADVANCED MICRO DEVICES INC").unwrap();
+    worksheet
+        .write_string(2, 3, "A1MD34 - ADVANCED MICRO DEVICES INC")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 560.0).unwrap();
     worksheet.write_string(2, 6, "").unwrap();
     worksheet.write_string(2, 7, "").unwrap();
 
-    workbook.save("tests/data/12_desdobro_inference.xlsx").unwrap();
+    workbook
+        .save("tests/data/12_desdobro_inference.xlsx")
+        .unwrap();
     println!("✓ Created: 12_desdobro_inference.xlsx");
 }
 
@@ -143,7 +155,9 @@ fn generate_14_atualizacao_inference() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "10/09/2020").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "BRCR11 - BTG PACTUAL CORP. OFFICE FUND").unwrap();
+    worksheet
+        .write_string(1, 3, "BRCR11 - BTG PACTUAL CORP. OFFICE FUND")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 378.0).unwrap();
     worksheet.write_number(1, 6, 10.0).unwrap();
@@ -153,13 +167,17 @@ fn generate_14_atualizacao_inference() {
     worksheet.write_string(2, 0, "Credito").unwrap();
     worksheet.write_string(2, 1, "14/09/2020").unwrap();
     worksheet.write_string(2, 2, "Atualização").unwrap();
-    worksheet.write_string(2, 3, "BRCR11 - BTG PACTUAL CORP. OFFICE FUND").unwrap();
+    worksheet
+        .write_string(2, 3, "BRCR11 - BTG PACTUAL CORP. OFFICE FUND")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 22.0).unwrap();
     worksheet.write_string(2, 6, "").unwrap();
     worksheet.write_string(2, 7, "").unwrap();
 
-    workbook.save("tests/data/14_atualizacao_inference.xlsx").unwrap();
+    workbook
+        .save("tests/data/14_atualizacao_inference.xlsx")
+        .unwrap();
     println!("✓ Created: 14_atualizacao_inference.xlsx");
 }
 
@@ -196,7 +214,9 @@ fn generate_10_duplicate_trades() {
     worksheet.write_number(2, 6, 10.0).unwrap();
     worksheet.write_number(2, 7, 100.0).unwrap();
 
-    workbook.save("tests/data/10_duplicate_trades.xlsx").unwrap();
+    workbook
+        .save("tests/data/10_duplicate_trades.xlsx")
+        .unwrap();
     println!("✓ Created: 10_duplicate_trades.xlsx");
 }
 
@@ -227,14 +247,18 @@ fn generate_11_bonus_auto_apply() {
     // Bonus 20% (Bonificacao em Ativos)
     worksheet.write_string(2, 0, "Credito").unwrap();
     worksheet.write_string(2, 1, "22/12/2021").unwrap();
-    worksheet.write_string(2, 2, "Bonificação em Ativos").unwrap();
+    worksheet
+        .write_string(2, 2, "Bonificação em Ativos")
+        .unwrap();
     worksheet.write_string(2, 3, "ITSA4 - ITAUSA PN").unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 20.0).unwrap();
     worksheet.write_string(2, 6, "").unwrap();
     worksheet.write_string(2, 7, "").unwrap();
 
-    workbook.save("tests/data/11_bonus_auto_apply.xlsx").unwrap();
+    workbook
+        .save("tests/data/11_bonus_auto_apply.xlsx")
+        .unwrap();
     println!("✓ Created: 11_bonus_auto_apply.xlsx");
 }
 
@@ -259,7 +283,9 @@ fn generate_01_basic_purchase_and_sale() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "10/01/2025").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "PETR4 - PETROBRAS PN").unwrap();
+    worksheet
+        .write_string(1, 3, "PETR4 - PETROBRAS PN")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 100.0).unwrap();
     worksheet.write_number(1, 6, 25.0).unwrap();
@@ -269,7 +295,9 @@ fn generate_01_basic_purchase_and_sale() {
     worksheet.write_string(2, 0, "Credito").unwrap();
     worksheet.write_string(2, 1, "15/02/2025").unwrap();
     worksheet.write_string(2, 2, "Compra").unwrap();
-    worksheet.write_string(2, 3, "PETR4 - PETROBRAS PN").unwrap();
+    worksheet
+        .write_string(2, 3, "PETR4 - PETROBRAS PN")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 50.0).unwrap();
     worksheet.write_number(2, 6, 30.0).unwrap();
@@ -279,13 +307,17 @@ fn generate_01_basic_purchase_and_sale() {
     worksheet.write_string(3, 0, "Debito").unwrap();
     worksheet.write_string(3, 1, "20/03/2025").unwrap();
     worksheet.write_string(3, 2, "Venda").unwrap();
-    worksheet.write_string(3, 3, "PETR4 - PETROBRAS PN").unwrap();
+    worksheet
+        .write_string(3, 3, "PETR4 - PETROBRAS PN")
+        .unwrap();
     worksheet.write_string(3, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(3, 5, 80.0).unwrap();
     worksheet.write_number(3, 6, 35.0).unwrap();
     worksheet.write_number(3, 7, 2800.0).unwrap();
 
-    workbook.save("tests/data/01_basic_purchase_sale.xlsx").unwrap();
+    workbook
+        .save("tests/data/01_basic_purchase_sale.xlsx")
+        .unwrap();
     println!("✓ Created: 01_basic_purchase_sale.xlsx");
 }
 
@@ -311,7 +343,9 @@ fn generate_02_term_contract_lifecycle() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "15/01/2025").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "Termo de Ação ANIM3 - ANIM3T - ANIM").unwrap();
+    worksheet
+        .write_string(1, 3, "Termo de Ação ANIM3 - ANIM3T - ANIM")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 200.0).unwrap();
     worksheet.write_number(1, 6, 10.0).unwrap();
@@ -321,7 +355,9 @@ fn generate_02_term_contract_lifecycle() {
     worksheet.write_string(2, 0, "Credito").unwrap();
     worksheet.write_string(2, 1, "28/02/2025").unwrap();
     worksheet.write_string(2, 2, "Liquidação Termo").unwrap();
-    worksheet.write_string(2, 3, "ANIM3 - ANIMA HOLDING").unwrap();
+    worksheet
+        .write_string(2, 3, "ANIM3 - ANIMA HOLDING")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 200.0).unwrap();
     worksheet.write_number(2, 6, 10.0).unwrap();
@@ -331,13 +367,17 @@ fn generate_02_term_contract_lifecycle() {
     worksheet.write_string(3, 0, "Debito").unwrap();
     worksheet.write_string(3, 1, "15/03/2025").unwrap();
     worksheet.write_string(3, 2, "Venda").unwrap();
-    worksheet.write_string(3, 3, "ANIM3 - ANIMA HOLDING").unwrap();
+    worksheet
+        .write_string(3, 3, "ANIM3 - ANIMA HOLDING")
+        .unwrap();
     worksheet.write_string(3, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(3, 5, 100.0).unwrap();
     worksheet.write_number(3, 6, 12.0).unwrap();
     worksheet.write_number(3, 7, 1200.0).unwrap();
 
-    workbook.save("tests/data/02_term_contract_lifecycle.xlsx").unwrap();
+    workbook
+        .save("tests/data/02_term_contract_lifecycle.xlsx")
+        .unwrap();
     println!("✓ Created: 02_term_contract_lifecycle.xlsx");
 }
 
@@ -360,7 +400,9 @@ fn generate_03_term_contract_sold_before_expiry() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "10/01/2025").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "Termo de Ação SHUL4 - SHUL4T - SHUL").unwrap();
+    worksheet
+        .write_string(1, 3, "Termo de Ação SHUL4 - SHUL4T - SHUL")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 150.0).unwrap();
     worksheet.write_number(1, 6, 8.0).unwrap();
@@ -370,13 +412,17 @@ fn generate_03_term_contract_sold_before_expiry() {
     worksheet.write_string(2, 0, "Debito").unwrap();
     worksheet.write_string(2, 1, "05/02/2025").unwrap();
     worksheet.write_string(2, 2, "Venda").unwrap();
-    worksheet.write_string(2, 3, "Termo de Ação SHUL4 - SHUL4T - SHUL").unwrap();
+    worksheet
+        .write_string(2, 3, "Termo de Ação SHUL4 - SHUL4T - SHUL")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 150.0).unwrap();
     worksheet.write_number(2, 6, 9.0).unwrap();
     worksheet.write_number(2, 7, 1350.0).unwrap();
 
-    workbook.save("tests/data/03_term_contract_sold.xlsx").unwrap();
+    workbook
+        .save("tests/data/03_term_contract_sold.xlsx")
+        .unwrap();
     println!("✓ Created: 03_term_contract_sold.xlsx");
 }
 
@@ -465,7 +511,9 @@ fn generate_05_reverse_split() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "10/01/2025").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "MGLU3 - MAGAZINE LUIZA").unwrap();
+    worksheet
+        .write_string(1, 3, "MGLU3 - MAGAZINE LUIZA")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 1000.0).unwrap();
     worksheet.write_number(1, 6, 2.0).unwrap();
@@ -475,7 +523,9 @@ fn generate_05_reverse_split() {
     worksheet.write_string(2, 0, "Debito").unwrap();
     worksheet.write_string(2, 1, "20/02/2025").unwrap();
     worksheet.write_string(2, 2, "Incorporação").unwrap();
-    worksheet.write_string(2, 3, "MGLU3 - MAGAZINE LUIZA").unwrap();
+    worksheet
+        .write_string(2, 3, "MGLU3 - MAGAZINE LUIZA")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 900.0).unwrap();
     worksheet.write_string(2, 6, "").unwrap();
@@ -485,7 +535,9 @@ fn generate_05_reverse_split() {
     worksheet.write_string(3, 0, "Debito").unwrap();
     worksheet.write_string(3, 1, "15/03/2025").unwrap();
     worksheet.write_string(3, 2, "Venda").unwrap();
-    worksheet.write_string(3, 3, "MGLU3 - MAGAZINE LUIZA").unwrap();
+    worksheet
+        .write_string(3, 3, "MGLU3 - MAGAZINE LUIZA")
+        .unwrap();
     worksheet.write_string(3, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(3, 5, 50.0).unwrap();
     worksheet.write_number(3, 6, 22.0).unwrap();
@@ -596,7 +648,9 @@ fn generate_07_capital_return() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "10/01/2025").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "MXRF11 - MAXI RENDA FII").unwrap();
+    worksheet
+        .write_string(1, 3, "MXRF11 - MAXI RENDA FII")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 100.0).unwrap();
     worksheet.write_number(1, 6, 10.0).unwrap();
@@ -606,7 +660,9 @@ fn generate_07_capital_return() {
     worksheet.write_string(2, 0, "Credito").unwrap();
     worksheet.write_string(2, 1, "15/02/2025").unwrap();
     worksheet.write_string(2, 2, "Amortização").unwrap();
-    worksheet.write_string(2, 3, "MXRF11 - MAXI RENDA FII").unwrap();
+    worksheet
+        .write_string(2, 3, "MXRF11 - MAXI RENDA FII")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 100.0).unwrap();
     worksheet.write_number(2, 6, 1.0).unwrap();
@@ -616,7 +672,9 @@ fn generate_07_capital_return() {
     worksheet.write_string(3, 0, "Credito").unwrap();
     worksheet.write_string(3, 1, "01/03/2025").unwrap();
     worksheet.write_string(3, 2, "Compra").unwrap();
-    worksheet.write_string(3, 3, "MXRF11 - MAXI RENDA FII").unwrap();
+    worksheet
+        .write_string(3, 3, "MXRF11 - MAXI RENDA FII")
+        .unwrap();
     worksheet.write_string(3, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(3, 5, 50.0).unwrap();
     worksheet.write_number(3, 6, 10.5).unwrap();
@@ -626,7 +684,9 @@ fn generate_07_capital_return() {
     worksheet.write_string(4, 0, "Debito").unwrap();
     worksheet.write_string(4, 1, "20/04/2025").unwrap();
     worksheet.write_string(4, 2, "Venda").unwrap();
-    worksheet.write_string(4, 3, "MXRF11 - MAXI RENDA FII").unwrap();
+    worksheet
+        .write_string(4, 3, "MXRF11 - MAXI RENDA FII")
+        .unwrap();
     worksheet.write_string(4, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(4, 5, 120.0).unwrap();
     worksheet.write_number(4, 6, 11.0).unwrap();
@@ -668,7 +728,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Credito").unwrap();
     worksheet.write_string(row, 1, "10/01/2025").unwrap();
     worksheet.write_string(row, 2, "Compra").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 200.0).unwrap();
     worksheet.write_number(row, 6, 40.0).unwrap();
@@ -678,7 +740,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Credito").unwrap();
     worksheet.write_string(row, 1, "25/01/2025").unwrap();
     worksheet.write_string(row, 2, "Compra").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 100.0).unwrap();
     worksheet.write_number(row, 6, 42.0).unwrap();
@@ -689,7 +753,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Credito").unwrap();
     worksheet.write_string(row, 1, "15/02/2025").unwrap();
     worksheet.write_string(row, 2, "Desdobro").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 300.0).unwrap();
     worksheet.write_string(row, 6, "").unwrap();
@@ -700,7 +766,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Debito").unwrap();
     worksheet.write_string(row, 1, "01/03/2025").unwrap();
     worksheet.write_string(row, 2, "Venda").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 300.0).unwrap();
     worksheet.write_number(row, 6, 22.0).unwrap();
@@ -711,7 +779,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Credito").unwrap();
     worksheet.write_string(row, 1, "15/03/2025").unwrap();
     worksheet.write_string(row, 2, "Compra").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 150.0).unwrap();
     worksheet.write_number(row, 6, 23.0).unwrap();
@@ -722,7 +792,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Credito").unwrap();
     worksheet.write_string(row, 1, "01/04/2025").unwrap();
     worksheet.write_string(row, 2, "Compra").unwrap();
-    worksheet.write_string(row, 3, "Termo de Ação BBAS3 - BBAS3T - BBAS").unwrap();
+    worksheet
+        .write_string(row, 3, "Termo de Ação BBAS3 - BBAS3T - BBAS")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 200.0).unwrap();
     worksheet.write_number(row, 6, 24.0).unwrap();
@@ -733,7 +805,9 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Credito").unwrap();
     worksheet.write_string(row, 1, "30/05/2025").unwrap();
     worksheet.write_string(row, 2, "Liquidação Termo").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 200.0).unwrap();
     worksheet.write_number(row, 6, 24.0).unwrap();
@@ -744,13 +818,17 @@ fn generate_08_complex_scenario() {
     worksheet.write_string(row, 0, "Debito").unwrap();
     worksheet.write_string(row, 1, "15/06/2025").unwrap();
     worksheet.write_string(row, 2, "Venda").unwrap();
-    worksheet.write_string(row, 3, "BBAS3 - BANCO DO BRASIL").unwrap();
+    worksheet
+        .write_string(row, 3, "BBAS3 - BANCO DO BRASIL")
+        .unwrap();
     worksheet.write_string(row, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(row, 5, 400.0).unwrap();
     worksheet.write_number(row, 6, 26.0).unwrap();
     worksheet.write_number(row, 7, 10400.0).unwrap();
 
-    workbook.save("tests/data/08_complex_scenario.xlsx").unwrap();
+    workbook
+        .save("tests/data/08_complex_scenario.xlsx")
+        .unwrap();
     println!("✓ Created: 08_complex_scenario.xlsx");
 }
 
@@ -774,7 +852,9 @@ fn generate_09_fi_infra() {
     worksheet.write_string(1, 0, "Credito").unwrap();
     worksheet.write_string(1, 1, "15/01/2025").unwrap();
     worksheet.write_string(1, 2, "Compra").unwrap();
-    worksheet.write_string(1, 3, "RZTR11 - RIO BRAVO RENDA CORPORATIVA INFRA").unwrap();
+    worksheet
+        .write_string(1, 3, "RZTR11 - RIO BRAVO RENDA CORPORATIVA INFRA")
+        .unwrap();
     worksheet.write_string(1, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(1, 5, 500.0).unwrap();
     worksheet.write_number(1, 6, 100.0).unwrap();
@@ -784,7 +864,9 @@ fn generate_09_fi_infra() {
     worksheet.write_string(2, 0, "Debito").unwrap();
     worksheet.write_string(2, 1, "20/03/2025").unwrap();
     worksheet.write_string(2, 2, "Venda").unwrap();
-    worksheet.write_string(2, 3, "RZTR11 - RIO BRAVO RENDA CORPORATIVA INFRA").unwrap();
+    worksheet
+        .write_string(2, 3, "RZTR11 - RIO BRAVO RENDA CORPORATIVA INFRA")
+        .unwrap();
     worksheet.write_string(2, 4, "XP INVESTIMENTOS").unwrap();
     worksheet.write_number(2, 5, 200.0).unwrap();
     worksheet.write_number(2, 6, 105.0).unwrap();

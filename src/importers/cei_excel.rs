@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use calamine::{open_workbook, Reader, Xlsx, Data, DataType};
+use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::path::Path;
@@ -12,19 +12,20 @@ use crate::db::models::{Transaction, TransactionType};
 #[derive(Debug, Clone)]
 pub struct RawTransaction {
     pub ticker: String,
-    pub transaction_type: String,  // "C", "V", "COMPRA", "VENDA", etc.
+    pub transaction_type: String, // "C", "V", "COMPRA", "VENDA", etc.
     pub trade_date: NaiveDate,
     pub quantity: Decimal,
     pub price: Decimal,
     pub fees: Decimal,
     pub total: Decimal,
-    pub market: Option<String>,  // "VISTA", "FRACIONÁRIO", etc.
+    pub market: Option<String>, // "VISTA", "FRACIONÁRIO", etc.
 }
 
 impl RawTransaction {
     /// Normalize ticker for fractional and term markets.
     pub fn normalized_ticker(&self) -> String {
-        let is_term = self.market
+        let is_term = self
+            .market
             .as_deref()
             .map(|m| m.to_uppercase().contains("TERMO"))
             .unwrap_or(false);
@@ -37,7 +38,8 @@ impl RawTransaction {
             return self.ticker[..self.ticker.len() - 1].to_string();
         }
 
-        let is_fractional = self.market
+        let is_fractional = self
+            .market
             .as_deref()
             .map(|m| m.to_uppercase().contains("FRACION"))
             .unwrap_or(false);
@@ -84,13 +86,13 @@ impl RawTransaction {
             asset_id,
             transaction_type,
             trade_date: self.trade_date,
-            settlement_date: None,  // Can be calculated as trade_date + 2 business days
+            settlement_date: None, // Can be calculated as trade_date + 2 business days
             quantity: self.quantity,
             price_per_unit: self.price,
             total_cost: self.total,
             fees: self.fees,
-            is_day_trade: false,  // Will be detected later
-            quota_issuance_date: None,  // For funds, can be filled in later
+            is_day_trade: false,       // Will be detected later
+            quota_issuance_date: None, // For funds, can be filled in later
             notes: self.market.clone(),
             source: "CEI".to_string(),
             created_at: chrono::Utc::now(),
@@ -197,8 +199,7 @@ pub fn parse_cei_excel<P: AsRef<Path>>(file_path: P) -> Result<Vec<RawTransactio
     let path = file_path.as_ref();
     info!("Parsing CEI Excel file: {:?}", path);
 
-    let mut workbook: Xlsx<_> = open_workbook(path)
-        .context("Failed to open Excel file")?;
+    let mut workbook: Xlsx<_> = open_workbook(path).context("Failed to open Excel file")?;
 
     // Try to find the "Negociação de Ativos" sheet or similar
     let sheet_name = find_trading_sheet(&workbook)?;
@@ -216,12 +217,17 @@ pub fn parse_cei_excel<P: AsRef<Path>>(file_path: P) -> Result<Vec<RawTransactio
     // Scan for header row (look for key column names)
     for (idx, row) in range.rows().enumerate() {
         // Check if this row looks like a header
-        let row_text = row.iter()
+        let row_text = row
+            .iter()
             .map(|cell| cell.to_string().to_lowercase())
             .collect::<Vec<_>>()
             .join(" ");
 
-        if row_text.contains("data") && (row_text.contains("ticker") || row_text.contains("código") || row_text.contains("produto")) {
+        if row_text.contains("data")
+            && (row_text.contains("ticker")
+                || row_text.contains("código")
+                || row_text.contains("produto"))
+        {
             header_row_idx = Some(idx);
             let mapping = ColumnMapping::from_header(row);
 
@@ -235,13 +241,14 @@ pub fn parse_cei_excel<P: AsRef<Path>>(file_path: P) -> Result<Vec<RawTransactio
         }
     }
 
-    let header_idx = header_row_idx.ok_or_else(|| anyhow!("Could not find header row with required columns"))?;
+    let header_idx =
+        header_row_idx.ok_or_else(|| anyhow!("Could not find header row with required columns"))?;
     let mapping = column_mapping.ok_or_else(|| anyhow!("Could not create valid column mapping"))?;
 
     // Parse data rows (skip header and any rows before it)
     for (idx, row) in range.rows().enumerate() {
         if idx <= header_idx {
-            continue;  // Skip header and rows before it
+            continue; // Skip header and rows before it
         }
 
         // Skip empty rows
@@ -293,27 +300,37 @@ fn find_trading_sheet(workbook: &Xlsx<std::io::BufReader<std::fs::File>>) -> Res
 /// Parse a single row into a RawTransaction
 fn parse_row(row: &[Data], mapping: &ColumnMapping) -> Result<Option<RawTransaction>> {
     // Get ticker - if empty, skip row
-    let ticker_cell = row.get(mapping.ticker.unwrap()).ok_or_else(|| anyhow!("Missing ticker column"))?;
+    let ticker_cell = row
+        .get(mapping.ticker.unwrap())
+        .ok_or_else(|| anyhow!("Missing ticker column"))?;
     let ticker = ticker_cell.to_string().trim().to_uppercase();
 
     if ticker.is_empty() {
-        return Ok(None);  // Skip empty rows
+        return Ok(None); // Skip empty rows
     }
 
     // Parse date
-    let date_cell = row.get(mapping.date.unwrap()).ok_or_else(|| anyhow!("Missing date column"))?;
+    let date_cell = row
+        .get(mapping.date.unwrap())
+        .ok_or_else(|| anyhow!("Missing date column"))?;
     let trade_date = parse_date(date_cell)?;
 
     // Parse transaction type
-    let type_cell = row.get(mapping.transaction_type.unwrap()).ok_or_else(|| anyhow!("Missing transaction type"))?;
+    let type_cell = row
+        .get(mapping.transaction_type.unwrap())
+        .ok_or_else(|| anyhow!("Missing transaction type"))?;
     let transaction_type = type_cell.to_string().trim().to_uppercase();
 
     // Parse quantity
-    let qty_cell = row.get(mapping.quantity.unwrap()).ok_or_else(|| anyhow!("Missing quantity"))?;
+    let qty_cell = row
+        .get(mapping.quantity.unwrap())
+        .ok_or_else(|| anyhow!("Missing quantity"))?;
     let quantity = parse_decimal(qty_cell)?;
 
     // Parse price
-    let price_cell = row.get(mapping.price.unwrap()).ok_or_else(|| anyhow!("Missing price"))?;
+    let price_cell = row
+        .get(mapping.price.unwrap())
+        .ok_or_else(|| anyhow!("Missing price"))?;
     let price = parse_decimal(price_cell)?;
 
     // Parse total (or calculate if not present)
@@ -419,8 +436,7 @@ where
                     .unwrap_or_else(|| "Exercício de opção".to_string());
                 notes_override = Some(format!(
                     "{} (exercício de opção via {})",
-                    market_note,
-                    raw_tx.ticker
+                    market_note, raw_tx.ticker
                 ));
                 normalized_ticker = resolved;
             }
@@ -434,18 +450,19 @@ where
 fn parse_decimal(cell: &Data) -> Result<Decimal> {
     match cell {
         Data::Int(i) => Ok(Decimal::from(*i)),
-        Data::Float(f) => Decimal::from_f64_retain(*f)
-            .ok_or_else(|| anyhow!("Invalid decimal: {}", f)),
+        Data::Float(f) => {
+            Decimal::from_f64_retain(*f).ok_or_else(|| anyhow!("Invalid decimal: {}", f))
+        }
         _ => {
             // Try parsing as string
-            let text = cell.to_string()
+            let text = cell
+                .to_string()
                 .replace("R$", "")
                 .replace(" ", "")
-                .replace(".", "")  // Remove thousand separators
-                .replace(",", ".");  // Replace decimal comma with dot
+                .replace(".", "") // Remove thousand separators
+                .replace(",", "."); // Replace decimal comma with dot
 
-            Decimal::from_str(&text)
-                .context("Failed to parse decimal")
+            Decimal::from_str(&text).context("Failed to parse decimal")
         }
     }
 }
@@ -545,6 +562,9 @@ mod tests {
         };
 
         assert!(tx.is_option_exercise());
-        assert_eq!(tx.option_exercise_underlying_base(), Some("ITSA".to_string()));
+        assert_eq!(
+            tx.option_exercise_underlying_base(),
+            Some("ITSA".to_string())
+        );
     }
 }

@@ -14,12 +14,13 @@ pub fn parse_cei_csv<P: AsRef<Path>>(file_path: P) -> Result<Vec<RawTransaction>
     info!("Parsing CEI CSV file: {:?}", path);
 
     let mut reader = ReaderBuilder::new()
-        .delimiter(b';')  // Brazilian CSV often uses semicolon
-        .flexible(true)   // Allow variable number of columns
+        .delimiter(b';') // Brazilian CSV often uses semicolon
+        .flexible(true) // Allow variable number of columns
         .from_path(path)
         .context("Failed to open CSV file")?;
 
-    let headers = reader.headers()
+    let headers = reader
+        .headers()
         .context("Failed to read CSV headers")?
         .clone();
 
@@ -49,7 +50,10 @@ pub fn parse_cei_csv<P: AsRef<Path>>(file_path: P) -> Result<Vec<RawTransaction>
         }
     }
 
-    info!("Successfully parsed {} transactions from CSV", transactions.len());
+    info!(
+        "Successfully parsed {} transactions from CSV",
+        transactions.len()
+    );
     Ok(transactions)
 }
 
@@ -79,14 +83,17 @@ fn find_columns(headers: &csv::StringRecord) -> Result<CsvColumnMapping> {
         let text = header.to_lowercase();
 
         // Date
-        if text.contains("data") {
-            if text.contains("negó") || text.contains("nego") || date_idx.is_none() {
+        if text.contains("data")
+            && (text.contains("negó") || text.contains("nego") || date_idx.is_none()) {
                 date_idx = Some(idx);
             }
-        }
 
         // Ticker
-        if text.contains("código") || text.contains("codigo") || text.contains("ticker") || text.contains("produto") {
+        if text.contains("código")
+            || text.contains("codigo")
+            || text.contains("ticker")
+            || text.contains("produto")
+        {
             ticker_idx = Some(idx);
         }
 
@@ -196,7 +203,8 @@ fn parse_csv_row(
     };
 
     // Market (optional)
-    let market = mapping.market
+    let market = mapping
+        .market
         .and_then(|idx| record.get(idx))
         .map(|s| s.to_string());
 
@@ -234,8 +242,8 @@ fn parse_csv_decimal(text: &str) -> Result<Decimal> {
     let cleaned = text
         .replace("R$", "")
         .replace(" ", "")
-        .replace(".", "")   // Remove thousand separators
-        .replace(",", ".");  // Replace decimal comma with dot
+        .replace(".", "") // Remove thousand separators
+        .replace(",", "."); // Replace decimal comma with dot
 
     Decimal::from_str(&cleaned).context("Failed to parse decimal")
 }

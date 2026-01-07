@@ -2,8 +2,8 @@ use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-use crate::db::{Transaction, TransactionType};
 use crate::db::models::AssetType;
+use crate::db::{Transaction, TransactionType};
 
 /// Cost basis result for a sale
 #[derive(Debug, Clone)]

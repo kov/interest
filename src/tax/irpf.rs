@@ -41,10 +41,7 @@ pub struct AnnualTaxReport {
 }
 
 /// Generate annual IRPF report for a year
-pub fn generate_annual_report(
-    conn: &Connection,
-    year: i32,
-) -> Result<AnnualTaxReport> {
+pub fn generate_annual_report(conn: &Connection, year: i32) -> Result<AnnualTaxReport> {
     let mut monthly_summaries = Vec::new();
     let mut annual_total_sales = Decimal::ZERO;
     let mut annual_total_profit = Decimal::ZERO;
@@ -79,7 +76,8 @@ pub fn generate_annual_report(
                 month_loss += net_pl.abs();
 
                 // Track losses for carryforward
-                let loss_entry = accumulated_losses.entry(calc.category.clone())
+                let loss_entry = accumulated_losses
+                    .entry(calc.category.clone())
                     .or_insert(Decimal::ZERO);
                 *loss_entry += net_pl.abs();
             }

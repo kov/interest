@@ -1,7 +1,7 @@
 // Pricing module - Yahoo Finance and Brapi.dev API clients
 
-pub mod yahoo;
 pub mod brapi;
+pub mod yahoo;
 
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
@@ -44,7 +44,11 @@ impl PriceFetcher {
             if let Some(entry) = cache.get(ticker) {
                 let age = Utc::now().signed_duration_since(entry.timestamp);
                 if age < Duration::hours(self.cache_ttl_hours) {
-                    debug!("Using cached price for {} (age: {}h)", ticker, age.num_hours());
+                    debug!(
+                        "Using cached price for {} (age: {}h)",
+                        ticker,
+                        age.num_hours()
+                    );
                     return Ok(entry.price);
                 }
             }
@@ -70,7 +74,8 @@ impl PriceFetcher {
             Err(e) => {
                 // Fallback to Brapi.dev
                 info!("Yahoo Finance failed, trying Brapi.dev: {}", e);
-                let (brapi_data, _, _) = brapi::fetch_quote(ticker, false).await
+                let (brapi_data, _, _) = brapi::fetch_quote(ticker, false)
+                    .await
                     .context("Both Yahoo Finance and Brapi.dev failed")?;
 
                 // Cache the price

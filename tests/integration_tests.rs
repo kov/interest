@@ -14,16 +14,16 @@ use chrono::Utc;
 use interest::corporate_actions::{apply_corporate_action, get_unapplied_actions};
 use interest::db::models::{Asset, AssetType, Transaction, TransactionType};
 use interest::db::{init_database, open_db, upsert_asset};
-use interest::importers::movimentacao_excel::parse_movimentacao_excel;
+use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::importers::import_movimentacao_entries;
+use interest::importers::movimentacao_excel::parse_movimentacao_excel;
 use interest::importers::movimentacao_import::ImportStats;
 use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
-use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::tax::cost_basis::AverageCostMatcher;
 use interest::term_contracts::process_term_liquidations;
+use rusqlite::Connection;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use rusqlite::Connection;
 use std::str::FromStr;
 use tempfile::TempDir;
 
@@ -90,12 +90,12 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
         ValueRef::Text(bytes) => {
             let s = std::str::from_utf8(bytes)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
         }
         ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        ValueRef::Real(f) => {
+            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
         _ => Err(rusqlite::Error::InvalidColumnType(
             idx,
             "decimal".to_string(),
@@ -202,7 +202,10 @@ fn test_01_basic_purchase_and_sale() -> Result<()> {
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(2800));
-    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
+    assert_eq!(
+        sale_result.profit_loss,
+        sale_result.sale_total - expected_cost_basis
+    );
 
     // Verify remaining quantity
     assert_eq!(avg.remaining_quantity(), dec!(70)); // 150 - 80
@@ -261,7 +264,11 @@ fn test_09_duplicate_trades_not_deduped() -> Result<()> {
     assert_eq!(stats.imported_trades, 2);
 
     let transactions = get_transactions(&conn, "DUPL3")?;
-    assert_eq!(transactions.len(), 2, "Both duplicate trades should be imported");
+    assert_eq!(
+        transactions.len(),
+        2,
+        "Both duplicate trades should be imported"
+    );
     Ok(())
 }
 
@@ -272,7 +279,8 @@ fn test_10_no_reimport_of_old_data() -> Result<()> {
     let stats_first = import_movimentacao_with_state(&conn, "tests/data/10_duplicate_trades.xlsx")?;
     assert_eq!(stats_first.imported_trades, 2);
 
-    let stats_second = import_movimentacao_with_state(&conn, "tests/data/10_duplicate_trades.xlsx")?;
+    let stats_second =
+        import_movimentacao_with_state(&conn, "tests/data/10_duplicate_trades.xlsx")?;
     assert_eq!(stats_second.imported_trades, 0);
     assert_eq!(stats_second.skipped_trades_old, 2);
 
@@ -363,7 +371,11 @@ fn test_04_stock_split() -> Result<()> {
 
     // Before adjustments: should have 4 transactions (buy, split, buy, sell)
     // Split entry is not imported as a transaction, only as corporate action
-    assert_eq!(transactions.len(), 3, "Should have 3 transactions (buy, buy, sell)");
+    assert_eq!(
+        transactions.len(),
+        3,
+        "Should have 3 transactions (buy, buy, sell)"
+    );
 
     // Manually create the split corporate action
     let asset_id = transactions[0].asset_id;
@@ -412,14 +424,16 @@ fn test_04_stock_split() -> Result<()> {
 
     let sale_result = avg.match_sale(&adjusted_txs[2])?;
 
-    let expected_avg =
-        (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
+    let expected_avg = (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
         / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
     let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(6750));
-    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
+    assert_eq!(
+        sale_result.profit_loss,
+        sale_result.sale_total - expected_cost_basis
+    );
 
     // Remaining quantity
     assert_eq!(avg.remaining_quantity(), dec!(100));
@@ -535,13 +549,15 @@ fn test_06_multiple_splits() -> Result<()> {
 
     let sale_result = avg.match_sale(&adjusted_txs[2])?;
 
-    let expected_avg =
-        (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
+    let expected_avg = (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
         / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
     let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
-    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
+    assert_eq!(
+        sale_result.profit_loss,
+        sale_result.sale_total - expected_cost_basis
+    );
 
     assert_eq!(avg.remaining_quantity(), dec!(50));
 
@@ -561,11 +577,7 @@ fn test_08_complex_scenario() -> Result<()> {
     assert_eq!(term_txs.len(), 1, "Should have 1 term contract purchase");
     // We expect: 2 initial buys + split entry + 1 sell + 1 buy + liquidation + 1 sell = 7
     // But split entry might not be imported as a transaction, so we get 6
-    assert_eq!(
-        base_txs.len(),
-        6,
-        "Should have 6 base transactions"
-    );
+    assert_eq!(base_txs.len(), 6, "Should have 6 base transactions");
 
     // Create and apply split (1:2) on 2025-02-15
     let asset_id = base_txs[0].asset_id;
@@ -622,7 +634,10 @@ fn test_08_complex_scenario() -> Result<()> {
     let avg_before_sale2 = avg.average_cost();
     let sale2 = avg.match_sale(&adjusted_txs[5])?;
 
-    assert_eq!(sale2.cost_basis, avg_before_sale2 * adjusted_txs[5].quantity);
+    assert_eq!(
+        sale2.cost_basis,
+        avg_before_sale2 * adjusted_txs[5].quantity
+    );
     assert_eq!(sale2.sale_total, dec!(10400));
     assert_eq!(sale2.profit_loss, sale2.sale_total - sale2.cost_basis);
     assert!((avg.average_cost() - avg_before_sale2).abs() <= tolerance);
@@ -768,14 +783,16 @@ fn test_07_capital_return() -> Result<()> {
 
     let sale_result = avg.match_sale(&adjusted_txs[2])?; // Sell 120
 
-    let expected_avg =
-        (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
+    let expected_avg = (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
         / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
     let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(1320));
-    assert_eq!(sale_result.profit_loss, sale_result.sale_total - expected_cost_basis);
+    assert_eq!(
+        sale_result.profit_loss,
+        sale_result.sale_total - expected_cost_basis
+    );
 
     assert_eq!(avg.remaining_quantity(), dec!(30));
 
@@ -815,8 +832,8 @@ fn test_10_day_trade_detection() -> Result<()> {
     // Verify day trade flag
     let transactions = get_transactions(&conn, "VALE3")?;
     assert_eq!(transactions.len(), 2);
-    assert_eq!(transactions[0].is_day_trade, false); // Buy
-    assert_eq!(transactions[1].is_day_trade, true);  // Sell (day trade)
+    assert!(!transactions[0].is_day_trade); // Buy
+    assert!(transactions[1].is_day_trade); // Sell (day trade)
 
     // Day trades should result in zero position
     let (quantity, _) = calculate_position(&transactions);

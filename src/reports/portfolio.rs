@@ -235,7 +235,7 @@ fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transa
                 quota_issuance_date, notes, source, created_at
          FROM transactions
          WHERE asset_id = ?1
-         ORDER BY trade_date ASC, id ASC"
+         ORDER BY trade_date ASC, id ASC",
     )?;
 
     let transactions = stmt
@@ -275,7 +275,7 @@ fn get_asset_transactions_before(
                 quota_issuance_date, notes, source, created_at
          FROM transactions
          WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC, id ASC"
+         ORDER BY trade_date ASC, id ASC",
     )?;
 
     let transactions = stmt
@@ -339,7 +339,13 @@ fn build_rename_carryover_transaction(
 
     let mut quantity = position.quantity;
     let mut total_cost = position.total_cost;
-    apply_actions_to_carryover(conn, target_asset_id, effective_date, &mut quantity, &mut total_cost)?;
+    apply_actions_to_carryover(
+        conn,
+        target_asset_id,
+        effective_date,
+        &mut quantity,
+        &mut total_cost,
+    )?;
     if quantity <= Decimal::ZERO {
         return Ok(None);
     }
@@ -403,8 +409,8 @@ fn apply_actions_to_carryover(
         .collect::<Result<Vec<_>, _>>()?;
 
     for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
-        let action_type = CorporateActionType::from_str(&action_type_str)
-            .unwrap_or(CorporateActionType::Split);
+        let action_type =
+            CorporateActionType::from_str(&action_type_str).unwrap_or(CorporateActionType::Split);
         let ratio_from = Decimal::from(ratio_from);
         let ratio_to = Decimal::from(ratio_to);
 
@@ -445,7 +451,7 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
     Err(rusqlite::Error::InvalidColumnType(
         idx,
         "quantity".to_string(),
-        rusqlite::types::Type::Null
+        rusqlite::types::Type::Null,
     ))
 }
 
@@ -455,7 +461,9 @@ pub fn calculate_allocation(report: &PortfolioReport) -> HashMap<AssetType, (Dec
 
     for position in &report.positions {
         let value = position.current_value.unwrap_or(position.total_cost);
-        let entry = allocation.entry(position.asset.asset_type.clone()).or_insert((Decimal::ZERO, Decimal::ZERO));
+        let entry = allocation
+            .entry(position.asset.asset_type.clone())
+            .or_insert((Decimal::ZERO, Decimal::ZERO));
         entry.0 += value;
     }
 

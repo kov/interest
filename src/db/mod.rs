@@ -4,18 +4,18 @@ pub mod models;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use std::sync::OnceLock;
-use rusqlite::{Connection, params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::OnceLock;
 use tracing::info;
 
-pub use models::{
-    Asset, AssetType, Transaction, TransactionType,
-    CorporateAction, CorporateActionType, PriceHistory, IncomeEvent, IncomeEventType,
-};
 use crate::term_contracts;
+pub use models::{
+    Asset, AssetType, CorporateAction, CorporateActionType, IncomeEvent, IncomeEventType,
+    PriceHistory, Transaction, TransactionType,
+};
 
 /// Get the default database path (~/.interest/data.db)
 pub fn get_default_db_path() -> Result<PathBuf> {
@@ -23,8 +23,7 @@ pub fn get_default_db_path() -> Result<PathBuf> {
     let interest_dir = PathBuf::from(home).join(".interest");
 
     // Create directory if it doesn't exist
-    std::fs::create_dir_all(&interest_dir)
-        .context("Failed to create .interest directory")?;
+    std::fs::create_dir_all(&interest_dir).context("Failed to create .interest directory")?;
 
     Ok(interest_dir.join("data.db"))
 }
@@ -32,8 +31,7 @@ pub fn get_default_db_path() -> Result<PathBuf> {
 /// Open database connection
 pub fn open_db(db_path: Option<PathBuf>) -> Result<Connection> {
     let path = db_path.unwrap_or(get_default_db_path()?);
-    let conn = Connection::open(&path)
-        .context(format!("Failed to open database at {:?}", path))?;
+    let conn = Connection::open(&path).context(format!("Failed to open database at {:?}", path))?;
 
     // Enable foreign keys
     conn.execute("PRAGMA foreign_keys = ON", [])
@@ -73,9 +71,7 @@ pub fn upsert_asset(
 ) -> Result<i64> {
     // Try to find existing asset
     let mut stmt = conn.prepare("SELECT id FROM assets WHERE ticker = ?1")?;
-    let existing: Option<i64> = stmt
-        .query_row([ticker], |row| row.get(0))
-        .optional()?;
+    let existing: Option<i64> = stmt.query_row([ticker], |row| row.get(0)).optional()?;
 
     if let Some(id) = existing {
         return Ok(id);
@@ -135,8 +131,7 @@ pub fn get_asset_position_before_date(
 
     while let Some(row) = rows.next()? {
         let tx_type: String = row.get(0)?;
-        let quantity = get_decimal_value(row, 1)
-            .context("Failed to parse transaction quantity")?;
+        let quantity = get_decimal_value(row, 1).context("Failed to parse transaction quantity")?;
         match TransactionType::from_str(&tx_type) {
             Some(TransactionType::Buy) => position += quantity,
             Some(TransactionType::Sell) => position -= quantity,
@@ -284,7 +279,9 @@ pub fn rename_mappings() -> &'static [RenameMapping] {
 }
 
 pub fn is_rename_source_ticker(ticker: &str) -> bool {
-    rename_mappings().iter().any(|m| m.from.eq_ignore_ascii_case(ticker))
+    rename_mappings()
+        .iter()
+        .any(|m| m.from.eq_ignore_ascii_case(ticker))
 }
 
 pub fn rename_sources_for(ticker: &str) -> Vec<(&'static str, NaiveDate)> {
@@ -312,20 +309,22 @@ pub fn get_latest_price(conn: &Connection, asset_id: i64) -> Result<Option<Price
          LIMIT 1"
     )?;
 
-    let result = stmt.query_row([asset_id], |row| {
-        Ok(PriceHistory {
-            id: Some(row.get(0)?),
-            asset_id: row.get(1)?,
-            price_date: row.get(2)?,
-            close_price: get_decimal_value(row, 3)?,
-            open_price: get_optional_decimal_value(row, 4)?,
-            high_price: get_optional_decimal_value(row, 5)?,
-            low_price: get_optional_decimal_value(row, 6)?,
-            volume: row.get(7)?,
-            source: row.get(8)?,
-            created_at: row.get(9)?,
+    let result = stmt
+        .query_row([asset_id], |row| {
+            Ok(PriceHistory {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                price_date: row.get(2)?,
+                close_price: get_decimal_value(row, 3)?,
+                open_price: get_optional_decimal_value(row, 4)?,
+                high_price: get_optional_decimal_value(row, 5)?,
+                low_price: get_optional_decimal_value(row, 6)?,
+                volume: row.get(7)?,
+                source: row.get(8)?,
+                created_at: row.get(9)?,
+            })
         })
-    }).optional()?;
+        .optional()?;
 
     Ok(result)
 }
@@ -338,22 +337,25 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
         ValueRef::Text(bytes) => {
             let s = std::str::from_utf8(bytes)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
         }
         ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        ValueRef::Real(f) => {
+            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }
         _ => Err(rusqlite::Error::InvalidColumnType(
             idx,
             "decimal".to_string(),
-            rusqlite::types::Type::Null
-        ))
+            rusqlite::types::Type::Null,
+        )),
     }
 }
 
 /// Helper to read optional Decimal from SQLite
-fn get_optional_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Option<Decimal>, rusqlite::Error> {
+fn get_optional_decimal_value(
+    row: &rusqlite::Row,
+    idx: usize,
+) -> Result<Option<Decimal>, rusqlite::Error> {
     use rusqlite::types::ValueRef;
 
     match row.get_ref(idx)? {
@@ -369,7 +371,7 @@ fn get_optional_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Option<
         ValueRef::Real(f) => Decimal::try_from(f)
             .map(Some)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
-        _ => Ok(None)
+        _ => Ok(None),
     }
 }
 
@@ -407,10 +409,9 @@ pub fn corporate_action_exists(
          WHERE asset_id = ?1 AND ex_date = ?2 AND action_type = ?3",
     )?;
 
-    let count: i64 = stmt.query_row(
-        params![asset_id, ex_date, action_type.as_str()],
-        |row| row.get(0),
-    )?;
+    let count: i64 = stmt.query_row(params![asset_id, ex_date, action_type.as_str()], |row| {
+        row.get(0)
+    })?;
 
     Ok(count > 0)
 }
@@ -442,7 +443,7 @@ pub fn insert_income_event(conn: &Connection, event: &IncomeEvent) -> Result<i64
 /// Get all assets (for batch price updates)
 pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ticker, asset_type, name, created_at, updated_at FROM assets ORDER BY ticker"
+        "SELECT id, ticker, asset_type, name, created_at, updated_at FROM assets ORDER BY ticker",
     )?;
 
     let assets = stmt

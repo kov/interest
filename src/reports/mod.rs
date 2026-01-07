@@ -2,4 +2,4 @@
 
 pub mod portfolio;
 
-pub use portfolio::{calculate_portfolio, calculate_allocation};
+pub use portfolio::{calculate_allocation, calculate_portfolio};

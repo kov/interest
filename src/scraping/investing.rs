@@ -47,16 +47,21 @@ impl InvestingScraper {
     ///
     /// Returns a list of corporate actions found on the page.
     /// URL must be the full investing.com splits/reverse-splits page URL.
-    pub fn scrape_corporate_actions(&self, url: &str, original_url: &str) -> Result<Vec<CorporateAction>> {
+    pub fn scrape_corporate_actions(
+        &self,
+        url: &str,
+        original_url: &str,
+    ) -> Result<Vec<CorporateAction>> {
         info!("Scraping corporate actions from: {}", url);
 
         // Create a new tab
-        let tab = self.browser.new_tab()
+        let tab = self
+            .browser
+            .new_tab()
             .context("Failed to create new browser tab")?;
 
         // Navigate to the URL
-        tab.navigate_to(url)
-            .context("Failed to navigate to URL")?;
+        tab.navigate_to(url).context("Failed to navigate to URL")?;
 
         // Wait for the page to load and Cloudflare to complete
         info!("Waiting for page to load (Cloudflare check)...");
@@ -70,7 +75,8 @@ impl InvestingScraper {
         std::thread::sleep(Duration::from_secs(15));
 
         // Try to detect if we're still on the challenge page
-        let html_check = tab.get_content()
+        let html_check = tab
+            .get_content()
             .context("Failed to get page content for challenge check")?;
 
         if html_check.contains("Just a moment") || html_check.contains("Verify you are human") {
@@ -80,15 +86,16 @@ impl InvestingScraper {
 
         // Now try to find the table - try multiple selectors
         info!("Looking for splits table...");
-        let table_found = tab.wait_for_element_with_custom_timeout("table", Duration::from_secs(20)).is_ok();
+        let table_found = tab
+            .wait_for_element_with_custom_timeout("table", Duration::from_secs(20))
+            .is_ok();
 
         if !table_found {
             warn!("No table element found, will attempt to extract and check content");
         }
 
         // Extract the table HTML
-        let html = tab.get_content()
-            .context("Failed to get page content")?;
+        let html = tab.get_content().context("Failed to get page content")?;
 
         // Debug: save HTML to file for inspection
         if let Err(e) = std::fs::write("/tmp/investing_page.html", &html) {
@@ -116,22 +123,25 @@ impl InvestingScraper {
         info!("Parsing HTML for splits data");
 
         // Extract the __NEXT_DATA__ JSON from the page
-        let json_start = html.find("__NEXT_DATA__")
+        let json_start = html
+            .find("__NEXT_DATA__")
             .context("Could not find __NEXT_DATA__ in page")?;
 
-        let json_content_start = html[json_start..].find(">")
+        let json_content_start = html[json_start..]
+            .find(">")
             .context("Could not find start of JSON data")?;
 
         let json_start_pos = json_start + json_content_start + 1;
 
-        let json_end = html[json_start_pos..].find("</script>")
+        let json_end = html[json_start_pos..]
+            .find("</script>")
             .context("Could not find end of JSON data")?;
 
         let json_str = &html[json_start_pos..json_start_pos + json_end];
 
         // Parse the JSON
-        let json: serde_json::Value = serde_json::from_str(json_str)
-            .context("Failed to parse JSON data")?;
+        let json: serde_json::Value =
+            serde_json::from_str(json_str).context("Failed to parse JSON data")?;
 
         // Navigate to the splits array: props.pageProps.state.historicalDataSplitsStore.splits
         let splits = json
@@ -147,7 +157,8 @@ impl InvestingScraper {
 
         for split in splits {
             // Parse date from ISO 8601 format
-            let date_str = split.get("date")
+            let date_str = split
+                .get("date")
                 .and_then(|d| d.as_str())
                 .context("Missing or invalid date field")?;
 
@@ -158,7 +169,8 @@ impl InvestingScraper {
             // Parse ratio - investing.com can use either integer or decimal
             // ratio >= 1 means forward split (e.g., 8 = 1:8 split, 1.05 = 1:1.05 split)
             // ratio < 1 means reverse split (e.g., 0.125 = 1:8 reverse split)
-            let ratio_value = split.get("ratio")
+            let ratio_value = split
+                .get("ratio")
                 .and_then(|r| r.as_f64())
                 .context("Missing or invalid ratio field")?;
 
@@ -188,12 +200,21 @@ impl InvestingScraper {
                 ratio_to,
                 applied: false,
                 source: "INVESTING.COM".to_string(),
-                notes: Some(format!("Scraped from investing.com (ratio: {})", ratio_value)),
+                notes: Some(format!(
+                    "Scraped from investing.com (ratio: {})",
+                    ratio_value
+                )),
                 created_at: chrono::Utc::now(),
             };
 
             actions.push(action);
-            info!("Found split: {} {}:{} on {}", action_type.as_str(), ratio_from, ratio_to, date);
+            info!(
+                "Found split: {} {}:{} on {}",
+                action_type.as_str(),
+                ratio_from,
+                ratio_to,
+                date
+            );
         }
 
         if actions.is_empty() {
@@ -219,7 +240,10 @@ impl InvestingScraper {
             .replace(".", "")
             .replace(",", "");
 
-        format!("https://br.investing.com/equities/{}-sao-historical-data-splits", slug)
+        format!(
+            "https://br.investing.com/equities/{}-sao-historical-data-splits",
+            slug
+        )
     }
 }
 
@@ -235,10 +259,7 @@ mod tests {
 
     #[test]
     fn test_build_splits_url() {
-        let url = InvestingScraper::build_splits_url(
-            "A1MD34",
-            "Advanced Micro Devices Inc"
-        );
+        let url = InvestingScraper::build_splits_url("A1MD34", "Advanced Micro Devices Inc");
         assert_eq!(
             url,
             "https://br.investing.com/equities/advanced-micro-devices-inc-sao-historical-data-splits"

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use calamine::{open_workbook, Reader, Xlsx, DataType};
+use calamine::{open_workbook, DataType, Reader, Xlsx};
 use std::path::Path;
 use tracing::info;
 
@@ -35,16 +35,16 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> Result<FileType> {
 
     // For Excel files, check sheet names
     if matches!(extension.as_str(), "xlsx" | "xls") {
-        let workbook: Xlsx<_> = open_workbook(path)
-            .context("Failed to open Excel file for type detection")?;
+        let workbook: Xlsx<_> =
+            open_workbook(path).context("Failed to open Excel file for type detection")?;
         let sheet_names = workbook.sheet_names();
 
         info!("Examining Excel sheets: {:?}", sheet_names);
 
         // Check for Movimentacao sheet (may also be Ofertas Públicas)
         if sheet_names.iter().any(|name| name == "Movimentação") {
-            let mut workbook: Xlsx<_> = open_workbook(path)
-                .context("Failed to open Excel file for header detection")?;
+            let mut workbook: Xlsx<_> =
+                open_workbook(path).context("Failed to open Excel file for header detection")?;
             if let Ok(range) = workbook.worksheet_range("Movimentação") {
                 if let Some(header_row) = range.rows().next() {
                     let headers: Vec<String> = header_row
@@ -79,7 +79,10 @@ pub fn detect_file_type<P: AsRef<Path>>(path: P) -> Result<FileType> {
             let lower = sheet_name.to_lowercase();
             for pattern in &cei_patterns {
                 if lower.contains(pattern) {
-                    info!("Detected CEI format (found trading sheet: '{}')", sheet_name);
+                    info!(
+                        "Detected CEI format (found trading sheet: '{}')",
+                        sheet_name
+                    );
                     return Ok(FileType::Cei);
                 }
             }

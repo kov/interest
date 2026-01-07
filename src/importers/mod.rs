@@ -1,22 +1,22 @@
 // Import module - B3/CEI Excel and CSV parsers
 
-pub mod cei_excel;
 pub mod cei_csv;
+pub mod cei_excel;
+mod file_detector;
+pub mod irpf_pdf;
 pub mod movimentacao_excel;
 pub mod movimentacao_import;
 pub mod ofertas_publicas_excel;
-pub mod irpf_pdf;
-mod file_detector;
 
 use anyhow::{anyhow, Result};
 use std::path::Path;
 use tracing::info;
 
 pub use cei_excel::RawTransaction;
+pub use file_detector::FileType;
 pub use movimentacao_excel::MovimentacaoEntry;
 pub use movimentacao_import::import_movimentacao_entries;
 pub use ofertas_publicas_excel::OfertaPublicaEntry;
-pub use file_detector::FileType;
 
 /// Result of importing a file with auto-detection
 #[derive(Debug)]

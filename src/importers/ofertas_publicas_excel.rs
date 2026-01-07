@@ -4,7 +4,7 @@
 //! allocations (e.g., tickers with L suffix).
 
 use anyhow::{anyhow, Context, Result};
-use calamine::{open_workbook, Reader, Xlsx, Data, DataType};
+use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::path::Path;
@@ -65,8 +65,8 @@ impl OfertaPublicaEntry {
 pub fn parse_ofertas_publicas_excel<P: AsRef<Path>>(path: P) -> Result<Vec<OfertaPublicaEntry>> {
     info!("Parsing ofertas públicas Excel file: {:?}", path.as_ref());
 
-    let mut workbook: Xlsx<_> = open_workbook(path)
-        .context("Failed to open ofertas públicas Excel file")?;
+    let mut workbook: Xlsx<_> =
+        open_workbook(path).context("Failed to open ofertas públicas Excel file")?;
 
     let range = workbook
         .worksheet_range("Movimentação")
@@ -82,25 +82,33 @@ pub fn parse_ofertas_publicas_excel<P: AsRef<Path>>(path: P) -> Result<Vec<Ofert
         }
     }
 
-    let col_date = *col_idx.get("Data de liquidação")
+    let col_date = *col_idx
+        .get("Data de liquidação")
         .ok_or_else(|| anyhow!("Missing 'Data de liquidação' column"))?;
-    let col_offer = *col_idx.get("Oferta")
+    let col_offer = *col_idx
+        .get("Oferta")
         .ok_or_else(|| anyhow!("Missing 'Oferta' column"))?;
-    let col_ticker = *col_idx.get("Código de Negociação")
+    let col_ticker = *col_idx
+        .get("Código de Negociação")
         .ok_or_else(|| anyhow!("Missing 'Código de Negociação' column"))?;
-    let col_institution = *col_idx.get("Instituição")
+    let col_institution = *col_idx
+        .get("Instituição")
         .ok_or_else(|| anyhow!("Missing 'Instituição' column"))?;
-    let col_quantity = *col_idx.get("Quantidade")
+    let col_quantity = *col_idx
+        .get("Quantidade")
         .ok_or_else(|| anyhow!("Missing 'Quantidade' column"))?;
-    let col_price = *col_idx.get("Preço")
+    let col_price = *col_idx
+        .get("Preço")
         .ok_or_else(|| anyhow!("Missing 'Preço' column"))?;
-    let col_value = *col_idx.get("Valor")
+    let col_value = *col_idx
+        .get("Valor")
         .ok_or_else(|| anyhow!("Missing 'Valor' column"))?;
 
     let mut entries = Vec::new();
 
     for row in rows {
-        let date_str = row.get(col_date)
+        let date_str = row
+            .get(col_date)
             .and_then(|d| d.get_string())
             .unwrap_or("")
             .to_string();
@@ -110,11 +118,13 @@ pub fn parse_ofertas_publicas_excel<P: AsRef<Path>>(path: P) -> Result<Vec<Ofert
         }
 
         let date = parse_date(&date_str)?;
-        let offer = row.get(col_offer)
+        let offer = row
+            .get(col_offer)
             .and_then(|d| d.get_string())
             .unwrap_or("")
             .to_string();
-        let raw_ticker = row.get(col_ticker)
+        let raw_ticker = row
+            .get(col_ticker)
             .and_then(|d| d.get_string())
             .unwrap_or("")
             .to_string();
@@ -122,13 +132,19 @@ pub fn parse_ofertas_publicas_excel<P: AsRef<Path>>(path: P) -> Result<Vec<Ofert
             continue;
         }
         let ticker = OfertaPublicaEntry::normalize_ticker(&raw_ticker);
-        let institution = row.get(col_institution)
+        let institution = row
+            .get(col_institution)
             .and_then(|d| d.get_string())
             .unwrap_or("")
             .to_string();
-        let quantity = parse_decimal(row.get(col_quantity).ok_or_else(|| anyhow!("Missing quantity"))?)?;
-        let unit_price = parse_decimal(row.get(col_price).ok_or_else(|| anyhow!("Missing price"))?)?;
-        let operation_value = parse_decimal(row.get(col_value).ok_or_else(|| anyhow!("Missing value"))?)?;
+        let quantity = parse_decimal(
+            row.get(col_quantity)
+                .ok_or_else(|| anyhow!("Missing quantity"))?,
+        )?;
+        let unit_price =
+            parse_decimal(row.get(col_price).ok_or_else(|| anyhow!("Missing price"))?)?;
+        let operation_value =
+            parse_decimal(row.get(col_value).ok_or_else(|| anyhow!("Missing value"))?)?;
 
         entries.push(OfertaPublicaEntry {
             date,
@@ -154,13 +170,13 @@ fn parse_date(date_str: &str) -> Result<NaiveDate> {
 
 fn parse_decimal(data: &Data) -> Result<Decimal> {
     match data {
-        Data::Float(f) => Decimal::from_str(&f.to_string())
-            .context("Failed to parse float as decimal"),
+        Data::Float(f) => {
+            Decimal::from_str(&f.to_string()).context("Failed to parse float as decimal")
+        }
         Data::Int(i) => Ok(Decimal::from(*i)),
         Data::String(s) => {
             let normalized = s.replace('.', "").replace(',', ".");
-            Decimal::from_str(normalized.trim())
-                .context("Failed to parse string as decimal")
+            Decimal::from_str(normalized.trim()).context("Failed to parse string as decimal")
         }
         _ => Err(anyhow!("Unsupported numeric cell type")),
     }
