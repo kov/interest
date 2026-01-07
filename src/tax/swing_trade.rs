@@ -85,18 +85,6 @@ impl TaxCategory {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "STOCK_SWING" => Some(TaxCategory::StockSwingTrade),
-            "STOCK_DAY" => Some(TaxCategory::StockDayTrade),
-            "FII_SWING" => Some(TaxCategory::FiiSwingTrade),
-            "FII_DAY" => Some(TaxCategory::FiiDayTrade),
-            "FIAGRO_SWING" => Some(TaxCategory::FiagroSwingTrade),
-            "FIAGRO_DAY" => Some(TaxCategory::FiagroDayTrade),
-            "FI_INFRA" => Some(TaxCategory::FiInfra),
-            _ => None,
-        }
-    }
 
     /// Returns DARF code for this tax category (Brazilian federal tax payment form)
     /// All capital gains use code 6015, but are reported separately
@@ -117,6 +105,23 @@ impl TaxCategory {
             TaxCategory::FiagroSwingTrade => "FIAGRO - Operações Comuns",
             TaxCategory::FiagroDayTrade => "FIAGRO - Day Trade",
             TaxCategory::FiInfra => "FI-Infra - Isento",
+        }
+    }
+}
+
+impl FromStr for TaxCategory {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "STOCK_SWING" => Ok(TaxCategory::StockSwingTrade),
+            "STOCK_DAY" => Ok(TaxCategory::StockDayTrade),
+            "FII_SWING" => Ok(TaxCategory::FiiSwingTrade),
+            "FII_DAY" => Ok(TaxCategory::FiiDayTrade),
+            "FIAGRO_SWING" => Ok(TaxCategory::FiagroSwingTrade),
+            "FIAGRO_DAY" => Ok(TaxCategory::FiagroDayTrade),
+            "FI_INFRA" => Ok(TaxCategory::FiInfra),
+            _ => Err(())
         }
     }
 }
@@ -381,7 +386,7 @@ fn get_transactions_before(
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                transaction_type: row.get::<_, String>(2)?.parse::<TransactionType>()
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
@@ -495,8 +500,9 @@ fn apply_actions_to_carryover(
         .collect::<Result<Vec<_>, _>>()?;
 
     for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
-        let action_type =
-            CorporateActionType::from_str(&action_type_str).unwrap_or(CorporateActionType::Split);
+        let action_type = action_type_str
+            .parse::<CorporateActionType>()
+            .unwrap_or(CorporateActionType::Split);
         let ratio_from = Decimal::from(ratio_from);
         let ratio_to = Decimal::from(ratio_to);
 
@@ -548,7 +554,7 @@ fn get_transactions_up_to_month(
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                transaction_type: row.get::<_, String>(2)?.parse::<TransactionType>()
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,

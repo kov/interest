@@ -1008,7 +1008,9 @@ async fn handle_actions_update() -> Result<()> {
                 // Store income events
                 if let Some(events) = events_opt {
                     for brapi_event in events {
-                        let event_type = db::IncomeEventType::from_str(&brapi_event.event_type)
+                        let event_type = brapi_event
+                            .event_type
+                            .parse::<db::IncomeEventType>()
                             .unwrap_or(db::IncomeEventType::Dividend);
 
                         let event = db::IncomeEvent {
@@ -1483,8 +1485,10 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
             Ok(db::CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                action_type: db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
-                    .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<db::CorporateActionType>()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
                 ratio_from: row.get(5)?,
@@ -1576,8 +1580,10 @@ async fn handle_action_edit(
             Ok(db::CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                action_type: db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
-                    .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<db::CorporateActionType>()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
                 ratio_from: row.get(5)?,
@@ -1617,8 +1623,9 @@ async fn handle_action_edit(
     let mut updates = Vec::new();
 
     if let Some(new_type) = action_type {
-        let new_action_type = db::CorporateActionType::from_str(new_type)
-            .context(format!("Invalid action type: {}", new_type))?;
+        let new_action_type = new_type
+            .parse::<db::CorporateActionType>()
+            .map_err(|_| anyhow::anyhow!("Invalid action type: {}", new_type))?;
         println!(
             "  Type:     {} → {}",
             action.action_type.as_str().dimmed(),
@@ -1705,7 +1712,6 @@ async fn handle_action_edit(
 
 /// Handle portfolio show command
 async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
-    use anyhow::Context;
     use colored::Colorize;
     use tabled::{settings::Style, Table, Tabled};
 
@@ -1718,8 +1724,9 @@ async fn handle_portfolio_show(asset_type: Option<&str>) -> Result<()> {
     // Parse asset type filter if provided
     let asset_type_filter = if let Some(type_str) = asset_type {
         Some(
-            db::AssetType::from_str(type_str)
-                .context(format!("Invalid asset type: {}", type_str))?,
+            type_str
+                .parse::<db::AssetType>()
+                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", type_str))?,
         )
     } else {
         None

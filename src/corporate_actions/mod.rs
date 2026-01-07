@@ -34,7 +34,9 @@ pub fn get_unapplied_actions(
             Ok(CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                action_type: crate::db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<crate::db::CorporateActionType>()
                     .unwrap_or(crate::db::CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
@@ -52,7 +54,9 @@ pub fn get_unapplied_actions(
             Ok(CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                action_type: crate::db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<crate::db::CorporateActionType>()
                     .unwrap_or(crate::db::CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
@@ -118,7 +122,9 @@ pub fn apply_corporate_action(
                 Ok(Transaction {
                     id: Some(row.get(0)?),
                     asset_id: row.get(1)?,
-                    transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                    transaction_type: row
+                        .get::<_, String>(2)?
+                        .parse::<TransactionType>()
                         .unwrap_or(TransactionType::Buy),
                     trade_date: row.get(3)?,
                     settlement_date: row.get(4)?,
@@ -346,7 +352,9 @@ pub fn apply_actions_to_transaction(conn: &Connection, transaction_id: i64) -> R
             Ok(CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                action_type: crate::db::CorporateActionType::from_str(&row.get::<_, String>(2)?)
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<crate::db::CorporateActionType>()
                     .unwrap_or(crate::db::CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,

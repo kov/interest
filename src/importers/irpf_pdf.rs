@@ -83,6 +83,9 @@ fn parse_positions_from_text(text: &str, year: i32) -> Result<Vec<IrpfPosition>>
     // Each Code 31 (stocks/BDRs) or Code 73 (FIIs) entry is a separate section
     let sections: Vec<&str> = text.split("CÓDIGO").collect();
 
+    // Compile once, reuse across sections
+    let line_regex = Regex::new(r"(?:^|\n)(31|73)\s+([^\n]+)")?;
+
     for section in sections {
         // Check if this section contains any Code 31/73 entries (stocks/FIIs)
         // The section format is: "DISCRIMINAÇÃO SITUAÇÃO EM\n\n31/12/...\n\n31 TICKER..."
@@ -96,9 +99,7 @@ fn parse_positions_from_text(text: &str, year: i32) -> Result<Vec<IrpfPosition>>
         }
 
         // Find all lines starting with "31 " or "73 " in this section
-        // Use a regex to find all occurrences
-        let line_regex = Regex::new(r"(?:^|\n)(31|73)\s+([^\n]+)")?;
-
+        // Use the precompiled regex to find all occurrences
         for captures in line_regex.captures_iter(section) {
             let line = captures.get(2).map(|m| m.as_str()).unwrap_or("");
 

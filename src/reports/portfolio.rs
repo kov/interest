@@ -243,7 +243,9 @@ fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transa
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                transaction_type: row
+                    .get::<_, String>(2)?
+                    .parse::<TransactionType>()
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
@@ -283,7 +285,9 @@ fn get_asset_transactions_before(
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
+                transaction_type: row
+                    .get::<_, String>(2)?
+                    .parse::<TransactionType>()
                     .unwrap_or(TransactionType::Buy),
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
@@ -409,8 +413,9 @@ fn apply_actions_to_carryover(
         .collect::<Result<Vec<_>, _>>()?;
 
     for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
-        let action_type =
-            CorporateActionType::from_str(&action_type_str).unwrap_or(CorporateActionType::Split);
+        let action_type = action_type_str
+            .parse::<CorporateActionType>()
+            .unwrap_or(CorporateActionType::Split);
         let ratio_from = Decimal::from(ratio_from);
         let ratio_to = Decimal::from(ratio_to);
 

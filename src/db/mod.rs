@@ -132,10 +132,10 @@ pub fn get_asset_position_before_date(
     while let Some(row) = rows.next()? {
         let tx_type: String = row.get(0)?;
         let quantity = get_decimal_value(row, 1).context("Failed to parse transaction quantity")?;
-        match TransactionType::from_str(&tx_type) {
-            Some(TransactionType::Buy) => position += quantity,
-            Some(TransactionType::Sell) => position -= quantity,
-            None => {
+        match tx_type.parse::<TransactionType>() {
+            Ok(TransactionType::Buy) => position += quantity,
+            Ok(TransactionType::Sell) => position -= quantity,
+            Err(_) => {
                 return Err(anyhow::anyhow!(
                     "Unknown transaction type '{}' while computing position",
                     tx_type
@@ -451,7 +451,9 @@ pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
             Ok(Asset {
                 id: Some(row.get(0)?),
                 ticker: row.get(1)?,
-                asset_type: AssetType::from_str(&row.get::<_, String>(2)?)
+                asset_type: row
+                    .get::<_, String>(2)?
+                    .parse::<AssetType>()
                     .unwrap_or(AssetType::Stock),
                 name: row.get(3)?,
                 created_at: row.get(4)?,

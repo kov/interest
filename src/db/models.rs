@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Asset types supported by the system
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -24,19 +25,6 @@ impl AssetType {
             AssetType::FiInfra => "FI_INFRA",
             AssetType::Bond => "BOND",
             AssetType::GovBond => "GOV_BOND",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "STOCK" => Some(AssetType::Stock),
-            "ETF" => Some(AssetType::Etf),
-            "FII" => Some(AssetType::Fii),
-            "FIAGRO" => Some(AssetType::Fiagro),
-            "FI_INFRA" => Some(AssetType::FiInfra),
-            "BOND" => Some(AssetType::Bond),
-            "GOV_BOND" => Some(AssetType::GovBond),
-            _ => None,
         }
     }
 
@@ -85,6 +73,23 @@ impl AssetType {
     }
 }
 
+impl FromStr for AssetType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "STOCK" => Ok(AssetType::Stock),
+            "ETF" => Ok(AssetType::Etf),
+            "FII" => Ok(AssetType::Fii),
+            "FIAGRO" => Ok(AssetType::Fiagro),
+            "FI_INFRA" => Ok(AssetType::FiInfra),
+            "BOND" => Ok(AssetType::Bond),
+            "GOV_BOND" => Ok(AssetType::GovBond),
+            _ => Err(())
+        }
+    }
+}
+
 /// Asset (stock, fund, bond)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
@@ -110,12 +115,16 @@ impl TransactionType {
             TransactionType::Sell => "SELL",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "BUY" | "COMPRA" | "C" => Some(TransactionType::Buy),
-            "SELL" | "VENDA" | "V" => Some(TransactionType::Sell),
-            _ => None,
+impl FromStr for TransactionType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "BUY" | "COMPRA" | "C" => Ok(TransactionType::Buy),
+            "SELL" | "VENDA" | "V" => Ok(TransactionType::Sell),
+            _ => Err(())
         }
     }
 }
@@ -147,7 +156,6 @@ pub enum CorporateActionType {
     Bonus,         // Bonus shares (bonificação)
     CapitalReturn, // Capital return / Amortization (amortização)
 }
-
 impl CorporateActionType {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -157,17 +165,18 @@ impl CorporateActionType {
             CorporateActionType::CapitalReturn => "CAPITAL_RETURN",
         }
     }
+}
 
-    #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "SPLIT" | "DESDOBRAMENTO" => Some(CorporateActionType::Split),
-            "REVERSE_SPLIT" | "GRUPAMENTO" => Some(CorporateActionType::ReverseSplit),
-            "BONUS" | "BONIFICAÇÃO" | "BONIFICACAO" => Some(CorporateActionType::Bonus),
-            "CAPITAL_RETURN" | "AMORTIZAÇÃO" | "AMORTIZACAO" => {
-                Some(CorporateActionType::CapitalReturn)
-            }
-            _ => None,
+impl FromStr for CorporateActionType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "SPLIT" | "DESDOBRAMENTO" => Ok(CorporateActionType::Split),
+            "REVERSE_SPLIT" | "GRUPAMENTO" => Ok(CorporateActionType::ReverseSplit),
+            "BONUS" | "BONIFICAÇÃO" | "BONIFICACAO" => Ok(CorporateActionType::Bonus),
+            "CAPITAL_RETURN" | "AMORTIZAÇÃO" | "AMORTIZACAO" => Ok(CorporateActionType::CapitalReturn),
+            _ => Err(())
         }
     }
 }
@@ -232,13 +241,17 @@ impl IncomeEventType {
             IncomeEventType::Jcp => "JCP",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "DIVIDEND" | "DIVIDENDO" | "RENDIMENTO" => Some(IncomeEventType::Dividend),
-            "AMORTIZATION" | "AMORTIZAÇÃO" | "AMORTIZACAO" => Some(IncomeEventType::Amortization),
-            "JCP" => Some(IncomeEventType::Jcp),
-            _ => None,
+impl FromStr for IncomeEventType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "DIVIDEND" | "DIVIDENDO" | "RENDIMENTO" => Ok(IncomeEventType::Dividend),
+            "AMORTIZATION" | "AMORTIZAÇÃO" | "AMORTIZACAO" => Ok(IncomeEventType::Amortization),
+            "JCP" => Ok(IncomeEventType::Jcp),
+            _ => Err(())
         }
     }
 }
@@ -294,15 +307,15 @@ mod tests {
         assert_eq!(AssetType::Bond.as_str(), "BOND");
         assert_eq!(AssetType::GovBond.as_str(), "GOV_BOND");
 
-        assert_eq!(AssetType::from_str("STOCK"), Some(AssetType::Stock));
-        assert_eq!(AssetType::from_str("ETF"), Some(AssetType::Etf));
-        assert_eq!(AssetType::from_str("stock"), Some(AssetType::Stock));
-        assert_eq!(AssetType::from_str("FII"), Some(AssetType::Fii));
-        assert_eq!(AssetType::from_str("FIAGRO"), Some(AssetType::Fiagro));
-        assert_eq!(AssetType::from_str("FI_INFRA"), Some(AssetType::FiInfra));
-        assert_eq!(AssetType::from_str("BOND"), Some(AssetType::Bond));
-        assert_eq!(AssetType::from_str("GOV_BOND"), Some(AssetType::GovBond));
-        assert_eq!(AssetType::from_str("INVALID"), None);
+        assert_eq!("STOCK".parse::<AssetType>().ok(), Some(AssetType::Stock));
+        assert_eq!("ETF".parse::<AssetType>().ok(), Some(AssetType::Etf));
+        assert_eq!("stock".parse::<AssetType>().ok(), Some(AssetType::Stock));
+        assert_eq!("FII".parse::<AssetType>().ok(), Some(AssetType::Fii));
+        assert_eq!("FIAGRO".parse::<AssetType>().ok(), Some(AssetType::Fiagro));
+        assert_eq!("FI_INFRA".parse::<AssetType>().ok(), Some(AssetType::FiInfra));
+        assert_eq!("BOND".parse::<AssetType>().ok(), Some(AssetType::Bond));
+        assert_eq!("GOV_BOND".parse::<AssetType>().ok(), Some(AssetType::GovBond));
+        assert_eq!("INVALID".parse::<AssetType>().ok(), None);
     }
 
     #[test]
@@ -438,29 +451,17 @@ mod tests {
         assert_eq!(TransactionType::Sell.as_str(), "SELL");
 
         // Test various input formats
-        assert_eq!(TransactionType::from_str("BUY"), Some(TransactionType::Buy));
-        assert_eq!(TransactionType::from_str("buy"), Some(TransactionType::Buy));
-        assert_eq!(
-            TransactionType::from_str("COMPRA"),
-            Some(TransactionType::Buy)
-        );
-        assert_eq!(TransactionType::from_str("C"), Some(TransactionType::Buy));
+        assert_eq!("BUY".parse::<TransactionType>().ok(), Some(TransactionType::Buy));
+        assert_eq!("buy".parse::<TransactionType>().ok(), Some(TransactionType::Buy));
+        assert_eq!("COMPRA".parse::<TransactionType>().ok(), Some(TransactionType::Buy));
+        assert_eq!("C".parse::<TransactionType>().ok(), Some(TransactionType::Buy));
 
-        assert_eq!(
-            TransactionType::from_str("SELL"),
-            Some(TransactionType::Sell)
-        );
-        assert_eq!(
-            TransactionType::from_str("sell"),
-            Some(TransactionType::Sell)
-        );
-        assert_eq!(
-            TransactionType::from_str("VENDA"),
-            Some(TransactionType::Sell)
-        );
-        assert_eq!(TransactionType::from_str("V"), Some(TransactionType::Sell));
+        assert_eq!("SELL".parse::<TransactionType>().ok(), Some(TransactionType::Sell));
+        assert_eq!("sell".parse::<TransactionType>().ok(), Some(TransactionType::Sell));
+        assert_eq!("VENDA".parse::<TransactionType>().ok(), Some(TransactionType::Sell));
+        assert_eq!("V".parse::<TransactionType>().ok(), Some(TransactionType::Sell));
 
-        assert_eq!(TransactionType::from_str("INVALID"), None);
+        assert_eq!("INVALID".parse::<TransactionType>().ok(), None);
     }
 
     #[test]
@@ -474,54 +475,21 @@ mod tests {
         );
 
         // Test English inputs
-        assert_eq!(
-            CorporateActionType::from_str("SPLIT"),
-            Some(CorporateActionType::Split)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("split"),
-            Some(CorporateActionType::Split)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("REVERSE_SPLIT"),
-            Some(CorporateActionType::ReverseSplit)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("BONUS"),
-            Some(CorporateActionType::Bonus)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("CAPITAL_RETURN"),
-            Some(CorporateActionType::CapitalReturn)
-        );
+        assert_eq!("SPLIT".parse::<CorporateActionType>().ok(), Some(CorporateActionType::Split));
+        assert_eq!("split".parse::<CorporateActionType>().ok(), Some(CorporateActionType::Split));
+        assert_eq!("REVERSE_SPLIT".parse::<CorporateActionType>().ok(), Some(CorporateActionType::ReverseSplit));
+        assert_eq!("BONUS".parse::<CorporateActionType>().ok(), Some(CorporateActionType::Bonus));
+        assert_eq!("CAPITAL_RETURN".parse::<CorporateActionType>().ok(), Some(CorporateActionType::CapitalReturn));
 
         // Test Portuguese inputs
-        assert_eq!(
-            CorporateActionType::from_str("DESDOBRAMENTO"),
-            Some(CorporateActionType::Split)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("GRUPAMENTO"),
-            Some(CorporateActionType::ReverseSplit)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("BONIFICAÇÃO"),
-            Some(CorporateActionType::Bonus)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("BONIFICACAO"),
-            Some(CorporateActionType::Bonus)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("AMORTIZAÇÃO"),
-            Some(CorporateActionType::CapitalReturn)
-        );
-        assert_eq!(
-            CorporateActionType::from_str("AMORTIZACAO"),
-            Some(CorporateActionType::CapitalReturn)
-        );
+        assert_eq!("DESDOBRAMENTO".parse::<CorporateActionType>().ok(), Some(CorporateActionType::Split));
+        assert_eq!("GRUPAMENTO".parse::<CorporateActionType>().ok(), Some(CorporateActionType::ReverseSplit));
+        assert_eq!("BONIFICAÇÃO".parse::<CorporateActionType>().ok(), Some(CorporateActionType::Bonus));
+        assert_eq!("BONIFICACAO".parse::<CorporateActionType>().ok(), Some(CorporateActionType::Bonus));
+        assert_eq!("AMORTIZAÇÃO".parse::<CorporateActionType>().ok(), Some(CorporateActionType::CapitalReturn));
+        assert_eq!("AMORTIZACAO".parse::<CorporateActionType>().ok(), Some(CorporateActionType::CapitalReturn));
 
-        assert_eq!(CorporateActionType::from_str("INVALID"), None);
+        assert_eq!("INVALID".parse::<CorporateActionType>().ok(), None);
     }
 
     #[test]
@@ -531,38 +499,17 @@ mod tests {
         assert_eq!(IncomeEventType::Jcp.as_str(), "JCP");
 
         // Test English inputs
-        assert_eq!(
-            IncomeEventType::from_str("DIVIDEND"),
-            Some(IncomeEventType::Dividend)
-        );
-        assert_eq!(
-            IncomeEventType::from_str("dividend"),
-            Some(IncomeEventType::Dividend)
-        );
-        assert_eq!(
-            IncomeEventType::from_str("AMORTIZATION"),
-            Some(IncomeEventType::Amortization)
-        );
-        assert_eq!(IncomeEventType::from_str("JCP"), Some(IncomeEventType::Jcp));
+        assert_eq!("DIVIDEND".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Dividend));
+        assert_eq!("dividend".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Dividend));
+        assert_eq!("AMORTIZATION".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Amortization));
+        assert_eq!("JCP".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Jcp));
 
         // Test Portuguese inputs
-        assert_eq!(
-            IncomeEventType::from_str("DIVIDENDO"),
-            Some(IncomeEventType::Dividend)
-        );
-        assert_eq!(
-            IncomeEventType::from_str("RENDIMENTO"),
-            Some(IncomeEventType::Dividend)
-        );
-        assert_eq!(
-            IncomeEventType::from_str("AMORTIZAÇÃO"),
-            Some(IncomeEventType::Amortization)
-        );
-        assert_eq!(
-            IncomeEventType::from_str("AMORTIZACAO"),
-            Some(IncomeEventType::Amortization)
-        );
+        assert_eq!("DIVIDENDO".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Dividend));
+        assert_eq!("RENDIMENTO".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Dividend));
+        assert_eq!("AMORTIZAÇÃO".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Amortization));
+        assert_eq!("AMORTIZACAO".parse::<IncomeEventType>().ok(), Some(IncomeEventType::Amortization));
 
-        assert_eq!(IncomeEventType::from_str("INVALID"), None);
+        assert_eq!("INVALID".parse::<IncomeEventType>().ok(), None);
     }
 }

@@ -78,8 +78,10 @@ impl RawTransaction {
 
     /// Convert to Transaction model with asset type detection
     pub fn to_transaction(&self, asset_id: i64) -> Result<Transaction> {
-        let transaction_type = TransactionType::from_str(&self.transaction_type)
-            .ok_or_else(|| anyhow!("Invalid transaction type: {}", self.transaction_type))?;
+        let transaction_type = self
+            .transaction_type
+            .parse::<TransactionType>()
+            .map_err(|_| anyhow!("Invalid transaction type: {}", self.transaction_type))?;
 
         Ok(Transaction {
             id: None,
@@ -131,16 +133,16 @@ impl ColumnMapping {
             let text = cell.to_string().to_lowercase();
 
             // Date columns
-            if text.contains("data") && (text.contains("negó") || text.contains("nego")) {
-                mapping.date = Some(idx);
-            } else if mapping.date.is_none() && text.contains("data") {
+            if (text.contains("data") && (text.contains("negó") || text.contains("nego")))
+                || (mapping.date.is_none() && text.contains("data"))
+            {
                 mapping.date = Some(idx);
             }
 
             // Ticker/Code columns
-            if text.contains("código") || text.contains("codigo") || text.contains("ticker") {
-                mapping.ticker = Some(idx);
-            } else if mapping.ticker.is_none() && text.contains("produto") {
+            if (text.contains("código") || text.contains("codigo") || text.contains("ticker"))
+                || (mapping.ticker.is_none() && text.contains("produto"))
+            {
                 mapping.ticker = Some(idx);
             }
 
@@ -155,18 +157,17 @@ impl ColumnMapping {
             }
 
             // Price
-            if text.contains("preço") || text.contains("preco") {
-                if text.contains("unitário") || text.contains("unitario") {
-                    mapping.price = Some(idx);
-                } else if mapping.price.is_none() {
-                    mapping.price = Some(idx);
-                }
+            if (text.contains("preço") || text.contains("preco"))
+                && ((text.contains("unitário") || text.contains("unitario"))
+                    || mapping.price.is_none())
+            {
+                mapping.price = Some(idx);
             }
 
             // Total value
-            if text.contains("valor") && text.contains("total") {
-                mapping.total = Some(idx);
-            } else if mapping.total.is_none() && text == "valor" {
+            if (text.contains("valor") && text.contains("total"))
+                || (mapping.total.is_none() && text == "valor")
+            {
                 mapping.total = Some(idx);
             }
 

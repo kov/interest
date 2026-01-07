@@ -112,8 +112,10 @@ pub fn match_liquidation_to_purchases(
             Ok(Transaction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
-                transaction_type: TransactionType::from_str(&row.get::<_, String>(2)?)
-                    .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+                transaction_type: row
+                    .get::<_, String>(2)?
+                    .parse::<TransactionType>()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
                 quantity: get_decimal_value(row, 5)?,

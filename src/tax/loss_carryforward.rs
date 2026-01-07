@@ -36,7 +36,9 @@ pub fn get_losses_for_category(
                 id: Some(row.get(0)?),
                 year: row.get(1)?,
                 month: row.get(2)?,
-                category: TaxCategory::from_str(&row.get::<_, String>(3)?)
+                category: row
+                    .get::<_, String>(3)?
+                    .parse::<TaxCategory>()
                     .unwrap_or(TaxCategory::StockSwingTrade),
                 loss_amount: get_decimal_value(row, 4)?,
                 remaining_amount: get_decimal_value(row, 5)?,
@@ -131,7 +133,7 @@ pub fn get_total_losses_by_category(conn: &Connection) -> Result<HashMap<TaxCate
 
     for row in rows {
         let (category_str, total_str) = row?;
-        if let Some(category) = TaxCategory::from_str(&category_str) {
+        if let Ok(category) = category_str.parse::<TaxCategory>() {
             if let Ok(total) = Decimal::from_str(&total_str) {
                 losses.insert(category, total);
             }
