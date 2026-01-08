@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
     let disable_color = cli.no_color || !stdout_is_tty || cli.json;
 
     // Initialize logging - always write to stderr to keep stdout clean
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
 
     tracing_subscriber::fmt()
         .with_ansi(!disable_color)
