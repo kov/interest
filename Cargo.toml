@@ -52,6 +52,9 @@ rust_decimal = { version = "1.36", features = ["serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Hashing
+blake3 = "1.5"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

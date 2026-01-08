@@ -329,6 +329,40 @@ pub fn get_latest_price(conn: &Connection, asset_id: i64) -> Result<Option<Price
     Ok(result)
 }
 
+/// Get the latest price on or before a given date
+pub fn get_price_on_or_before(
+    conn: &Connection,
+    asset_id: i64,
+    as_of_date: NaiveDate,
+) -> Result<Option<PriceHistory>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asset_id, price_date, close_price, open_price, high_price, low_price, volume, source, created_at
+         FROM price_history
+         WHERE asset_id = ?1 AND price_date <= ?2
+         ORDER BY price_date DESC
+         LIMIT 1",
+    )?;
+
+    let result = stmt
+        .query_row(rusqlite::params![asset_id, as_of_date], |row| {
+            Ok(PriceHistory {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                price_date: row.get(2)?,
+                close_price: get_decimal_value(row, 3)?,
+                open_price: get_optional_decimal_value(row, 4)?,
+                high_price: get_optional_decimal_value(row, 5)?,
+                low_price: get_optional_decimal_value(row, 6)?,
+                volume: row.get(7)?,
+                source: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
 /// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
 fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
     use rusqlite::types::ValueRef;

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use blake3::Hasher;
 use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
@@ -99,6 +100,23 @@ pub fn calculate_portfolio(
     conn: &Connection,
     asset_type_filter: Option<&AssetType>,
 ) -> Result<PortfolioReport> {
+    calculate_portfolio_with_cutoff(conn, asset_type_filter, None)
+}
+
+/// Calculate portfolio positions as of a specific date (inclusive)
+pub fn calculate_portfolio_at_date(
+    conn: &Connection,
+    as_of_date: NaiveDate,
+    asset_type_filter: Option<&AssetType>,
+) -> Result<PortfolioReport> {
+    calculate_portfolio_with_cutoff(conn, asset_type_filter, Some(as_of_date))
+}
+
+fn calculate_portfolio_with_cutoff(
+    conn: &Connection,
+    asset_type_filter: Option<&AssetType>,
+    as_of_date: Option<NaiveDate>,
+) -> Result<PortfolioReport> {
     // Get all assets
     let assets = crate::db::get_all_assets(conn)?;
 
@@ -132,9 +150,18 @@ pub fn calculate_portfolio(
         let asset_id = asset.id.unwrap();
 
         // Get all transactions for this asset, ordered by date
-        let mut transactions = get_asset_transactions(conn, asset_id)?;
+        let mut transactions = match as_of_date {
+            Some(cutoff) => get_asset_transactions_until(conn, asset_id, cutoff)?,
+            None => get_asset_transactions(conn, asset_id)?,
+        };
 
         for (source_ticker, effective_date) in crate::db::rename_sources_for(&asset.ticker) {
+            if let Some(limit) = as_of_date {
+                if limit < effective_date {
+                    continue;
+                }
+            }
+
             if let Some(source_asset) = assets_by_ticker.get(source_ticker) {
                 if let Some(carryover) = build_rename_carryover_transaction(
                     conn,
@@ -170,7 +197,11 @@ pub fn calculate_portfolio(
         }
 
         // Get current price
-        let latest_price = crate::db::get_latest_price(conn, asset_id)?;
+        let latest_price = if let Some(cutoff) = as_of_date {
+            crate::db::get_price_on_or_before(conn, asset_id, cutoff)?
+        } else {
+            crate::db::get_latest_price(conn, asset_id)?
+        };
         let current_price = latest_price.as_ref().map(|p| p.close_price);
 
         // Calculate current value and P&L
@@ -227,6 +258,28 @@ pub fn calculate_portfolio(
     })
 }
 
+fn map_transaction(row: &rusqlite::Row) -> Result<Transaction, rusqlite::Error> {
+    Ok(Transaction {
+        id: Some(row.get(0)?),
+        asset_id: row.get(1)?,
+        transaction_type: row
+            .get::<_, String>(2)?
+            .parse::<TransactionType>()
+            .unwrap_or(TransactionType::Buy),
+        trade_date: row.get(3)?,
+        settlement_date: row.get(4)?,
+        quantity: get_decimal_value(row, 5)?,
+        price_per_unit: get_decimal_value(row, 6)?,
+        total_cost: get_decimal_value(row, 7)?,
+        fees: get_decimal_value(row, 8)?,
+        is_day_trade: row.get(9)?,
+        quota_issuance_date: row.get(10)?,
+        notes: row.get(11)?,
+        source: row.get(12)?,
+        created_at: row.get(13)?,
+    })
+}
+
 /// Get all transactions for an asset, ordered by trade date
 fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transaction>> {
     let mut stmt = conn.prepare(
@@ -239,27 +292,7 @@ fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transa
     )?;
 
     let transactions = stmt
-        .query_map([asset_id], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: row
-                    .get::<_, String>(2)?
-                    .parse::<TransactionType>()
-                    .unwrap_or(TransactionType::Buy),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: get_decimal_value(row, 5)?,
-                price_per_unit: get_decimal_value(row, 6)?,
-                total_cost: get_decimal_value(row, 7)?,
-                fees: get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
+        .query_map([asset_id], map_transaction)?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(transactions)
@@ -281,27 +314,29 @@ fn get_asset_transactions_before(
     )?;
 
     let transactions = stmt
-        .query_map(rusqlite::params![asset_id, before_date], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: row
-                    .get::<_, String>(2)?
-                    .parse::<TransactionType>()
-                    .unwrap_or(TransactionType::Buy),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: get_decimal_value(row, 5)?,
-                price_per_unit: get_decimal_value(row, 6)?,
-                total_cost: get_decimal_value(row, 7)?,
-                fees: get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
+        .query_map(rusqlite::params![asset_id, before_date], map_transaction)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(transactions)
+}
+
+/// Get all transactions for an asset up to and including a cutoff date.
+fn get_asset_transactions_until(
+    conn: &Connection,
+    asset_id: i64,
+    cutoff_date: NaiveDate,
+) -> Result<Vec<Transaction>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
+                quantity, price_per_unit, total_cost, fees, is_day_trade,
+                quota_issuance_date, notes, source, created_at
+         FROM transactions
+         WHERE asset_id = ?1 AND trade_date <= ?2
+         ORDER BY trade_date ASC, id ASC",
+    )?;
+
+    let transactions = stmt
+        .query_map(rusqlite::params![asset_id, cutoff_date], map_transaction)?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(transactions)
@@ -482,9 +517,196 @@ pub fn calculate_allocation(report: &PortfolioReport) -> HashMap<AssetType, (Dec
     allocation
 }
 
+/// Compute a fingerprint for all transactions up to and including a date.
+pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asset_id, transaction_type, trade_date, quantity, price_per_unit, total_cost
+         FROM transactions
+         WHERE trade_date <= ?1
+         ORDER BY trade_date ASC, id ASC",
+    )?;
+
+    let mut rows = stmt.query([as_of_date])?;
+    let mut hasher = Hasher::new();
+
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let asset_id: i64 = row.get(1)?;
+        let tx_type: String = row.get(2)?;
+        let trade_date: NaiveDate = row.get(3)?;
+        let quantity = get_decimal_value(row, 4)?;
+        let price_per_unit = get_decimal_value(row, 5)?;
+        let total_cost = get_decimal_value(row, 6)?;
+
+        let line = format!(
+            "{}|{}|{}|{}|{}|{}|{}\n",
+            id, asset_id, tx_type, trade_date, quantity, price_per_unit, total_cost
+        );
+        hasher.update(line.as_bytes());
+    }
+
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Save a portfolio snapshot for a specific date, replacing any existing rows for that date.
+pub fn save_portfolio_snapshot(
+    conn: &mut Connection,
+    date: NaiveDate,
+    label: Option<String>,
+) -> Result<()> {
+    let report = calculate_portfolio_at_date(conn, date, None)?;
+    let fingerprint = compute_snapshot_fingerprint(conn, date)?;
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM position_snapshots WHERE snapshot_date = ?1",
+        [date],
+    )?;
+
+    for position in report.positions {
+        let asset_id = position
+            .asset
+            .id
+            .ok_or_else(|| anyhow::anyhow!("Asset missing id for snapshot"))?;
+
+        let market_price = position.current_price.unwrap_or(position.average_cost);
+        let market_value = position
+            .current_value
+            .unwrap_or_else(|| market_price * position.quantity);
+        let unrealized_pl = position
+            .unrealized_pl
+            .unwrap_or_else(|| market_value - position.total_cost);
+
+        tx.execute(
+            "INSERT INTO position_snapshots (
+                snapshot_date, asset_id, quantity, average_cost, market_price,
+                market_value, unrealized_pl, tx_fingerprint, label
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                date,
+                asset_id,
+                position.quantity.to_string(),
+                position.average_cost.to_string(),
+                market_price.to_string(),
+                market_value.to_string(),
+                unrealized_pl.to_string(),
+                &fingerprint,
+                label.clone(),
+            ],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Load a snapshot if the stored fingerprint matches the current transaction state.
+pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<PortfolioReport>> {
+    let mut stmt = conn.prepare(
+        "SELECT ps.asset_id, ps.quantity, ps.average_cost, ps.market_price, ps.market_value,
+                ps.unrealized_pl, ps.tx_fingerprint, a.ticker, a.asset_type, a.name,
+                a.created_at, a.updated_at
+         FROM position_snapshots ps
+         JOIN assets a ON ps.asset_id = a.id
+         WHERE ps.snapshot_date = ?1
+         ORDER BY ps.market_value DESC",
+    )?;
+
+    let rows = stmt
+        .query_map([date], |row| {
+            let asset_type: AssetType =
+                row.get::<_, String>(8)?.parse().unwrap_or(AssetType::Stock);
+
+            Ok((
+                Asset {
+                    id: Some(row.get(0)?),
+                    ticker: row.get(7)?,
+                    asset_type,
+                    name: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                },
+                get_decimal_value(row, 1)?,
+                get_decimal_value(row, 2)?,
+                get_decimal_value(row, 3)?,
+                get_decimal_value(row, 4)?,
+                get_decimal_value(row, 5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let stored_fingerprint = rows[0].6.clone();
+    let current_fingerprint = compute_snapshot_fingerprint(conn, date)?;
+    if stored_fingerprint != current_fingerprint {
+        return Ok(None);
+    }
+
+    let mut positions = Vec::new();
+    let mut total_cost = Decimal::ZERO;
+    let mut total_value = Decimal::ZERO;
+
+    for (asset, quantity, average_cost, market_price, market_value, unrealized_pl, _) in rows {
+        let position_cost = average_cost * quantity;
+        let unrealized_pl_pct = if position_cost > Decimal::ZERO {
+            (unrealized_pl / position_cost) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+
+        total_cost += position_cost;
+        total_value += market_value;
+
+        positions.push(PositionSummary {
+            asset,
+            quantity,
+            average_cost,
+            total_cost: position_cost,
+            current_price: Some(market_price),
+            current_value: Some(market_value),
+            unrealized_pl: Some(unrealized_pl),
+            unrealized_pl_pct: Some(unrealized_pl_pct),
+        });
+    }
+
+    let total_pl = total_value - total_cost;
+    let total_pl_pct = if total_cost > Decimal::ZERO {
+        (total_pl / total_cost) * Decimal::from(100)
+    } else {
+        Decimal::ZERO
+    };
+
+    Ok(Some(PortfolioReport {
+        positions,
+        total_cost,
+        total_value,
+        total_pl,
+        total_pl_pct,
+    }))
+}
+
+/// Delete snapshots on or after a given date to force recomputation.
+pub fn invalidate_snapshots_after(
+    conn: &Connection,
+    earliest_changed_date: NaiveDate,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM position_snapshots WHERE snapshot_date >= ?1",
+        [earliest_changed_date],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{self, AssetType, PriceHistory, Transaction, TransactionType};
+    use chrono::{NaiveDate, Utc};
+    use rusqlite::Connection;
 
     #[test]
     fn test_avg_position_buy_and_sell() {
@@ -522,5 +744,107 @@ mod tests {
         // Try to sell more than we have
         let result = position.remove_sell(Decimal::from(150), "TEST");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_snapshot_fingerprint_stable() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../db/schema.sql"))
+            .unwrap();
+
+        let asset_id = db::upsert_asset(&conn, "TEST3", &AssetType::Stock, None).unwrap();
+
+        let base_tx = Transaction {
+            id: None,
+            asset_id,
+            transaction_type: TransactionType::Buy,
+            trade_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            settlement_date: None,
+            quantity: Decimal::from(10),
+            price_per_unit: Decimal::from(100),
+            total_cost: Decimal::from(1000),
+            fees: Decimal::ZERO,
+            is_day_trade: false,
+            quota_issuance_date: None,
+            notes: None,
+            source: "TEST".to_string(),
+            created_at: Utc::now(),
+        };
+
+        db::insert_transaction(&conn, &base_tx).unwrap();
+
+        let fp1 = compute_snapshot_fingerprint(&conn, base_tx.trade_date).unwrap();
+        let fp2 = compute_snapshot_fingerprint(&conn, base_tx.trade_date).unwrap();
+        assert_eq!(fp1, fp2);
+
+        let later_tx = Transaction {
+            trade_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            ..base_tx
+        };
+        db::insert_transaction(&conn, &later_tx).unwrap();
+
+        let fp_unchanged = compute_snapshot_fingerprint(&conn, base_tx.trade_date).unwrap();
+        assert_eq!(fp1, fp_unchanged);
+
+        let fp_changed = compute_snapshot_fingerprint(&conn, later_tx.trade_date).unwrap();
+        assert_ne!(fp1, fp_changed);
+    }
+
+    #[test]
+    fn test_snapshot_save_and_load_roundtrip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../db/schema.sql"))
+            .unwrap();
+
+        let asset_id = db::upsert_asset(&conn, "TEST4", &AssetType::Stock, None).unwrap();
+
+        let tx = Transaction {
+            id: None,
+            asset_id,
+            transaction_type: TransactionType::Buy,
+            trade_date: NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            settlement_date: None,
+            quantity: Decimal::from(5),
+            price_per_unit: Decimal::from(10),
+            total_cost: Decimal::from(50),
+            fees: Decimal::ZERO,
+            is_day_trade: false,
+            quota_issuance_date: None,
+            notes: None,
+            source: "TEST".to_string(),
+            created_at: Utc::now(),
+        };
+
+        db::insert_transaction(&conn, &tx).unwrap();
+
+        let price = PriceHistory {
+            id: None,
+            asset_id,
+            price_date: NaiveDate::from_ymd_opt(2024, 1, 6).unwrap(),
+            close_price: Decimal::from(12),
+            open_price: None,
+            high_price: None,
+            low_price: None,
+            volume: Some(1_000),
+            source: "TEST".to_string(),
+            created_at: Utc::now(),
+        };
+
+        db::insert_price_history(&conn, &price).unwrap();
+
+        let snapshot_date = NaiveDate::from_ymd_opt(2024, 1, 6).unwrap();
+        save_portfolio_snapshot(&mut conn, snapshot_date, Some("label".to_string())).unwrap();
+
+        let loaded = get_valid_snapshot(&conn, snapshot_date).unwrap();
+        assert!(loaded.is_some());
+
+        let report = loaded.unwrap();
+        assert_eq!(report.positions.len(), 1);
+        let position = &report.positions[0];
+        assert_eq!(position.quantity, Decimal::from(5));
+        assert_eq!(position.average_cost, Decimal::from(10));
+        assert_eq!(position.current_price, Some(Decimal::from(12)));
+        assert_eq!(position.current_value, Some(Decimal::from(60)));
+        assert_eq!(position.unrealized_pl, Some(Decimal::from(10)));
     }
 }

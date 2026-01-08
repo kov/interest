@@ -12,8 +12,8 @@ mod utils;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    ActionCommands, Cli, Commands, PortfolioCommands, PriceCommands, TaxCommands,
-    TransactionCommands,
+    ActionCommands, Cli, Commands, PerformanceCommands, PortfolioCommands, PriceCommands,
+    TaxCommands, TransactionCommands,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -106,6 +106,12 @@ async fn main() -> Result<()> {
             TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
             TaxCommands::Report { year, export } => handle_tax_report(year, export).await,
             TaxCommands::Summary { year } => handle_tax_summary(year).await,
+        },
+
+        Commands::Performance { action } => match action {
+            PerformanceCommands::Show { period } => {
+                handle_performance_show(&period, cli.json).await
+            }
         },
 
         Commands::Actions { action } => match action {
@@ -262,6 +268,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
             let mut skipped_old = 0;
             let mut errors = 0;
             let mut max_imported_date: Option<chrono::NaiveDate> = None;
+            let mut earliest_imported_date: Option<chrono::NaiveDate> = None;
 
             let last_import_date = db::get_last_import_date(&conn, "CEI", "trades")?;
 
@@ -320,6 +327,10 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                             Some(current) if current >= transaction.trade_date => current,
                             _ => transaction.trade_date,
                         });
+                        earliest_imported_date = Some(match earliest_imported_date {
+                            Some(current) if current <= transaction.trade_date => current,
+                            _ => transaction.trade_date,
+                        });
                     }
                     Err(e) => {
                         eprintln!("Error inserting transaction: {}", e);
@@ -330,6 +341,19 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
 
             if let Some(last_date) = max_imported_date {
                 db::set_last_import_date(&conn, "CEI", "trades", last_date)?;
+            }
+
+            if imported > 0 {
+                if let Some(date) = earliest_imported_date {
+                    reports::invalidate_snapshots_after(&conn, date)?;
+                    if !json_output {
+                        println!(
+                            "  {} Snapshots on/after {} invalidated",
+                            "⚠".yellow().bold(),
+                            date
+                        );
+                    }
+                }
             }
 
             println!("\n{} Import complete!", "✓".green().bold());
@@ -2916,6 +2940,12 @@ impl TaxProgressPrinter {
             _ => {}
         }
     }
+}
+
+/// Handle performance show command
+async fn handle_performance_show(period: &str, json_output: bool) -> Result<()> {
+    use interest::dispatcher::performance;
+    performance::dispatch_performance_show(period, json_output).await
 }
 
 /// Handle manual transaction add command

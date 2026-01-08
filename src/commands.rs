@@ -13,6 +13,8 @@ pub enum Command {
     Import { path: String, dry_run: bool },
     /// Show portfolio: `portfolio show [--filter stock|fii|...]`
     PortfolioShow { filter: Option<String> },
+    /// Show performance: `performance show <MTD|QTD|YTD|1Y|ALL|from:to>`
+    PerformanceShow { period: String },
     /// Show tax report: `tax report <year> [--export]`
     TaxReport { year: i32, export_csv: bool },
     /// Show tax summary: `tax summary <year>`
@@ -105,6 +107,35 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 }
                 _ => Err(CommandParseError {
                     message: format!("Unknown portfolio action: {}. Use: portfolio show", action),
+                }),
+            }
+        }
+        "performance" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message:
+                        "performance requires action (show). Usage: performance show <MTD|QTD|YTD|1Y|ALL|from:to>"
+                            .to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "show" => {
+                    let period = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "performance show requires a period. Usage: performance show <MTD|QTD|YTD|1Y|ALL|from:to>".to_string(),
+                        })?
+                        .to_string();
+
+                    Ok(Command::PerformanceShow { period })
+                }
+                _ => Err(CommandParseError {
+                    message: format!(
+                        "Unknown performance action: {}. Use: performance show",
+                        action
+                    ),
                 }),
             }
         }
@@ -249,6 +280,43 @@ mod tests {
     fn test_parse_tax_summary() {
         let cmd = parse_command("tax summary 2023").unwrap();
         assert_eq!(cmd, Command::TaxSummary { year: 2023 });
+    }
+
+    #[test]
+    fn test_parse_snapshot_commands_removed() {
+        let save = parse_command("snapshot save checkpoint");
+        assert!(save.is_err());
+        let list = parse_command("snapshot list");
+        assert!(list.is_err());
+    }
+
+    #[test]
+    fn test_parse_performance_show_mtd() {
+        let cmd = parse_command("performance show MTD").unwrap();
+        assert_eq!(
+            cmd,
+            Command::PerformanceShow {
+                period: "MTD".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_performance_show_ytd() {
+        let cmd = parse_command("performance show YTD").unwrap();
+        assert_eq!(
+            cmd,
+            Command::PerformanceShow {
+                period: "YTD".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_performance_without_period() {
+        let result = parse_command("performance show");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a period"));
     }
 
     #[test]

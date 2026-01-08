@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Interest is a CLI tool for tracking Brazilian B3 stock exchange investments with automatic price updates, average cost basis calculations, and tax reporting. Written in Rust, it handles complex Brazilian tax rules including swing trade/day trade distinctions, fund quota vintage tracking (pre/post-2026), and corporate action adjustments.
+Interest is a dual-mode (CLI + interactive TUI) tool for tracking Brazilian B3 stock exchange investments with automatic price updates, average cost basis calculations, performance tracking, and tax reporting. Written in Rust, it handles complex Brazilian tax rules including swing trade/day trade distinctions, fund quota vintage tracking (pre/post-2026), corporate action adjustments, and historical portfolio snapshots.
+
+**Recent Evolution** (January 2026): The project has undergone a significant architectural overhaul to support both traditional CLI commands and an interactive terminal UI (TUI) mode. The TUI provides a REPL-style interface with readline support, while sharing the same business logic core with the CLI.
 
 ## Commands
 
@@ -35,17 +37,25 @@ RUST_LOG=debug cargo test test_name -- --nocapture
 ### Running the Tool
 
 ```bash
-# Use debug build during development
-./target/debug/interest portfolio show
+# Launch interactive TUI mode (default if no command given)
+cargo run
 
-# Or run directly with cargo
+# Or explicit TUI launch
+./target/debug/interest
+
+# Traditional CLI mode - provide a command
 cargo run -- portfolio show
-
-# Import a file
 cargo run -- import negociacao.xlsx
-
-# Import IRPF PDF
 cargo run -- import-irpf irpf.pdf 2018 --dry-run
+cargo run -- tax report 2024
+cargo run -- performance show YTD
+
+# JSON output for scripting
+cargo run -- portfolio show --json
+cargo run -- tax report 2024 --json
+
+# Disable colors (automatic when piped)
+cargo run -- portfolio show --no-color
 ```
 
 ### Database
@@ -69,15 +79,24 @@ sqlite3 ~/.interest/data.db "SELECT * FROM corporate_actions"
 
 ```
 src/
-├── cli/          - Command-line interface definitions (clap)
+├── cli/          - Legacy CLI interface (clap-based, being phased out)
+│   ├── mod.rs    - Command definitions using clap macros
+│   └── formatters.rs - Output formatting utilities
+├── commands.rs   - Command parser (replaces clap for TUI/CLI dual mode)
+├── dispatcher.rs - Command routing to handlers (shared by TUI and CLI)
+│   └── performance.rs - Performance command handlers
 ├── db/           - Database models, schema, and operations
 │   ├── models.rs - Core types (Asset, Transaction, CorporateAction, etc.)
 │   └── schema.sql - SQLite schema with junction tables
-├── importers/    - File parsers (CEI Excel/CSV, Movimentação, IRPF PDF)
+├── importers/    - File parsers (CEI Excel/CSV, Movimentação, IRPF PDF, Ofertas Públicas)
 │   ├── file_detector.rs - Auto-detects file format from content
 │   ├── cei_excel.rs      - B3/CEI Excel parser
-│   ├── movimentacao_excel.rs - B3 Movimentação parser
-│   └── irpf_pdf.rs       - IRPF tax declaration PDF parser
+│   ├── cei_csv.rs        - B3/CEI CSV parser
+│   ├── movimentacao_excel.rs - B3 Movimentação Excel parser
+│   ├── movimentacao_import.rs - Movimentação import logic
+│   ├── ofertas_publicas_excel.rs - Ofertas Públicas parser
+│   ├── irpf_pdf.rs       - IRPF tax declaration PDF parser
+│   └── validation.rs     - Transaction validation logic
 ├── corporate_actions/ - Split/reverse-split/bonus handling with idempotency
 ├── tax/          - Brazilian tax calculations
 │   ├── cost_basis.rs     - Average cost matching algorithm
@@ -86,16 +105,41 @@ src/
 │   ├── irpf.rs           - Annual IRPF report
 │   └── loss_carryforward.rs - Loss offset tracking
 ├── pricing/      - Price fetching from Yahoo Finance & Brapi.dev
+│   ├── yahoo.rs  - Yahoo Finance integration
+│   └── brapi.rs  - Brapi.dev fallback
 ├── reports/      - Portfolio and performance reports
-└── main.rs       - CLI handlers and application entry
+│   ├── portfolio.rs - Portfolio calculation with snapshot support
+│   └── performance.rs - Performance tracking with TWR calculation
+├── ui/           - Interactive TUI components
+│   ├── mod.rs           - TUI entry point and REPL loop
+│   ├── readline.rs      - Rustyline wrapper with completion
+│   ├── crossterm_engine.rs - Rendering helpers (tables, spinners)
+│   ├── event_loop.rs    - Event loop skeleton (TODO: full implementation)
+│   └── overlays.rs      - Overlay system (TODO: file pickers, dialogs)
+├── scraping/     - Web scraping utilities
+│   └── investing.rs - Investing.com scraper (TODO)
+├── error.rs      - Custom error types
+├── term_contracts.rs - Term contract handling
+├── utils/        - Shared utilities
+├── lib.rs        - Library entry point (exports core modules)
+└── main.rs       - Application entry point (routes to TUI or CLI)
 ```
 
 ### Data Flow
 
-1. **Import**: File → Parser → RawTransaction → Database
-2. **Corporate Actions**: Add action → Apply (adjust transactions) → Track in junction table
-3. **Tax Calculation**: Transactions → average-cost matcher → Cost basis → Tax calculation
-4. **Portfolio**: Database → Current positions → Fetch prices → Calculate P&L
+1. **User Input**:
+   - TUI Mode (default): `cargo run` → `launch_tui()` → readline REPL → `parse_command()` → `dispatch_command()`
+   - CLI Mode: `cargo run -- <cmd>` → clap parsing → `main()` → legacy handlers → calls same business logic
+
+2. **Import**: File → `file_detector` → Parser → `RawTransaction` → `validation` → Database → Invalidate snapshots
+
+3. **Corporate Actions**: Add action → Apply (adjust transactions) → Track in junction table → Invalidate snapshots
+
+4. **Tax Calculation**: Transactions → average-cost matcher → Cost basis → Tax calculation
+
+5. **Portfolio**: Database → Current positions → Fetch prices → Calculate P&L → (optionally) Save snapshot
+
+6. **Performance**: Load/create snapshots → Calculate TWR → Asset breakdown → Format report
 
 ### Key Design Patterns
 
@@ -190,10 +234,113 @@ pub fn detect_file_type(path: &Path) -> Result<FileType> {
     // Excel → Check sheet names:
     //   - "Movimentação" → Movimentacao format
     //   - "negociação", "ativos" → CEI format
+    //   - "Ofertas Públicas" → Ofertas Públicas format
 }
 ```
 
 **Why**: B3 exports have inconsistent naming; content is more reliable than filename.
+
+#### 6. Dual-Mode Architecture (TUI + CLI)
+
+**Pattern**: Single command parser + dispatcher shared by both interfaces.
+
+```rust
+// commands.rs - Platform-agnostic command representation
+pub enum Command {
+    Import { path: String, dry_run: bool },
+    PortfolioShow { filter: Option<String> },
+    PerformanceShow { period: String },
+    // ...
+}
+
+pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
+    // Parse both "/import file.xlsx" and "import file.xlsx"
+    // Works for readline input AND traditional CLI args
+}
+
+// dispatcher.rs - Routes commands to handlers
+pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()> {
+    match command {
+        Command::PortfolioShow { filter } => dispatch_portfolio_show(filter, json_output).await,
+        // ... all commands route to same business logic
+    }
+}
+
+// main.rs - Entry point
+fn main() {
+    if no_cli_args {
+        launch_tui().await  // Interactive mode
+    } else {
+        // Traditional CLI mode (via clap, calls same handlers)
+    }
+}
+```
+
+**Benefits**:
+- Zero code duplication
+- Same validation/formatting logic for both modes
+- Easy to test (just test the command handlers)
+- Gradual migration path (can keep clap while building TUI)
+
+#### 7. Portfolio Snapshot System with Fingerprint Invalidation
+
+**Pattern**: Inspired by IRPF caching system, snapshots are stored with fingerprints for invalidation.
+
+```rust
+// reports/portfolio.rs
+pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) -> Result<String> {
+    // Hash: transaction IDs + quantities + prices + trade_dates
+    // For all transactions WHERE trade_date <= as_of_date
+    // Similar to IRPF's compute_year_fingerprint()
+}
+
+pub fn save_portfolio_snapshot(conn: &Connection, date: NaiveDate, label: Option<String>) -> Result<()> {
+    // 1. Calculate portfolio at date
+    // 2. Compute fingerprint
+    // 3. Save positions + fingerprint to position_snapshots table
+}
+
+pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<PortfolioReport>> {
+    // 1. Load snapshot from database
+    // 2. Compute current fingerprint for that date
+    // 3. Compare: if match → return snapshot (cache hit), else → return None
+}
+
+pub fn invalidate_snapshots_after(conn: &Connection, earliest_changed_date: NaiveDate) -> Result<()> {
+    // Called when transactions added/modified
+    // Deletes all snapshots WHERE snapshot_date >= earliest_changed_date
+}
+```
+
+**Integration hooks**: Add invalidation calls after every transaction modification:
+- After import: `invalidate_snapshots_after(earliest_trade_date)`
+- After corporate action: `invalidate_snapshots_after(action.ex_date)`
+- After manual transaction add/edit: `invalidate_snapshots_after(transaction.trade_date)`
+
+**Why**: Enables fast performance calculations without recalculating full portfolio history every time.
+
+#### 8. Time-Weighted Return (TWR) Calculation
+
+**Purpose**: Measure investment performance independent of cash flows (contributions/withdrawals).
+
+```rust
+// reports/performance.rs
+pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<PerformanceReport> {
+    // 1. Get start/end dates from period
+    // 2. Ensure snapshots exist (compute if missing)
+    // 3. Calculate TWR: (end_value - start_value) / start_value * 100
+    // 4. Break down by asset type
+    // 5. (Future) Account for cash flows for true TWR
+}
+```
+
+**Periods supported**:
+- MTD (Month-to-date)
+- QTD (Quarter-to-date)
+- YTD (Year-to-date)
+- OneYear (last 365 days)
+- AllTime (since first transaction)
+- Custom (from:to date range)
 
 ### Brazilian Tax Rules Implementation
 

@@ -67,6 +67,12 @@ pub enum Commands {
         action: TaxCommands,
     },
 
+    /// Performance analysis and reporting
+    Performance {
+        #[command(subcommand)]
+        action: PerformanceCommands,
+    },
+
     /// Corporate actions (splits, bonuses, amortization)
     Actions {
         #[command(subcommand)]
@@ -152,6 +158,15 @@ pub enum TaxCommands {
     Summary {
         /// Year (e.g., 2025)
         year: i32,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PerformanceCommands {
+    /// Show performance report for a period
+    Show {
+        /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
+        period: String,
     },
 }
 

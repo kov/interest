@@ -93,6 +93,59 @@ CREATE TABLE IF NOT EXISTS price_history (
 CREATE INDEX IF NOT EXISTS idx_price_history_asset ON price_history(asset_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_date ON price_history(price_date);
 
+-- Portfolio snapshots with fingerprint-based invalidation
+CREATE TABLE IF NOT EXISTS position_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date DATE NOT NULL,
+    asset_id INTEGER NOT NULL,
+    quantity DECIMAL(15,4) NOT NULL,
+    average_cost DECIMAL(15,4) NOT NULL,
+    market_price DECIMAL(15,4) NOT NULL,
+    market_value DECIMAL(15,4) NOT NULL,
+    unrealized_pl DECIMAL(15,4) NOT NULL,
+    tx_fingerprint TEXT NOT NULL,
+    label TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    UNIQUE(snapshot_date, asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_snapshots_date ON position_snapshots(snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_position_snapshots_asset ON position_snapshots(asset_id, snapshot_date DESC);
+
+-- Realized gains aggregation
+CREATE TABLE IF NOT EXISTS realized_gains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL,
+    sale_date DATE NOT NULL,
+    quantity_sold DECIMAL(15,4) NOT NULL,
+    cost_basis DECIMAL(15,4) NOT NULL,
+    sale_price DECIMAL(15,4) NOT NULL,
+    realized_gain DECIMAL(15,4) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_realized_gains_date ON realized_gains(sale_date);
+CREATE INDEX IF NOT EXISTS idx_realized_gains_asset ON realized_gains(asset_id, sale_date);
+
+-- Cash flow events for time-weighted return calculation
+CREATE TABLE IF NOT EXISTS cash_flows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    flow_date DATE NOT NULL,
+    flow_type TEXT NOT NULL CHECK(flow_type IN ('CONTRIBUTION', 'WITHDRAWAL')),
+    amount DECIMAL(15,4) NOT NULL,
+    asset_id INTEGER,
+    transaction_id INTEGER,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cash_flows_date ON cash_flows(flow_date);
+CREATE INDEX IF NOT EXISTS idx_cash_flows_type ON cash_flows(flow_type, flow_date);
+
 -- Current positions (calculated/cached for performance)
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

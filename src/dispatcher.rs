@@ -4,6 +4,9 @@
 //! This module provides a unified interface for command routing, making it easy
 //! to switch between different command sources (CLI args vs interactive input).
 
+pub mod performance;
+use performance::dispatch_performance_show;
+
 use crate::commands::Command;
 use crate::ui::crossterm_engine::Spinner;
 use crate::{cli, db, reports, tax};
@@ -23,6 +26,9 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
         Command::PortfolioShow { filter } => {
             dispatch_portfolio_show(filter.as_deref(), json_output).await
         }
+        Command::PerformanceShow { period } => {
+            dispatch_performance_show(&period, json_output).await
+        }
         Command::TaxReport { year, export_csv } => {
             dispatch_tax_report(year, export_csv, json_output).await
         }
@@ -32,6 +38,7 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             println!("\nAvailable commands:");
             println!("  import <file>        - Import transactions");
             println!("  portfolio show       - Show portfolio");
+            println!("  performance show <P> - Show performance (P: MTD|QTD|YTD|1Y|ALL|from:to)");
             println!("  tax report <year>    - Generate tax report");
             println!("  tax summary <year>   - Show tax summary");
             println!("  help                 - Show this help");
@@ -293,6 +300,8 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
 
     Ok(())
 }
+
+// Snapshot commands are intentionally internal-only; no public dispatcher.
 
 struct TaxProgressPrinter {
     spinner: Spinner,
