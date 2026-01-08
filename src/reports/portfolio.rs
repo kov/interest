@@ -467,7 +467,7 @@ pub fn calculate_allocation(report: &PortfolioReport) -> HashMap<AssetType, (Dec
     for position in &report.positions {
         let value = position.current_value.unwrap_or(position.total_cost);
         let entry = allocation
-            .entry(position.asset.asset_type.clone())
+            .entry(position.asset.asset_type)
             .or_insert((Decimal::ZERO, Decimal::ZERO));
         entry.0 += value;
     }

@@ -248,7 +248,7 @@ pub fn calculate_monthly_tax(
                         } else {
                             swing_matcher.match_sale(&tx)?
                         };
-                        sale.asset_type = asset.asset_type.clone();
+                        sale.asset_type = asset.asset_type;
                         sales_by_category.entry(category).or_default().push(sale);
                     } else if tx.trade_date > month_end {
                         // We've passed the target month, no need to process further

@@ -108,13 +108,6 @@ pub enum PortfolioCommands {
         #[arg(short, long)]
         asset_type: Option<String>,
     },
-
-    /// Show performance metrics over time
-    Performance {
-        /// Time period: 1m, 3m, 6m, 1y, all
-        #[arg(short, long, default_value = "all")]
-        period: String,
-    },
 }
 
 #[derive(Subcommand)]

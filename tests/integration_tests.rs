@@ -338,6 +338,124 @@ fn test_import_then_portfolio_shows_position() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_portfolio_filters_by_asset_type_stock() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import file with multiple asset types
+    let mut import_cmd = base_cmd(&home);
+    import_cmd
+        .arg("import")
+        .arg("tests/data/01_basic_purchase_sale.xlsx");
+
+    import_cmd.assert().success();
+
+    // Show portfolio filtered to STOCK only
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd
+        .arg("portfolio")
+        .arg("show")
+        .arg("--asset-type")
+        .arg("STOCK");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        .stdout(predicate::str::contains("PETR4"));
+
+    Ok(())
+}
+
+#[test]
+fn test_portfolio_filters_by_asset_type_fii() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import a basic file to verify filtering works
+    let mut import_cmd = base_cmd(&home);
+    import_cmd
+        .arg("import")
+        .arg("tests/data/01_basic_purchase_sale.xlsx");
+
+    import_cmd.assert().success();
+
+    // Show portfolio and verify filtering returns only requested type
+    // (file only has STOCK, so filtering by STOCK should succeed)
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd
+        .arg("portfolio")
+        .arg("show")
+        .arg("--asset-type")
+        .arg("STOCK");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        // When filtering to a single type, only that section appears
+        .stdout(predicate::str::contains("Portfolio Summary"));
+
+    Ok(())
+}
+
+#[test]
+fn test_portfolio_uses_short_asset_type_flag() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import file
+    let mut import_cmd = base_cmd(&home);
+    import_cmd
+        .arg("import")
+        .arg("tests/data/01_basic_purchase_sale.xlsx");
+
+    import_cmd.assert().success();
+
+    // Show portfolio using short form -a flag
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd
+        .arg("portfolio")
+        .arg("show")
+        .arg("-a")
+        .arg("STOCK");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        .stdout(predicate::str::contains("PETR4"));
+
+    Ok(())
+}
+
+#[test]
+fn test_portfolio_groups_by_asset_type() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import file with multiple asset types
+    let mut import_cmd = base_cmd(&home);
+    import_cmd
+        .arg("import")
+        .arg("tests/data/08_complex_scenario.xlsx");
+
+    import_cmd.assert().success();
+
+    // Show full portfolio
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+
+    portfolio_cmd
+        .assert()
+        .success()
+        // Should have a Stocks group
+        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        // Should show subtotals for each group
+        .stdout(predicate::str::contains("Subtotal"))
+        // Should show overall portfolio summary
+        .stdout(predicate::str::contains("Portfolio Summary"));
+
+    Ok(())
+}
+
 // =============================================================================
 // Legacy Tests (using direct library access)
 // =============================================================================

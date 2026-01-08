@@ -93,11 +93,6 @@ async fn main() -> Result<()> {
             PortfolioCommands::Show { asset_type } => {
                 handle_portfolio_show(asset_type.as_deref(), cli.json).await
             }
-            PortfolioCommands::Performance { period } => {
-                println!("Showing performance for period: {}", period);
-                // TODO: Implement performance metrics
-                Ok(())
-            }
         },
 
         Commands::Prices { action } => match action {

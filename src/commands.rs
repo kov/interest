@@ -81,19 +81,19 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 .next()
                 .ok_or_else(|| CommandParseError {
                     message:
-                        "portfolio requires action (show). Usage: portfolio show [--filter <type>]"
+                        "portfolio requires action (show). Usage: portfolio show [-a|--asset-type <type>]"
                             .to_string(),
                 })?
                 .to_lowercase();
 
             match action.as_str() {
                 "show" => {
-                    // Look for --filter option
+                    // Look for --asset-type or -a option
                     let mut filter = None;
                     let collected: Vec<_> = parts.collect();
 
                     for i in 0..collected.len() {
-                        if (collected[i] == "--filter" || collected[i] == "-f")
+                        if (collected[i] == "--asset-type" || collected[i] == "-a")
                             && i + 1 < collected.len()
                         {
                             filter = Some(collected[i + 1].to_string());
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_parse_portfolio_show_with_filter() {
-        let cmd = parse_command("portfolio show --filter stock").unwrap();
+        let cmd = parse_command("portfolio show --asset-type stock").unwrap();
         assert_eq!(
             cmd,
             Command::PortfolioShow {
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_parse_portfolio_show_short_filter() {
-        let cmd = parse_command("portfolio show -f fii").unwrap();
+        let cmd = parse_command("portfolio show -a fii").unwrap();
         assert_eq!(
             cmd,
             Command::PortfolioShow {
