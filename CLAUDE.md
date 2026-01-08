@@ -235,13 +235,59 @@ let is_quota_pre_2026 = transaction.settlement_date
 
 ## Common Development Tasks
 
+### Adding a New Command
+
+**New pattern** (TUI + CLI dual mode):
+
+1. Add variant to `Command` enum in `src/commands.rs`:
+```rust
+pub enum Command {
+    // ... existing commands
+    MyNewCommand { arg1: String, arg2: bool },
+}
+```
+
+2. Add parsing logic in `parse_command()`:
+```rust
+"mynewcommand" => {
+    let arg1 = parts.next().ok_or(...)?.to_string();
+    let arg2 = parts.any(|p| p == "--flag");
+    Ok(Command::MyNewCommand { arg1, arg2 })
+}
+```
+
+3. Add handler in `src/dispatcher.rs`:
+```rust
+pub async fn dispatch_my_new_command(arg1: &str, arg2: bool, json_output: bool) -> Result<()> {
+    // Business logic here
+    // Format output based on json_output flag
+}
+```
+
+4. Wire up in `dispatch_command()`:
+```rust
+Command::MyNewCommand { arg1, arg2 } => {
+    dispatch_my_new_command(&arg1, arg2, json_output).await
+}
+```
+
+5. (Optional) Add to readline completion patterns in `src/ui/mod.rs`
+
+6. (Optional) Add legacy clap command in `src/cli/mod.rs` for backwards compatibility
+
+**Old pattern** (pure CLI, deprecated):
+- Only add to `src/cli/mod.rs` via clap macros
+- Add handler in `main.rs`
+- Cannot be used from TUI
+
 ### Adding a New Importer
 
 1. Create parser in `src/importers/new_format.rs`
 2. Return `Vec<RawTransaction>` (for trades) or custom type
 3. Add variant to `ImportResult` enum in `importers/mod.rs`
 4. Update `file_detector.rs` if auto-detection needed
-5. Add handler in `main.rs`
+5. Add handler in `dispatcher.rs` (not `main.rs`)
+6. **Important**: Call `invalidate_snapshots_after()` after successful import
 
 See `irpf_pdf.rs` for reference implementation with custom `IrpfPosition` type.
 
@@ -252,6 +298,13 @@ See `irpf_pdf.rs` for reference implementation with custom `IrpfPosition` type.
 3. Use average-cost matcher from `cost_basis.rs` for gains/losses
 4. Add DARF payment generation in `darf.rs`
 5. Write integration test in `tests/tax_integration_tests.rs`
+
+### Adding a New Performance Metric
+
+1. Add field to `PerformanceReport` struct in `reports/performance.rs`
+2. Calculate metric in `calculate_performance()` function
+3. Add formatting in `cli/formatters.rs` (for terminal output)
+4. Add to JSON serialization (automatic if field is added to struct)
 
 ### Handling Corporate Actions
 
@@ -272,6 +325,8 @@ Always record adjustment in junction table:
 db::insert_corporate_action_adjustment(&conn, action_id, tx_id,
     old_quantity, new_quantity, old_price, new_price)?;
 ```
+
+**Important**: Call `invalidate_snapshots_after(action.ex_date)` after applying actions.
 
 ## Testing Strategy
 
@@ -298,6 +353,53 @@ Located in `tests/`:
 
 Run: `cargo test --test generate_test_files -- --nocapture`
 
+## TUI Development Workflow
+
+The TUI is being built incrementally following the plan in `INCREMENTAL_TUI_PLAN.md`. Current status:
+
+**Phase 1-2 (COMPLETE)**: Foundation + Command Layer
+- ✅ Custom error types in `error.rs`
+- ✅ Validation extraction in `importers/validation.rs`
+- ✅ Command enum + parser in `commands.rs`
+- ✅ Dispatcher in `dispatcher.rs`
+- ✅ CLI refactored to use new command layer
+
+**Phase 3 (IN PROGRESS)**: TUI Infrastructure
+- ✅ Basic readline REPL in `ui/mod.rs`
+- ✅ Readline wrapper with completion in `ui/readline.rs`
+- ✅ Crossterm rendering helpers in `ui/crossterm_engine.rs`
+- 🚧 Overlays system in `ui/overlays.rs` (skeleton exists, needs file picker)
+- 🚧 Event loop in `ui/event_loop.rs` (skeleton exists, needs overlay routing)
+
+**Phase 4 (PLANNED)**: Easy Commands → TUI
+- Portfolio show, tax report, performance show
+- All will reuse existing dispatcher handlers
+
+**Phase 5 (PLANNED)**: Import Workflow
+- Interactive file picker, streaming preview, validation overlays
+- Most complex command to port
+
+**Phase 6 (PLANNED)**: Performance Tracking Features
+- See `PERFORMANCE_TRACKING_PLAN.md` for details
+- Snapshot backfilling, live dashboard, B3 COTAHIST import
+
+### Testing TUI in Development
+
+```bash
+# Launch TUI for manual testing
+cargo run
+
+# Test specific command parsing
+cargo test commands::parse_command
+
+# Test dispatcher without TUI
+cargo test dispatcher::
+
+# Check readline completion (requires manual inspection)
+cargo run
+# Then type: /p<TAB> → should complete to /portfolio
+```
+
 ## Critical Invariants
 
 1. **Decimal precision**: All money/quantity calculations use `Decimal`, never `f64`
@@ -305,6 +407,8 @@ Run: `cargo test --test generate_test_files -- --nocapture`
 3. **Total cost preservation**: After corporate actions, `quantity × price` must equal original total
 4. **Idempotent actions**: Junction table prevents double-adjustment
 5. **No negative positions**: Selling more than owned should error (not short selling)
+6. **Snapshot invalidation**: Always call `invalidate_snapshots_after()` when modifying transactions
+7. **Command dispatcher isolation**: Never put business logic in `main.rs` or `ui/mod.rs` - only in `dispatcher.rs`
 
 ## Common Pitfalls
 
@@ -392,9 +496,74 @@ Rate limiting handled by client code (no auth tokens needed as of 2026).
 
 Current support: IRPF 2019 (year 2018 data).
 
+## Recent Architectural Decisions (January 2026)
+
+### 1. TUI vs Pure CLI
+
+**Decision**: Build interactive TUI as primary interface, keep CLI for scripting/automation.
+
+**Rationale**:
+- Better UX for everyday use (no need to remember exact command syntax)
+- Readline completion reduces typing
+- Future: overlays for file picking, validation, data entry
+- CLI still available via `cargo run -- <command>` for scripts/automation
+- Both modes share 100% of business logic (zero duplication)
+
+**Implementation**: See `INCREMENTAL_TUI_PLAN.md` for phased rollout plan.
+
+### 2. Custom Command Parser vs Clap
+
+**Decision**: Replace clap with custom `parse_command()` in `commands.rs`.
+
+**Rationale**:
+- Clap designed for traditional CLI, doesn't work with readline input
+- Custom parser handles both `/import file.xlsx` (TUI) and `import file.xlsx` (CLI)
+- Simpler error handling (return `CommandParseError` instead of exiting)
+- Less code (clap macros generate lots of boilerplate)
+- Easier to add commands (just add enum variant + match arm)
+
+**Migration path**: Keep clap in `cli/mod.rs` for backwards compatibility during transition.
+
+### 3. Snapshot-Based Performance Tracking
+
+**Decision**: Store portfolio snapshots with fingerprint invalidation (similar to IRPF caching).
+
+**Rationale**:
+- Recalculating full portfolio history for every performance query is slow
+- Snapshots enable fast date-range queries (MTD, YTD, etc.)
+- Fingerprint validation ensures snapshots stay accurate after data changes
+- Proven pattern (IRPF caching already works this way)
+- Enables future features: backfilling, charting, comparing periods
+
+**Trade-off**: Extra storage (position_snapshots table), but negligible vs. speed gain.
+
+### 4. Dispatcher Pattern for Command Routing
+
+**Decision**: Central `dispatcher.rs` module routes commands to handlers.
+
+**Rationale**:
+- Single source of truth for command execution
+- Both TUI and CLI call same `dispatch_command()` function
+- Easy to add logging/metrics/error handling in one place
+- Testable without UI (just test dispatcher functions)
+- Clear separation: `main.rs` = entry point, `ui/mod.rs` = UI loop, `dispatcher.rs` = business logic
+
+### 5. Performance Module Structure
+
+**Decision**: Separate `reports/performance.rs` from `reports/portfolio.rs`.
+
+**Rationale**:
+- Portfolio = current positions + P&L (snapshot in time)
+- Performance = TWR calculation over date ranges (requires 2+ snapshots)
+- Different use cases, different inputs/outputs
+- Avoids bloating portfolio module with time-series logic
+
 ## Files to Check Before Modifying
 
+- **TUI/CLI architecture**: Review `INCREMENTAL_TUI_PLAN.md` before adding commands
+- **Performance tracking**: Review `PERFORMANCE_TRACKING_PLAN.md` before adding metrics
 - **Tax calculations**: Review `README.md` section on Brazilian tax rules
-- **Database schema**: Check `src/db/schema.sql` before adding columns
+- **Database schema**: Check `src/db/schema.sql` before adding columns/tables
 - **Corporate actions**: Review `README.md` section on idempotency design
 - **Import formats**: Check `src/importers/` for similar parsers
+- **Command routing**: Always add new commands to `commands.rs` + `dispatcher.rs`, not just `main.rs`
