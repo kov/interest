@@ -5,12 +5,14 @@ use std::time::Duration;
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub enum AppEvent {
     Input(KeyEvent),
     Tick,
     Other,
 }
 
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn map_event(ev: CrosstermEvent) -> AppEvent {
     match ev {
         CrosstermEvent::Key(key) => AppEvent::Input(key),
@@ -19,6 +21,7 @@ pub fn map_event(ev: CrosstermEvent) -> AppEvent {
 }
 
 /// Poll for a terminal event; returns Tick when the timeout expires.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn poll_event(timeout: Duration) -> anyhow::Result<AppEvent> {
     if event::poll(timeout)? {
         let ev = event::read()?;

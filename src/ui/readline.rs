@@ -10,6 +10,7 @@ use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Config, Context, Editor, Helper};
 
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub struct CommandHelper {
     patterns: Vec<Vec<String>>,
     hinter: HistoryHinter,
@@ -113,6 +114,7 @@ impl Completer for CommandHelper {
 }
 
 /// Thin wrapper over `rustyline::Editor` with preset commands and history path.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub struct Readline {
     editor: Editor<CommandHelper, DefaultHistory>,
     history_path: PathBuf,
@@ -154,6 +156,7 @@ impl Readline {
     }
 
     /// Utility for tests to inspect completions without invoking terminal input.
+    #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
     pub fn completions(&self, line: &str) -> Vec<String> {
         if let Some(helper) = self.editor.helper() {
             let pos = line.len();
@@ -166,6 +169,7 @@ impl Readline {
     }
 
     /// Return completions alongside the replacement start index (for tests).
+    #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
     pub fn completions_with_start(&self, line: &str) -> Vec<(usize, String)> {
         if let Some(helper) = self.editor.helper() {
             let pos = line.len();

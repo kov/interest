@@ -26,7 +26,7 @@ clap = { version = "4.5", features = ["derive", "cargo"] }
 tokio = { version = "1.40", features = ["full"] }
 
 # HTTP client for price APIs
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 # Headless browser for web scraping (investing.com, etc.)
 headless_chrome = "1.0"
@@ -72,6 +72,8 @@ unicode-width = "0.1"
 # Utilities
 itertools = "0.12"
 once_cell = "1.19"
+dirs = "5.0"       # Cross-platform cache/config directories
+zip = "2.1"        # ZIP archive extraction for COTAHIST files
 
 # Configuration
 toml = "0.8"

@@ -1,12 +1,15 @@
 mod cli;
+mod commands;
 mod corporate_actions;
 mod db;
+mod dispatcher;
 mod importers;
 mod pricing;
 mod reports;
 mod scraping;
 mod tax;
 mod term_contracts;
+mod ui;
 mod utils;
 
 use anyhow::Result;
@@ -91,7 +94,13 @@ async fn main() -> Result<()> {
 
         Commands::Portfolio { action } => match action {
             PortfolioCommands::Show { asset_type } => {
-                handle_portfolio_show(asset_type.as_deref(), cli.json).await
+                dispatcher::dispatch_command(
+                    commands::Command::PortfolioShow {
+                        filter: asset_type.clone(),
+                    },
+                    cli.json,
+                )
+                .await
             }
         },
 
@@ -2092,112 +2101,6 @@ async fn handle_action_edit(
         "✓".green().bold()
     );
 
-    Ok(())
-}
-
-/// Handle portfolio show command
-async fn handle_portfolio_show(asset_type: Option<&str>, json_output: bool) -> Result<()> {
-    info!("Generating portfolio report");
-
-    // Initialize database
-    db::init_database(None)?;
-    let conn = db::open_db(None)?;
-
-    // Parse asset type filter if provided
-    let asset_type_filter = if let Some(type_str) = asset_type {
-        Some(
-            type_str
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", type_str))?,
-        )
-    } else {
-        None
-    };
-
-    // Calculate portfolio
-    let report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
-
-    if report.positions.is_empty() {
-        if json_output {
-            #[derive(Serialize)]
-            struct EmptyPortfolio {
-                positions: Vec<()>,
-                total_cost: String,
-                total_value: String,
-                total_pl: String,
-                total_pl_pct: String,
-            }
-            println!(
-                "{}",
-                json_success(&EmptyPortfolio {
-                    positions: vec![],
-                    total_cost: "0.00".to_string(),
-                    total_value: "0.00".to_string(),
-                    total_pl: "0.00".to_string(),
-                    total_pl_pct: "0.00".to_string(),
-                })
-            );
-        } else {
-            println!("{}", cli::formatters::format_empty_portfolio());
-        }
-        return Ok(());
-    }
-
-    if json_output {
-        println!(
-            "{}",
-            json_success(serde_json::json!({
-                "positions": report.positions.iter().map(|p| serde_json::json!({
-                    "ticker": p.asset.ticker,
-                    "asset_type": p.asset.asset_type.as_str(),
-                    "quantity": p.quantity.to_string(),
-                    "average_cost": p.average_cost.to_string(),
-                    "total_cost": p.total_cost.to_string(),
-                    "current_price": p.current_price.map(|pr| pr.to_string()),
-                    "current_value": p.current_value.map(|v| v.to_string()),
-                    "unrealized_pl": p.unrealized_pl.map(|pl| pl.to_string()),
-                    "unrealized_pl_pct": p.unrealized_pl_pct.map(|pl| pl.to_string()),
-                })).collect::<Vec<_>>(),
-                "total_cost": report.total_cost.to_string(),
-                "total_value": report.total_value.to_string(),
-                "total_pl": report.total_pl.to_string(),
-                "total_pl_pct": report.total_pl_pct.to_string(),
-            }))
-        );
-        return Ok(());
-    }
-
-    // Use formatter for table output
-    let filter_str = asset_type.map(|f| f.to_uppercase());
-    println!(
-        "{}",
-        cli::formatters::format_portfolio_table(&report, filter_str.as_deref())
-    );
-
-    // Display asset allocation if showing full portfolio
-    if asset_type_filter.is_none() {
-        let allocation = reports::calculate_allocation(&report);
-
-        if allocation.len() > 1 {
-            use colored::Colorize;
-            println!("{} Asset Allocation", "🎯".cyan().bold());
-
-            let mut alloc_vec: Vec<_> = allocation.iter().collect();
-            alloc_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
-
-            for (asset_type, (value, pct)) in alloc_vec {
-                let type_ref: &db::AssetType = asset_type;
-                println!(
-                    "  {}: {} ({:.2}%)",
-                    type_ref.as_str().to_uppercase(),
-                    format!("R$ {:.2}", value).cyan(),
-                    pct
-                );
-            }
-        }
-    }
-
-    println!();
     Ok(())
 }
 

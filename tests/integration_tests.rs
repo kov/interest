@@ -44,6 +44,7 @@ fn get_db_path(home: &TempDir) -> PathBuf {
 fn base_cmd(home: &TempDir) -> Command {
     let mut cmd = Command::new(cargo::cargo_bin!("interest"));
     cmd.env("HOME", home.path());
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1");
     cmd.arg("--no-color");
     cmd
 }

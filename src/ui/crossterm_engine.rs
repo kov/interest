@@ -2,9 +2,11 @@
 //! These functions return strings so they are easy to test without a terminal.
 
 use colored::Colorize;
+use std::cell::Cell;
 use tabled::{settings::Style, Table, Tabled};
 
 /// Render a vector of `Tabled` items into a modern-styled table string.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn draw_table<T: Tabled>(data: &[T]) -> String {
     let mut table = Table::new(data);
     table.with(Style::modern());
@@ -12,11 +14,13 @@ pub fn draw_table<T: Tabled>(data: &[T]) -> String {
 }
 
 /// Render a simple message (placeholder for richer layouts later).
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn draw_message(msg: &str) -> String {
     msg.to_string()
 }
 
 /// Simple textual menu with a selected index highlighted.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn draw_menu(title: &str, items: &[&str], selected: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!("{}\n", title.bold()));
@@ -34,7 +38,7 @@ pub fn draw_menu(title: &str, items: &[&str], selected: usize) -> String {
 #[derive(Debug, Clone)]
 pub struct Spinner {
     frames: &'static [&'static str],
-    index: usize,
+    index: Cell<usize>,
 }
 
 impl Default for Spinner {
@@ -47,13 +51,14 @@ impl Spinner {
     pub fn new() -> Self {
         Self {
             frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
-            index: 0,
+            index: Cell::new(0),
         }
     }
 
-    pub fn tick(&mut self) -> &str {
-        let frame = self.frames[self.index];
-        self.index = (self.index + 1) % self.frames.len();
+    pub fn tick(&self) -> &str {
+        let idx = self.index.get();
+        let frame = self.frames[idx];
+        self.index.set((idx + 1) % self.frames.len());
         frame
     }
 }
@@ -80,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_spinner_cycles_frames() {
-        let mut spinner = Spinner::new();
+        let spinner = Spinner::new();
         let first = spinner.tick().to_string();
         for _ in 0..spinner.frames.len() - 1 {
             spinner.tick();

@@ -2,6 +2,9 @@
 //
 // Uses headless Chrome to bypass Cloudflare protection and extract
 // corporate action data (splits, reverse splits, bonuses) from the website.
+//
+// Note: B3 COTAHIST downloader no longer uses Chrome (uses direct URLs),
+// but this scraper still needs it for investing.com.
 
 use anyhow::{Context, Result};
 use headless_chrome::{Browser, LaunchOptions};

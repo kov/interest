@@ -8,6 +8,7 @@
 
 /// Parsed command from user input
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
 pub enum Command {
     /// Import transactions from file: `import <path> [--dry-run]`
     Import { path: String, dry_run: bool },
@@ -19,14 +20,28 @@ pub enum Command {
     TaxReport { year: i32, export_csv: bool },
     /// Show tax summary: `tax summary <year>`
     TaxSummary { year: i32 },
+    /// Price management: `prices import-b3 <year> [--nocache]` or `prices clear-cache [year]`
+    Prices { action: PricesAction },
     /// Show help
     Help,
     /// Exit/quit
     Exit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum PricesAction {
+    /// Import COTAHIST from B3: `prices import-b3 <year> [--nocache]`
+    ImportB3 { year: i32, no_cache: bool },
+    /// Import COTAHIST from a local ZIP file: `prices import-b3-file <path>`
+    ImportB3File { path: String },
+    /// Clear B3 cache: `prices clear-cache [year]`
+    ClearCache { year: Option<i32> },
+}
+
 /// Error type for command parsing
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub struct CommandParseError {
     pub message: String,
 }
@@ -46,6 +61,7 @@ impl std::error::Error for CommandParseError {}
 /// - `import file.xlsx` or `/import file.xlsx`
 /// - `portfolio show stock` or `/portfolio show --filter stock`
 /// - `tax report 2024` or `/tax report 2024`
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
     let input = input.trim();
 
@@ -170,6 +186,60 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 "summary" => Ok(Command::TaxSummary { year }),
                 _ => Err(CommandParseError {
                     message: format!("Unknown tax action: {}. Use: report or summary", action),
+                }),
+            }
+        }
+        "prices" | "price" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "prices requires action. Usage: prices <import-b3|clear-cache> [args]"
+                        .to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "import-b3" => {
+                    let year = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "import-b3 requires a year. Usage: prices import-b3 <year> [--nocache]".to_string(),
+                        })?
+                        .parse::<i32>()
+                        .map_err(|_| CommandParseError {
+                            message: "Year must be a valid number (e.g., 2023)".to_string(),
+                        })?;
+
+                    let no_cache = parts.any(|p| p == "--nocache");
+
+                    Ok(Command::Prices {
+                        action: PricesAction::ImportB3 { year, no_cache },
+                    })
+                }
+                "import-b3-file" => {
+                    let path = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "import-b3-file requires a ZIP path. Usage: prices import-b3-file <path>".to_string(),
+                        })?
+                        .to_string();
+
+                    Ok(Command::Prices {
+                        action: PricesAction::ImportB3File { path },
+                    })
+                }
+                "clear-cache" => {
+                    let year = parts.next().and_then(|y| y.parse::<i32>().ok());
+
+                    Ok(Command::Prices {
+                        action: PricesAction::ClearCache { year },
+                    })
+                }
+                _ => Err(CommandParseError {
+                    message: format!(
+                        "Unknown prices action: {}. Use: import-b3 or clear-cache",
+                        action
+                    ),
                 }),
             }
         }

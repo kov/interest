@@ -3,6 +3,7 @@
 pub mod models;
 
 use anyhow::{Context, Result};
+use chrono::Datelike;
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
@@ -592,6 +593,134 @@ pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(assets)
+}
+
+/// Get dates where prices are missing for an asset within a date range
+#[allow(dead_code)]
+pub fn get_missing_price_dates(
+    conn: &Connection,
+    asset_id: i64,
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> Result<Vec<NaiveDate>> {
+    use chrono::Weekday;
+    use std::collections::HashSet;
+
+    // Get all trading dates in the range (approximate: weekdays only)
+    let mut trading_dates = HashSet::new();
+    let mut current = from_date;
+    while current <= to_date {
+        // Check if it's a weekday (Monday=0 to Friday=4)
+        let weekday_num = match current.weekday() {
+            Weekday::Mon => 0,
+            Weekday::Tue => 1,
+            Weekday::Wed => 2,
+            Weekday::Thu => 3,
+            Weekday::Fri => 4,
+            _ => 5, // Weekend
+        };
+        if weekday_num < 5 {
+            trading_dates.insert(current);
+        }
+        current = current.succ_opt().unwrap_or(current);
+    }
+
+    // Get dates where we have prices
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT price_date FROM price_history WHERE asset_id = ?1 AND price_date >= ?2 AND price_date <= ?3",
+    )?;
+
+    let existing_dates: HashSet<NaiveDate> = stmt
+        .query_map(rusqlite::params![asset_id, from_date, to_date], |row| {
+            row.get(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .collect();
+
+    // Return dates that exist in trading_dates but not in existing_dates
+    let missing: Vec<NaiveDate> = trading_dates
+        .difference(&existing_dates)
+        .copied()
+        .collect::<Vec<_>>();
+
+    let mut sorted_missing = missing;
+    sorted_missing.sort();
+
+    Ok(sorted_missing)
+}
+
+/// Determine which years need COTAHIST data for a date range
+#[allow(dead_code)]
+pub fn get_required_years(from_date: NaiveDate, to_date: NaiveDate) -> Vec<i32> {
+    use chrono::Datelike;
+
+    let mut years = Vec::new();
+    let mut current_year = from_date.year();
+    let end_year = to_date.year();
+
+    while current_year <= end_year {
+        years.push(current_year);
+        current_year += 1;
+    }
+
+    years
+}
+
+/// Check if any prices exist for an asset within a date range
+#[allow(dead_code)]
+pub fn has_any_prices(
+    conn: &Connection,
+    asset_id: i64,
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM price_history WHERE asset_id = ?1 AND price_date >= ?2 AND price_date <= ?3",
+        rusqlite::params![asset_id, from_date, to_date],
+        |row| row.get(0),
+    )?;
+
+    Ok(count > 0)
+}
+
+/// Get the earliest transaction date in the portfolio
+#[allow(dead_code)]
+pub fn get_earliest_transaction_date(conn: &Connection) -> Result<Option<NaiveDate>> {
+    let mut stmt = conn.prepare("SELECT MIN(trade_date) FROM transactions")?;
+
+    // MIN() returns a single row with NULL when table is empty; map NULL to None
+    let result: Option<Option<NaiveDate>> = stmt.query_row([], |row| row.get(0)).optional()?;
+
+    Ok(result.flatten())
+}
+
+/// Get only assets that have transactions (owned or previously owned)
+#[allow(dead_code)]
+pub fn get_assets_with_transactions(conn: &Connection) -> Result<Vec<Asset>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT a.id, a.ticker, a.name, a.asset_type, a.created_at, a.updated_at
+         FROM assets a 
+         INNER JOIN transactions t ON a.id = t.asset_id
+         ORDER BY a.ticker",
+    )?;
+
+    let assets = stmt.query_map([], |row| {
+        Ok(Asset {
+            id: Some(row.get(0)?),
+            ticker: row.get(1)?,
+            name: row.get(2)?,
+            asset_type: row.get::<_, String>(3)?.parse().unwrap(),
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    })?;
+
+    let mut result = Vec::new();
+    for asset in assets {
+        result.push(asset?);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

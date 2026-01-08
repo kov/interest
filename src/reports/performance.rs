@@ -11,6 +11,7 @@ use crate::reports::portfolio::{
 
 #[derive(Debug, Clone)]
 pub struct PerformanceReport {
+    #[allow(dead_code)] // Kept for future dashboard/charting features
     pub period: Period,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
@@ -33,18 +34,20 @@ impl PerformanceReport {
 
 #[derive(Debug, Clone)]
 pub struct AssetPerformance {
+    #[allow(dead_code)] // Kept for future detailed performance breakdown
     pub asset_type: AssetType,
     pub start_value: Decimal,
     pub end_value: Decimal,
     pub return_pct: Decimal,
+    #[allow(dead_code)] // Kept for future detailed performance breakdown
     pub contribution_to_total: Decimal, // Percentage points
 }
 
 #[derive(Debug, Clone)]
 pub enum Period {
-    MTD,     // Month-to-date
-    QTD,     // Quarter-to-date
-    YTD,     // Year-to-date
+    Mtd,     // Month-to-date
+    Qtd,     // Quarter-to-date
+    Ytd,     // Year-to-date
     OneYear, // Last 365 days
     AllTime, // Since first transaction
     Custom { from: NaiveDate, to: NaiveDate },
@@ -77,18 +80,18 @@ pub fn get_period_dates(
 ) -> Result<(NaiveDate, NaiveDate)> {
     let today = Local::now().date_naive();
     let (start, end) = match period {
-        Period::MTD => {
+        Period::Mtd => {
             let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
                 .ok_or_else(|| anyhow::anyhow!("Invalid current month"))?;
             (start, today)
         }
-        Period::QTD => {
+        Period::Qtd => {
             let quarter_start_month = ((today.month() - 1) / 3) * 3 + 1;
             let start = NaiveDate::from_ymd_opt(today.year(), quarter_start_month, 1)
                 .ok_or_else(|| anyhow::anyhow!("Invalid quarter start"))?;
             (start, today)
         }
-        Period::YTD => {
+        Period::Ytd => {
             let start = NaiveDate::from_ymd_opt(today.year(), 1, 1)
                 .ok_or_else(|| anyhow::anyhow!("Invalid year start"))?;
             (start, today)
@@ -444,6 +447,7 @@ pub fn calculate_time_weighted_return(
     Ok(twr_pct)
 }
 
+#[allow(dead_code)] // Kept for Phase 6: Performance Tracking (see PERFORMANCE_TRACKING_PLAN.md)
 pub fn backfill_daily_snapshots(
     conn: &mut Connection,
     from_date: NaiveDate,
@@ -485,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_get_period_dates_mtd() {
-        let (start, end) = get_period_dates(Period::MTD, None).unwrap();
+        let (start, end) = get_period_dates(Period::Mtd, None).unwrap();
         assert!(start <= end);
     }
 

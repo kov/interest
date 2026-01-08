@@ -3,11 +3,13 @@
 use crate::ui::crossterm_engine;
 
 /// A simple trait all overlays implement so they can render into strings.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub trait Overlay {
     fn render(&self) -> String;
 }
 
 /// Menu overlay that highlights the selected item.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub struct MenuOverlay<'a> {
     title: &'a str,
     items: Vec<&'a str>,
@@ -15,6 +17,7 @@ pub struct MenuOverlay<'a> {
 }
 
 impl<'a> MenuOverlay<'a> {
+    #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
     pub fn new(title: &'a str, items: Vec<&'a str>) -> Self {
         Self {
             title,
@@ -23,12 +26,14 @@ impl<'a> MenuOverlay<'a> {
         }
     }
 
+    #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
     pub fn select(&mut self, idx: usize) {
         if idx < self.items.len() {
             self.selected = idx;
         }
     }
 
+    #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
     pub fn selected(&self) -> Option<&str> {
         self.items.get(self.selected).copied()
     }

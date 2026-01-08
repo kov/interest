@@ -1,17 +1,20 @@
 //! Performance command dispatcher implementation
 
+use crate::ui::crossterm_engine::Spinner;
 use crate::{db, reports};
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use colored::Colorize;
+use std::io::{stdout, Write};
+use tracing;
 
 /// Parse a period string (MTD, QTD, YTD, 1Y, ALL, YYYY, or from:to)
 fn parse_period_string(period: &str) -> Result<reports::Period> {
     let upper = period.to_uppercase();
     match upper.as_str() {
-        "MTD" => Ok(reports::Period::MTD),
-        "QTD" => Ok(reports::Period::QTD),
-        "YTD" => Ok(reports::Period::YTD),
+        "MTD" => Ok(reports::Period::Mtd),
+        "QTD" => Ok(reports::Period::Qtd),
+        "YTD" => Ok(reports::Period::Ytd),
         "1Y" | "ONEYEAR" => Ok(reports::Period::OneYear),
         "ALL" | "ALLTIME" => Ok(reports::Period::AllTime),
         _ => {
@@ -49,6 +52,88 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     let mut conn = db::open_db(None)?;
 
     let period = parse_period_string(period_str)?;
+
+    // Ensure prices are available for the required date range
+    let assets = db::get_assets_with_transactions(&conn)?;
+    if !assets.is_empty() {
+        // Get the date range for prices
+        let earliest = db::get_earliest_transaction_date(&conn)?;
+        if let Some(earliest_date) = earliest {
+            let today = chrono::Local::now().date_naive();
+
+            if !json_output {
+                let total = assets.len();
+                let spinner = Spinner::new();
+                let mut completed = 0usize;
+
+                // Show initial spinner
+                print!("{} Fetching prices 0/{}...", spinner.tick(), total);
+                stdout().flush().ok();
+
+                crate::pricing::resolver::ensure_prices_available_with_progress(
+                    &mut conn,
+                    &assets,
+                    (earliest_date, today),
+                    |msg| {
+                        // Check if this is a ticker result (contains "→")
+                        if msg.contains("→") {
+                            // Parse completion count from message like "TICKER → R$ XX.XX (N/M)"
+                            if let Some(paren_start) = msg.rfind('(') {
+                                if let Some(slash) = msg[paren_start..].find('/') {
+                                    if let Ok(n) =
+                                        msg[paren_start + 1..paren_start + slash].parse::<usize>()
+                                    {
+                                        completed = n;
+                                    }
+                                }
+                            }
+
+                            // Clear spinner line, print ticker result, re-draw spinner
+                            print!("\r\x1B[2K"); // Clear current line
+                            println!("  {} {}", "↳".dimmed(), msg); // Print ticker with newline
+                            print!(
+                                "{} Fetching prices {}/{}...",
+                                spinner.tick(),
+                                completed,
+                                total
+                            );
+                            stdout().flush().ok();
+                        } else if msg.starts_with("✓") {
+                            // Completion message - clear spinner and print final status
+                            print!("\r\x1B[2K");
+                            println!("{}", msg.green());
+                            stdout().flush().ok();
+                        } else {
+                            // Status update - just update spinner text
+                            print!("\r\x1B[2K{} {}", spinner.tick(), msg);
+                            stdout().flush().ok();
+                        }
+                    },
+                )
+                .await
+                .or_else(|e: anyhow::Error| {
+                    print!("\r\x1B[2K"); // Clear spinner on error
+                    stdout().flush().ok();
+                    tracing::warn!("Price resolution failed: {}", e);
+                    // Continue anyway - performance calculation will use available prices
+                    Ok::<(), anyhow::Error>(())
+                })?;
+            } else {
+                // JSON mode: no spinner, just fetch silently
+                crate::pricing::resolver::ensure_prices_available(
+                    &mut conn,
+                    &assets,
+                    (earliest_date, today),
+                )
+                .await
+                .or_else(|e: anyhow::Error| {
+                    tracing::warn!("Price resolution failed: {}", e);
+                    // Continue anyway - performance calculation will use available prices
+                    Ok::<(), anyhow::Error>(())
+                })?;
+            }
+        }
+    }
 
     // Calculate performance
     let report = reports::calculate_performance(&mut conn, period)?;
@@ -210,13 +295,13 @@ mod tests {
     #[test]
     fn test_parse_period_mtd() {
         let period = parse_period_string("MTD").unwrap();
-        assert!(matches!(period, reports::Period::MTD));
+        assert!(matches!(period, reports::Period::Mtd));
     }
 
     #[test]
     fn test_parse_period_ytd() {
         let period = parse_period_string("ytd").unwrap();
-        assert!(matches!(period, reports::Period::YTD));
+        assert!(matches!(period, reports::Period::Ytd));
     }
 
     #[test]

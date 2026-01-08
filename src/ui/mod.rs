@@ -14,6 +14,7 @@ use anyhow::Result;
 use colored::Colorize;
 use rustyline::error::ReadlineError;
 
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 const COMMAND_PATTERNS: &[&[&str]] = &[
     &["import"],
     &["portfolio", "show"],
@@ -25,6 +26,7 @@ const COMMAND_PATTERNS: &[&[&str]] = &[
 ];
 
 /// Launch the interactive TUI REPL.
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub async fn launch_tui() -> Result<()> {
     println!("{}", "Interest - Interactive Mode".bold());
     println!(

@@ -33,16 +33,22 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             dispatch_tax_report(year, export_csv, json_output).await
         }
         Command::TaxSummary { year } => dispatch_tax_summary(year, json_output).await,
+        Command::Prices { action } => dispatch_prices(action, json_output).await,
         Command::Help => {
             println!("Help: interest <command> [options]");
             println!("\nAvailable commands:");
-            println!("  import <file>        - Import transactions");
-            println!("  portfolio show       - Show portfolio");
-            println!("  performance show <P> - Show performance (P: MTD|QTD|YTD|1Y|ALL|from:to)");
-            println!("  tax report <year>    - Generate tax report");
-            println!("  tax summary <year>   - Show tax summary");
-            println!("  help                 - Show this help");
-            println!("  exit                 - Exit application");
+            println!("  import <file>              - Import transactions");
+            println!("  portfolio show             - Show portfolio");
+            println!(
+                "  performance show <P>       - Show performance (P: MTD|QTD|YTD|1Y|ALL|from:to)"
+            );
+            println!("  tax report <year>          - Generate tax report");
+            println!("  tax summary <year>         - Show tax summary");
+            println!("  prices import-b3 <year>    - Import B3 COTAHIST data for year");
+            println!("  prices import-b3-file <p>  - Import COTAHIST from local ZIP file");
+            println!("  prices clear-cache [year]  - Clear B3 COTAHIST cache");
+            println!("  help                       - Show this help");
+            println!("  exit                       - Exit application");
             Ok(())
         }
         Command::Exit => {
@@ -56,7 +62,11 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
 
     // Initialize database
     db::init_database(None)?;
-    let conn = db::open_db(None)?;
+    let mut conn = db::open_db(None)?;
+
+    let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
+        .map(|v| v != "0")
+        .unwrap_or(false);
 
     // Parse asset type filter if provided
     let asset_type_filter = if let Some(type_str) = asset_type {
@@ -69,8 +79,106 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
         None
     };
 
-    // Calculate portfolio
-    let report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+    // Get earliest transaction date to determine price range needed
+    let earliest_date = db::get_earliest_transaction_date(&conn)?;
+    if earliest_date.is_none() {
+        // No transactions - nothing to show
+        if !json_output {
+            println!("{}", cli::formatters::format_empty_portfolio());
+        }
+        return Ok(());
+    }
+
+    let earliest_date = earliest_date.unwrap();
+    let today = chrono::Local::now().date_naive();
+
+    // Calculate portfolio positions first (fast, no network calls)
+    let mut report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+
+    if report.positions.is_empty() {
+        if !json_output {
+            println!("{}", cli::formatters::format_empty_portfolio());
+        }
+        return Ok(());
+    }
+
+    // Now fetch prices ONLY for assets that have current positions
+    if !skip_price_fetch {
+        if !json_output {
+            let assets_with_positions: Vec<_> =
+                report.positions.iter().map(|p| p.asset.clone()).collect();
+
+            if !assets_with_positions.is_empty() {
+                let total = assets_with_positions.len();
+                let spinner = Spinner::new();
+                let mut completed = 0usize;
+
+                // Show initial spinner
+                print!("{} Fetching prices 0/{}...", spinner.tick(), total);
+                stdout().flush().ok();
+
+                crate::pricing::resolver::ensure_prices_available_with_progress(
+                    &mut conn,
+                    &assets_with_positions,
+                    (earliest_date, today),
+                    |msg| {
+                        // Check if this is a ticker result (contains "→")
+                        if let Some(count) = parse_progress_count(msg) {
+                            completed = count;
+                            // Clear spinner line, print ticker result, re-draw spinner
+                            print!("\r\x1B[2K"); // Clear current line
+                            println!("  {} {}", "↳".dimmed(), msg); // Print ticker with newline
+                            print!(
+                                "{} Fetching prices {}/{}...",
+                                spinner.tick(),
+                                completed,
+                                total
+                            );
+                            stdout().flush().ok();
+                        } else if msg.starts_with("✓") {
+                            // Completion message - clear spinner and print final status
+                            print!("\r\x1B[2K");
+                            println!("{}", msg.green());
+                            stdout().flush().ok();
+                        } else {
+                            // Status update - just update spinner text
+                            print!("\r\x1B[2K{} {}", spinner.tick(), msg);
+                            stdout().flush().ok();
+                        }
+                    },
+                )
+                .await
+                .or_else(|e: anyhow::Error| {
+                    print!("\r\x1B[2K"); // Clear spinner on error
+                    stdout().flush().ok();
+                    tracing::warn!("Price resolution failed: {}", e);
+                    Ok::<(), anyhow::Error>(())
+                })?;
+
+                // Recalculate portfolio with updated prices
+                report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+            }
+        } else {
+            // JSON mode: no spinner, just fetch silently
+            let assets_with_positions: Vec<_> =
+                report.positions.iter().map(|p| p.asset.clone()).collect();
+
+            if !assets_with_positions.is_empty() {
+                crate::pricing::resolver::ensure_prices_available(
+                    &mut conn,
+                    &assets_with_positions,
+                    (earliest_date, today),
+                )
+                .await
+                .or_else(|e: anyhow::Error| {
+                    tracing::warn!("Price resolution failed: {}", e);
+                    Ok::<(), anyhow::Error>(())
+                })?;
+
+                report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+            }
+        }
+    }
 
     if report.positions.is_empty() {
         if !json_output {
@@ -389,6 +497,149 @@ impl TaxProgressPrinter {
     }
 }
 
+async fn dispatch_prices(action: crate::commands::PricesAction, _json_output: bool) -> Result<()> {
+    use crate::commands::PricesAction;
+    use crate::importers::b3_cotahist;
+
+    match action {
+        PricesAction::ImportB3 { year, no_cache } => {
+            info!("Importing B3 COTAHIST for year {}", year);
+
+            // Initialize database
+            db::init_database(None)?;
+            let mut conn = db::open_db(None)?;
+
+            println!("📥 Importing B3 COTAHIST for year {}...", year);
+
+            // Create progress callback
+            let callback = |progress: b3_cotahist::DownloadProgress| {
+                use b3_cotahist::DownloadStage;
+
+                let stage_msg = match progress.stage {
+                    DownloadStage::Downloading => {
+                        format!("📥 Downloading COTAHIST {} ZIP", progress.year)
+                    }
+                    DownloadStage::Decompressing => {
+                        format!("📦 Decompressing COTAHIST {}", progress.year)
+                    }
+                    DownloadStage::Parsing => {
+                        if let Some(total) = progress.total_records {
+                            if progress.records_processed.is_multiple_of(50000)
+                                || progress.records_processed == total
+                            {
+                                let pct = (progress.records_processed as f64 / total as f64 * 100.0)
+                                    as usize;
+                                format!(
+                                    "📝 Parsing COTAHIST {} ({}/{}  {}%)",
+                                    progress.year, progress.records_processed, total, pct
+                                )
+                            } else {
+                                return; // Don't print every line
+                            }
+                        } else {
+                            format!("📝 Parsing COTAHIST {}", progress.year)
+                        }
+                    }
+                    DownloadStage::Complete => {
+                        return; // Don't print on complete
+                    }
+                };
+
+                println!("{}", stage_msg);
+            };
+
+            // Import the year
+            match b3_cotahist::import_cotahist_year(&mut conn, year, no_cache, Some(&callback)) {
+                Ok(count) => {
+                    if count > 0 {
+                        println!(
+                            "{} Imported {} new price records for year {}",
+                            "✓".green(),
+                            count,
+                            year
+                        );
+                    } else {
+                        println!(
+                            "{} All COTAHIST {} prices already in database (cache hit)",
+                            "✓".green(),
+                            year
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} Failed to import COTAHIST {}: {}", "✗".red(), year, e);
+                    return Err(e);
+                }
+            }
+
+            Ok(())
+        }
+        PricesAction::ImportB3File { path } => {
+            info!("Importing COTAHIST from local file: {}", path);
+
+            db::init_database(None)?;
+            let mut conn = db::open_db(None)?;
+
+            match b3_cotahist::import_cotahist_from_file(&mut conn, &path) {
+                Ok(count) => {
+                    if count > 0 {
+                        println!(
+                            "{} Imported {} new price records from {}",
+                            "✓".green(),
+                            count,
+                            path
+                        );
+                    } else {
+                        println!(
+                            "{} No new prices inserted from {} (possible duplicates)",
+                            "✓".green(),
+                            path
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to import COTAHIST file {}: {}",
+                        "✗".red(),
+                        path,
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+
+            Ok(())
+        }
+        PricesAction::ClearCache { year } => {
+            match year {
+                Some(y) => {
+                    b3_cotahist::clear_cache(Some(y))?;
+                    println!("{} Cleared COTAHIST cache for year {}", "✓".green(), y);
+                }
+                None => {
+                    b3_cotahist::clear_cache(None)?;
+                    println!("{} Cleared all COTAHIST cache", "✓".green());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Parse a progress message to extract the completion count.
+/// Messages like "TICKER → R$ XX.XX (N/M)" return Some(N).
+/// Returns None if the message doesn't match the expected format.
+fn parse_progress_count(msg: &str) -> Option<usize> {
+    if !msg.contains("→") {
+        return None;
+    }
+    let paren_start = msg.rfind('(')?;
+    let slash_offset = msg[paren_start..].find('/')?;
+    msg[paren_start + 1..paren_start + slash_offset]
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +673,31 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_progress_count_valid() {
+        assert_eq!(parse_progress_count("PETR4 → R$ 35.50 (1/35)"), Some(1));
+        assert_eq!(parse_progress_count("HGLG11 → R$ 156.99 (15/35)"), Some(15));
+        assert_eq!(
+            parse_progress_count("VALE3 → R$ 58.20 (100/100)"),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn test_parse_progress_count_failed() {
+        assert_eq!(parse_progress_count("PETR4 → failed (5/35)"), Some(5));
+    }
+
+    #[test]
+    fn test_parse_progress_count_no_arrow() {
+        assert_eq!(parse_progress_count("Checking 35 assets..."), None);
+        assert_eq!(parse_progress_count("✓ All prices are up to date!"), None);
+    }
+
+    #[test]
+    fn test_parse_progress_count_no_parens() {
+        assert_eq!(parse_progress_count("PETR4 → R$ 35.50"), None);
     }
 }

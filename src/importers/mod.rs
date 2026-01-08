@@ -1,5 +1,6 @@
 // Import module - B3/CEI Excel and CSV parsers
 
+pub mod b3_cotahist;
 pub mod cei_csv;
 pub mod cei_excel;
 mod file_detector;
