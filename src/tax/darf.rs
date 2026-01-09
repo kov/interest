@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 use super::swing_trade::{MonthlyTaxCalculation, TaxCategory};
+use crate::utils::format_currency;
 
 /// DARF payment information
 #[derive(Debug, Clone)]
@@ -81,11 +82,11 @@ fn calculate_darf_due_date(year: i32, month: u32) -> Result<NaiveDate> {
 #[allow(dead_code)]
 pub fn format_darf_payment(payment: &DarfPayment) -> String {
     format!(
-        "DARF {code} - {description}\n  Vencimento: {due_date}\n  Valor: R$ {amount:.2}",
+        "DARF {code} - {description}\n  Vencimento: {due_date}\n  Valor: {amount}",
         code = payment.darf_code,
         description = payment.description,
         due_date = payment.due_date.format("%d/%m/%Y"),
-        amount = payment.tax_due
+        amount = format_currency(payment.tax_due)
     )
 }
 
@@ -104,7 +105,7 @@ pub fn format_monthly_darf_summary(payments: &[DarfPayment], year: i32, month: u
     }
 
     let total: Decimal = payments.iter().map(|p| p.tax_due).sum();
-    output.push_str(&format!("Total: R$ {:.2}", total));
+    output.push_str(&format!("Total: {}", format_currency(total)));
 
     output
 }
@@ -153,6 +154,6 @@ mod tests {
         assert!(formatted.contains("DARF 6015"));
         assert!(formatted.contains("Renda Variável"));
         assert!(formatted.contains("29/02/2024"));
-        assert!(formatted.contains("R$ 1500.00"));
+        assert!(formatted.contains("R$ 1.500,00")); // Brazilian locale format
     }
 }

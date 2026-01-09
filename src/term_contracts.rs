@@ -15,6 +15,7 @@ use std::str::FromStr;
 use tracing::{info, warn};
 
 use crate::db::models::{Transaction, TransactionType};
+use crate::utils::format_currency;
 
 /// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
 fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
@@ -221,11 +222,11 @@ pub fn process_term_liquidations(conn: &Connection) -> Result<usize> {
         };
 
         info!(
-            "Matched liquidation of {} {} shares to {} term purchase(s), avg cost: R$ {:.2}",
+            "Matched liquidation of {} {} shares to {} term purchase(s), avg cost: {}",
             base_ticker,
             quantity,
             matches.len(),
-            avg_cost
+            format_currency(avg_cost)
         );
 
         processed += 1;

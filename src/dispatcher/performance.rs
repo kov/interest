@@ -1,6 +1,7 @@
 //! Performance command dispatcher implementation
 
 use crate::ui::crossterm_engine::Spinner;
+use crate::utils::{format_currency, format_currency_aligned};
 use crate::{db, reports};
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
@@ -156,11 +157,11 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
         println!();
         println!(
             "  Start Value:      {}",
-            format!("R$ {:.2}", report.start_value).cyan()
+            format_currency(report.start_value).cyan()
         );
         println!(
             "  End Value:        {}",
-            format!("R$ {:.2}", report.end_value).cyan()
+            format_currency(report.end_value).cyan()
         );
         println!();
 
@@ -170,7 +171,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
             "red"
         };
 
-        let return_str = format!("R$ {:.2}", report.total_return);
+        let return_str = format_currency(report.total_return);
         let return_pct_str = format!("{:.2}%", report.return_pct());
 
         // Show whether this includes cash flows or is pure return
@@ -219,7 +220,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 
         println!(
             "  Realized Gains:   {}",
-            format!("R$ {:.2}", report.realized_gains).yellow()
+            format_currency(report.realized_gains).yellow()
         );
 
         // Normalize -0.00 to 0.00 for display (handle Decimal precision quirks)
@@ -231,7 +232,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
         };
         println!(
             "  Unrealized Gains: {}",
-            format!("R$ {:.2}", unrealized_display).blue()
+            format_currency(unrealized_display).blue()
         );
 
         // Show cash flow summary if available
@@ -244,15 +245,15 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
             );
             println!(
                 "    Contributions: {}",
-                format!("R$ {:.2}", cf.total_contributions).green()
+                format_currency(cf.total_contributions).green()
             );
             println!(
                 "    Withdrawals:   {}",
-                format!("R$ {:.2}", cf.total_withdrawals).red()
+                format_currency(cf.total_withdrawals).red()
             );
             println!(
                 "    Net Flow:      {}",
-                format!("R$ {:.2}", cf.net_flow).cyan()
+                format_currency(cf.net_flow).cyan()
             );
         }
 
@@ -275,8 +276,8 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                 println!(
                     "    {:12} {} → {}  {}",
                     format!("{:?}", asset_type),
-                    format!("R$ {:>10.2}", perf.start_value).dimmed(),
-                    format!("R$ {:>10.2}", perf.end_value).cyan(),
+                    format_currency_aligned(perf.start_value, 16).dimmed(),
+                    format_currency_aligned(perf.end_value, 16).cyan(),
                     return_display
                 );
             }

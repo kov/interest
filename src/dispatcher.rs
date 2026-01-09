@@ -9,6 +9,7 @@ use performance::dispatch_performance_show;
 
 use crate::commands::Command;
 use crate::ui::crossterm_engine::Spinner;
+use crate::utils::format_currency;
 use crate::{cli, db, reports, tax};
 use anyhow::Result;
 use colored::Colorize;
@@ -214,7 +215,7 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
                 println!(
                     "  {}: {} ({:.2}%)",
                     type_ref.as_str().to_uppercase(),
-                    format!("R$ {:.2}", value).cyan(),
+                    format_currency(*value).cyan(),
                     pct
                 );
             }
@@ -255,7 +256,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
     if !report.previous_losses_carry_forward.is_empty() {
         println!("{} Carryover from previous years:", "📦".yellow().bold());
         for (category, amount) in &report.previous_losses_carry_forward {
-            println!("  {}: R$ {:.2}", category.display_name(), amount);
+            println!("  {}: {}", category.display_name(), format_currency(*amount));
         }
         println!();
     }
@@ -266,19 +267,19 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
         println!("\n  {}:", summary.month_name.bold());
         println!(
             "    Sales:  {}",
-            format!("R$ {:.2}", summary.total_sales).cyan()
+            format_currency(summary.total_sales).cyan()
         );
         println!(
             "    Profit: {}",
-            format!("R$ {:.2}", summary.total_profit).green()
+            format_currency(summary.total_profit).green()
         );
         println!(
             "    Loss:   {}",
-            format!("R$ {:.2}", summary.total_loss).red()
+            format_currency(summary.total_loss).red()
         );
         println!(
             "    Tax:    {}",
-            format!("R$ {:.2}", summary.tax_due).yellow()
+            format_currency(summary.tax_due).yellow()
         );
     }
 
@@ -286,20 +287,20 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
     println!("\n{} Annual Totals:", "📈".cyan().bold());
     println!(
         "  Total Sales:  {}",
-        format!("R$ {:.2}", report.annual_total_sales).cyan()
+        format_currency(report.annual_total_sales).cyan()
     );
     println!(
         "  Total Profit: {}",
-        format!("R$ {:.2}", report.annual_total_profit).green()
+        format_currency(report.annual_total_profit).green()
     );
     println!(
         "  Total Loss:   {}",
-        format!("R$ {:.2}", report.annual_total_loss).red()
+        format_currency(report.annual_total_loss).red()
     );
     println!(
         "  {} {}\n",
         "Total Tax:".bold(),
-        format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
+        format_currency(report.annual_total_tax).yellow().bold()
     );
 
     // Losses to carry forward
@@ -309,7 +310,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
             println!(
                 "  {}: {}",
                 category.display_name(),
-                format!("R$ {:.2}", loss).yellow()
+                format_currency(*loss).yellow()
             );
         }
         println!();
@@ -373,10 +374,10 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
         .iter()
         .map(|s| MonthRow {
             month: s.month_name.to_string(),
-            sales: format!("R$ {:.2}", s.total_sales),
-            profit: format!("R$ {:.2}", s.total_profit),
-            loss: format!("R$ {:.2}", s.total_loss),
-            tax: format!("R$ {:.2}", s.tax_due),
+            sales: format_currency(s.total_sales),
+            profit: format_currency(s.total_profit),
+            loss: format_currency(s.total_loss),
+            tax: format_currency(s.tax_due),
         })
         .collect();
 
@@ -390,20 +391,20 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
     println!("\n{} Annual Total", "📈".cyan().bold());
     println!(
         "  Sales:  {}",
-        format!("R$ {:.2}", report.annual_total_sales).cyan()
+        format_currency(report.annual_total_sales).cyan()
     );
     println!(
         "  Profit: {}",
-        format!("R$ {:.2}", report.annual_total_profit).green()
+        format_currency(report.annual_total_profit).green()
     );
     println!(
         "  Loss:   {}",
-        format!("R$ {:.2}", report.annual_total_loss).red()
+        format_currency(report.annual_total_loss).red()
     );
     println!(
         "  {} {}\n",
         "Tax:".bold(),
-        format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
+        format_currency(report.annual_total_tax).yellow().bold()
     );
 
     Ok(())

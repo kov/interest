@@ -25,6 +25,7 @@ use std::io::Write as _;
 use tax::swing_trade::TaxCategory;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use utils::format_currency;
 
 // JSON response utilities
 #[derive(Serialize)]
@@ -243,8 +244,8 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                     ticker: tx.ticker.clone(),
                     tx_type: tx.transaction_type.clone(),
                     quantity: tx.quantity.to_string(),
-                    price: format!("R$ {}", tx.price),
-                    total: format!("R$ {}", tx.total),
+                    price: format_currency(tx.price),
+                    total: format_currency(tx.total),
                 })
                 .collect();
 
@@ -452,7 +453,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                             .unwrap_or_else(|| "-".to_string()),
                         price: e
                             .unit_price
-                            .map(|p| format!("R$ {:.2}", p))
+                            .map(|p| format_currency(p))
                             .unwrap_or_else(|| "-".to_string()),
                     })
                     .collect();
@@ -486,7 +487,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                 for event in income_events.iter().take(5) {
                     let value = event
                         .operation_value
-                        .map(|v| format!("R$ {:.2}", v))
+                        .map(|v| format_currency(v))
                         .unwrap_or_else(|| "-".to_string());
 
                     println!(
@@ -605,7 +606,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                     date: e.date.format("%d/%m/%Y").to_string(),
                     ticker: e.ticker.clone(),
                     quantity: e.quantity.to_string(),
-                    price: format!("R$ {:.2}", e.unit_price),
+                    price: format_currency(e.unit_price),
                     offer: e.offer.clone(),
                 })
                 .collect();
@@ -770,8 +771,8 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             .map(|pos| PositionPreview {
                 ticker: pos.ticker.clone(),
                 quantity: pos.quantity.to_string(),
-                total_cost: format!("R$ {:.2}", pos.total_cost),
-                avg_cost: format!("R$ {:.2}", pos.average_cost),
+                total_cost: format_currency(pos.total_cost),
+                avg_cost: format_currency(pos.average_cost),
                 date: format!("31/12/{}", pos.year),
             })
             .collect();
@@ -790,13 +791,13 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             year
         );
         if losses.stock_swing_loss > Decimal::ZERO {
-            println!("  • Stock Swing Trade: R$ {:.2}", losses.stock_swing_loss);
+            println!("  • Stock Swing Trade: {}", format_currency(losses.stock_swing_loss));
         }
         if losses.stock_day_loss > Decimal::ZERO {
-            println!("  • Stock Day Trade: R$ {:.2}", losses.stock_day_loss);
+            println!("  • Stock Day Trade: {}", format_currency(losses.stock_day_loss));
         }
         if losses.fii_fiagro_loss > Decimal::ZERO {
-            println!("  • FII/FIAGRO: R$ {:.2}", losses.fii_fiagro_loss);
+            println!("  • FII/FIAGRO: {}", format_currency(losses.fii_fiagro_loss));
         }
     }
 
@@ -814,13 +815,13 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
         if has_losses {
             println!("  • Loss carryforward snapshot would be created:");
             if losses.stock_swing_loss > Decimal::ZERO {
-                println!("    - Stock Swing Trade: R$ {:.2}", losses.stock_swing_loss);
+                println!("    - Stock Swing Trade: {}", format_currency(losses.stock_swing_loss));
             }
             if losses.stock_day_loss > Decimal::ZERO {
-                println!("    - Stock Day Trade: R$ {:.2}", losses.stock_day_loss);
+                println!("    - Stock Day Trade: {}", format_currency(losses.stock_day_loss));
             }
             if losses.fii_fiagro_loss > Decimal::ZERO {
-                println!("    - FII/FIAGRO: R$ {:.2}", losses.fii_fiagro_loss);
+                println!("    - FII/FIAGRO: {}", format_currency(losses.fii_fiagro_loss));
             }
         }
         return Ok(());
@@ -896,11 +897,11 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             match db::insert_transaction(&conn, &transaction) {
                 Ok(_) => {
                     println!(
-                        "  {} Added opening position: {} {} @ R$ {:.2}",
+                        "  {} Added opening position: {} {} @ {}",
                         "✓".green(),
                         position.quantity,
                         position.ticker.cyan(),
-                        position.average_cost
+                        format_currency(position.average_cost)
                     );
                     imported += 1;
                 }
@@ -990,7 +991,7 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             Ok(_) => {
                 println!("  {} Loss carryforward snapshot imported", "✓".green());
                 for (category, amount) in &loss_carry {
-                    println!("    • {}: R$ {:.2}", category.display_name(), amount);
+                    println!("    • {}: {}", category.display_name(), format_currency(*amount));
                 }
             }
             Err(e) => {
@@ -1065,7 +1066,7 @@ async fn handle_price_update() -> Result<()> {
 
                 match db::insert_price_history(&conn, &price_history) {
                     Ok(_) => {
-                        println!("{} R$ {}", "✓".green(), price);
+                        println!("{} {}", "✓".green(), format_currency(price));
                         updated += 1;
                     }
                     Err(e) => {
@@ -1147,19 +1148,19 @@ async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> 
             open: p
                 .open
                 .as_ref()
-                .map(|o| format!("R$ {:.2}", o))
+                .map(|o| format_currency(*o))
                 .unwrap_or_else(|| "-".to_string()),
             high: p
                 .high
                 .as_ref()
-                .map(|h| format!("R$ {:.2}", h))
+                .map(|h| format_currency(*h))
                 .unwrap_or_else(|| "-".to_string()),
             low: p
                 .low
                 .as_ref()
-                .map(|l| format!("R$ {:.2}", l))
+                .map(|l| format_currency(*l))
                 .unwrap_or_else(|| "-".to_string()),
-            close: format!("R$ {:.2}", p.close),
+            close: format_currency(p.close),
             volume: p
                 .volume
                 .map(|v| v.to_string())
@@ -1523,7 +1524,7 @@ async fn handle_action_add(
                 ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0
             ),
             db::CorporateActionType::CapitalReturn =>
-                format!("R$ {:.2} per share", ratio_from as f64 / 100.0),
+                format!("{} per share", format_currency(Decimal::from(ratio_from) / Decimal::from(100))),
         }
     );
     println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
@@ -2160,25 +2161,25 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
         );
         println!(
             "  Total Sales:      {}",
-            format!("R$ {:.2}", calc.total_sales).cyan()
+            format_currency(calc.total_sales).cyan()
         );
         println!(
             "  Total Cost Basis: {}",
-            format!("R$ {:.2}", calc.total_cost_basis).cyan()
+            format_currency(calc.total_cost_basis).cyan()
         );
         println!(
             "  Gross Profit:     {}",
-            format!("R$ {:.2}", calc.total_profit).green()
+            format_currency(calc.total_profit).green()
         );
         println!(
             "  Gross Loss:       {}",
-            format!("R$ {:.2}", calc.total_loss).red()
+            format_currency(calc.total_loss).red()
         );
 
         let net_str = if calc.net_profit >= rust_decimal::Decimal::ZERO {
-            format!("R$ {:.2}", calc.net_profit).green()
+            format_currency(calc.net_profit).green()
         } else {
-            format!("R$ {:.2}", calc.net_profit).red()
+            format_currency(calc.net_profit).red()
         };
         println!("  Net P&L:          {}", net_str);
 
@@ -2186,25 +2187,25 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
         if calc.loss_offset_applied > rust_decimal::Decimal::ZERO {
             println!(
                 "  Loss Offset:      {} (from previous months)",
-                format!("R$ {:.2}", calc.loss_offset_applied).cyan()
+                format_currency(calc.loss_offset_applied).cyan()
             );
             println!(
                 "  After Loss Offset: {}",
-                format!("R$ {:.2}", calc.profit_after_loss_offset).green()
+                format_currency(calc.profit_after_loss_offset).green()
             );
         }
 
         if calc.exemption_applied > rust_decimal::Decimal::ZERO {
             println!(
-                "  Exemption:        {} (sales under R$20,000)",
-                format!("R$ {:.2}", calc.exemption_applied).yellow().bold()
+                "  Exemption:        {} (sales under R$20.000)",
+                format_currency(calc.exemption_applied).yellow().bold()
             );
         }
 
         if calc.taxable_amount > rust_decimal::Decimal::ZERO {
             println!(
                 "  Taxable Amount:   {}",
-                format!("R$ {:.2}", calc.taxable_amount).yellow()
+                format_currency(calc.taxable_amount).yellow()
             );
             let tax_rate_pct = calc.tax_rate * rust_decimal::Decimal::from(100);
             println!(
@@ -2214,12 +2215,12 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
             println!(
                 "  {} {}",
                 "Tax Due:".bold(),
-                format!("R$ {:.2}", calc.tax_due).red().bold()
+                format_currency(calc.tax_due).red().bold()
             );
         } else if calc.profit_after_loss_offset < rust_decimal::Decimal::ZERO {
             println!(
                 "  {} Loss to carry forward",
-                format!("R$ {:.2}", calc.net_profit.abs()).yellow().bold()
+                format_currency(calc.net_profit.abs()).yellow().bold()
             );
         } else {
             println!("  {} No tax due (exempt)", "Tax Due:".bold().green());
@@ -2237,7 +2238,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
             "📋".cyan().bold(),
             month,
             year,
-            format!("R$ {:.2}", total_tax).red().bold()
+            format_currency(total_tax).red().bold()
         );
 
         // Generate DARF payments
@@ -2255,7 +2256,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
                 );
                 println!(
                     "    Amount:   {}",
-                    format!("R$ {:.2}", payment.tax_due).red()
+                    format_currency(payment.tax_due).red()
                 );
                 println!(
                     "    Due Date: {}",
@@ -2308,7 +2309,7 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     if !report.previous_losses_carry_forward.is_empty() {
         println!("{} Carryover from previous years:", "📦".yellow().bold());
         for (category, amount) in &report.previous_losses_carry_forward {
-            println!("  {}: R$ {:.2}", category.display_name(), amount);
+            println!("  {}: {}", category.display_name(), format_currency(*amount));
         }
         println!();
     }
@@ -2433,8 +2434,8 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
                 stock_total_offset += cat_summary.loss_offset_applied;
                 stock_total_tax += cat_summary.tax_due;
 
-                let sales_str = format!("R$ {:.2}", cat_summary.sales);
-                let profit_raw = format!("R$ {:.2}", cat_summary.profit_loss);
+                let sales_str = format_currency(cat_summary.sales);
+                let profit_raw = format_currency(cat_summary.profit_loss);
                 let profit_str = color_profit_loss(cat_summary.profit_loss, &profit_raw);
 
                 // Exempt: ✓ or ✗
@@ -2450,12 +2451,12 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
                 let offset_raw = if offset_value == Decimal::ZERO {
                     "—".to_string()
                 } else {
-                    format!("R$ {:.2}", offset_value)
+                    format_currency(offset_value)
                 };
                 let offset_str = color_offset(offset_value, &offset_raw);
 
                 let tax_str = if cat_summary.tax_due > Decimal::ZERO {
-                    format!("R$ {:.2}", cat_summary.tax_due)
+                    format_currency(cat_summary.tax_due)
                 } else {
                     "—".to_string()
                 };
@@ -2478,15 +2479,15 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
         stock_rows.push(TaxTableRow {
             month: "TOTAL".to_string(),
             category: String::new(),
-            sales: format!("R$ {:.2}", stock_total_sales),
-            profit_loss: format!("R$ {:.2}", stock_total_profit),
+            sales: format_currency(stock_total_sales),
+            profit_loss: format_currency(stock_total_profit),
             exempt: String::new(),
             offset: if stock_total_offset > Decimal::ZERO {
-                format!("R$ {:.2}", stock_total_offset).cyan().to_string()
+                format_currency(stock_total_offset).cyan().to_string()
             } else {
                 "—".to_string()
             },
-            tax: format!("R$ {:.2}", stock_total_tax),
+            tax: format_currency(stock_total_tax),
         });
 
         let table = Table::new(&stock_rows)
@@ -2554,8 +2555,8 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
                 fii_total_offset += cat_summary.loss_offset_applied;
                 fii_total_tax += cat_summary.tax_due;
 
-                let sales_str = format!("R$ {:.2}", cat_summary.sales);
-                let profit_raw = format!("R$ {:.2}", cat_summary.profit_loss);
+                let sales_str = format_currency(cat_summary.sales);
+                let profit_raw = format_currency(cat_summary.profit_loss);
                 let profit_str = color_profit_loss(cat_summary.profit_loss, &profit_raw);
 
                 // Exempt: ✓ or ✗
@@ -2571,12 +2572,12 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
                 let offset_raw = if offset_value == Decimal::ZERO {
                     "—".to_string()
                 } else {
-                    format!("R$ {:.2}", offset_value)
+                    format_currency(offset_value)
                 };
                 let offset_str = color_offset(offset_value, &offset_raw);
 
                 let tax_str = if cat_summary.tax_due > Decimal::ZERO {
-                    format!("R$ {:.2}", cat_summary.tax_due)
+                    format_currency(cat_summary.tax_due)
                 } else {
                     "—".to_string()
                 };
@@ -2599,15 +2600,15 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
         fii_rows.push(TaxTableRow {
             month: "TOTAL".to_string(),
             category: String::new(),
-            sales: format!("R$ {:.2}", fii_total_sales),
-            profit_loss: format!("R$ {:.2}", fii_total_profit),
+            sales: format_currency(fii_total_sales),
+            profit_loss: format_currency(fii_total_profit),
             exempt: String::new(),
             offset: if fii_total_offset > Decimal::ZERO {
-                format!("R$ {:.2}", fii_total_offset).cyan().to_string()
+                format_currency(fii_total_offset).cyan().to_string()
             } else {
                 "—".to_string()
             },
-            tax: format!("R$ {:.2}", fii_total_tax),
+            tax: format_currency(fii_total_tax),
         });
 
         let table = Table::new(&fii_rows)
@@ -2621,15 +2622,15 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     println!("\n{} Annual Summary:", "📋".cyan().bold());
     println!(
         "  Total Sales:  {}",
-        format!("R$ {:.2}", report.annual_total_sales).cyan()
+        format_currency(report.annual_total_sales).cyan()
     );
     println!(
         "  Total Profit: {}",
-        format!("R$ {:.2}", report.annual_total_profit).green()
+        format_currency(report.annual_total_profit).green()
     );
     println!(
         "  Total Loss:   {}",
-        format!("R$ {:.2}", report.annual_total_loss).red()
+        format_currency(report.annual_total_loss).red()
     );
     let total_loss_offset: Decimal = report
         .monthly_summaries
@@ -2639,13 +2640,13 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     if total_loss_offset > Decimal::ZERO {
         println!(
             "  Total Loss Offset: {}",
-            format!("R$ {:.2}", total_loss_offset).yellow()
+            format_currency(total_loss_offset).yellow()
         );
     }
     println!(
         "  {} {}\n",
         "Total Tax:".bold(),
-        format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
+        format_currency(report.annual_total_tax).yellow().bold()
     );
 
     // Losses to carry forward
@@ -2655,7 +2656,7 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
             println!(
                 "  {}: {}",
                 category.display_name(),
-                format!("R$ {:.2}", loss).yellow()
+                format_currency(*loss).yellow()
             );
         }
         println!();
@@ -2721,10 +2722,10 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
         .iter()
         .map(|s| MonthRow {
             month: s.month_name.to_string(),
-            sales: format!("R$ {:.2}", s.total_sales),
-            profit: format!("R$ {:.2}", s.total_profit),
-            loss: format!("R$ {:.2}", s.total_loss),
-            tax: format!("R$ {:.2}", s.tax_due),
+            sales: format_currency(s.total_sales),
+            profit: format_currency(s.total_profit),
+            loss: format_currency(s.total_loss),
+            tax: format_currency(s.tax_due),
         })
         .collect();
 
@@ -2738,20 +2739,20 @@ async fn handle_tax_summary(year: i32) -> Result<()> {
     println!("\n{} Annual Total", "📈".cyan().bold());
     println!(
         "  Sales:  {}",
-        format!("R$ {:.2}", report.annual_total_sales).cyan()
+        format_currency(report.annual_total_sales).cyan()
     );
     println!(
         "  Profit: {}",
-        format!("R$ {:.2}", report.annual_total_profit).green()
+        format_currency(report.annual_total_profit).green()
     );
     println!(
         "  Loss:   {}",
-        format!("R$ {:.2}", report.annual_total_loss).red()
+        format_currency(report.annual_total_loss).red()
     );
     println!(
         "  {} {}\n",
         "Tax:".bold(),
-        format!("R$ {:.2}", report.annual_total_tax).yellow().bold()
+        format_currency(report.annual_total_tax).yellow().bold()
     );
 
     Ok(())
@@ -2944,11 +2945,11 @@ async fn handle_transaction_add(
     println!("  Type:           {}", tx_type.as_str().to_uppercase());
     println!("  Date:           {}", trade_date.format("%Y-%m-%d"));
     println!("  Quantity:       {}", quantity);
-    println!("  Price:          {}", format!("R$ {:.2}", price).cyan());
-    println!("  Fees:           {}", format!("R$ {:.2}", fees).cyan());
+    println!("  Price:          {}", format_currency(price).cyan());
+    println!("  Fees:           {}", format_currency(fees).cyan());
     println!(
         "  Total:          {}",
-        format!("R$ {:.2}", total_cost).cyan().bold()
+        format_currency(total_cost).cyan().bold()
     );
     if let Some(n) = notes {
         println!("  Notes:          {}", n);

@@ -18,6 +18,8 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::utils::format_currency;
+
 use crate::db::models::{Asset, AssetType};
 use crate::importers::b3_cotahist;
 
@@ -363,7 +365,7 @@ where
         match fetch_result {
             Ok(price) => {
                 successful_prices.push((asset_id, price));
-                let msg = format!("{} → R$ {:.2} ({}/{})", ticker, price, completed, total);
+                let msg = format!("{} → {} ({}/{})", ticker, format_currency(price), completed, total);
                 progress(&msg);
                 tracing::debug!("Fetched price for {}: {}", ticker, price);
             }

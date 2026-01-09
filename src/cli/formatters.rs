@@ -5,6 +5,7 @@
 
 use crate::db::models::AssetType;
 use crate::reports::PortfolioReport;
+use crate::utils::format_currency;
 use colored::Colorize;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -154,21 +155,21 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
             .map(|p| {
                 let price_str = p
                     .current_price
-                    .map(|pr: Decimal| format!("R$ {:.2}", pr))
+                    .map(|pr: Decimal| format_currency(pr))
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let value_str = p
                     .current_value
-                    .map(|v: Decimal| format!("R$ {:.2}", v))
+                    .map(|v: Decimal| format_currency(v))
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let pl_str = p
                     .unrealized_pl
                     .map(|pl: Decimal| {
                         let colored = if pl >= Decimal::ZERO {
-                            format!("R$ {:.2}", pl).green().to_string()
+                            format_currency(pl).green().to_string()
                         } else {
-                            format!("R$ {:.2}", pl).red().to_string()
+                            format_currency(pl).red().to_string()
                         };
                         colored
                     })
@@ -189,8 +190,8 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
                 PositionRow {
                     ticker: p.asset.ticker.clone(),
                     quantity: format!("{:.2}", p.quantity),
-                    avg_cost: format!("R$ {:.2}", p.average_cost),
-                    total_cost: format!("R$ {:.2}", p.total_cost),
+                    avg_cost: format_currency(p.average_cost),
+                    total_cost: format_currency(p.total_cost),
                     price: price_str,
                     value: value_str,
                     pl: pl_str,
@@ -209,14 +210,15 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
         // Display subtotals for this asset type
         output.push_str(&format!("\n{} Subtotal", "─".repeat(40).bright_black()));
         output.push_str(&format!(
-            "\n  Cost: R$ {:.2}  |  Value: R$ {:.2}  |  ",
-            subtotal_cost, subtotal_value
+            "\n  Cost: {}  |  Value: {}  |  ",
+            format_currency(subtotal_cost),
+            format_currency(subtotal_value)
         ));
 
         let pl_colored = if subtotal_pl >= Decimal::ZERO {
-            format!("P&L: R$ {:.2}", subtotal_pl).green()
+            format!("P&L: {}", format_currency(subtotal_pl)).green()
         } else {
-            format!("P&L: R$ {:.2}", subtotal_pl).red()
+            format!("P&L: {}", format_currency(subtotal_pl)).red()
         };
         output.push_str(&pl_colored);
 
@@ -235,20 +237,20 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
         "━".repeat(80).bright_black()
     ));
     output.push_str(&format!(
-        "\n{:<20} R$ {:.2}",
+        "\n{:<20} {}",
         "Total Cost:".bold(),
-        report.total_cost
+        format_currency(report.total_cost)
     ));
     output.push_str(&format!(
-        "\n{:<20} R$ {:.2}",
+        "\n{:<20} {}",
         "Total Value:".bold(),
-        report.total_value
+        format_currency(report.total_value)
     ));
 
     let pl_colored = if report.total_pl >= Decimal::ZERO {
-        format!("R$ {:.2}", report.total_pl).green()
+        format_currency(report.total_pl).green()
     } else {
-        format!("R$ {:.2}", report.total_pl).red()
+        format_currency(report.total_pl).red()
     };
     output.push_str(&format!("\n{:<20} {}", "Total P&L:".bold(), pl_colored));
 
