@@ -251,10 +251,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                 "    Withdrawals:   {}",
                 format_currency(cf.total_withdrawals).red()
             );
-            println!(
-                "    Net Flow:      {}",
-                format_currency(cf.net_flow).cyan()
-            );
+            println!("    Net Flow:      {}", format_currency(cf.net_flow).cyan());
         }
 
         // Show asset type breakdown

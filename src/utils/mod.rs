@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrencySymbol {
     /// Include "R$ " prefix (Brazilian Real)
-    BRL,
+    Brl,
     /// No currency symbol (for table cells, calculations display)
     #[allow(dead_code)]
     None,
@@ -32,7 +32,7 @@ pub enum CurrencySymbol {
 /// use rust_decimal_macros::dec;
 ///
 /// assert_eq!(
-///     format_currency_with_width(dec!(1234.56), 0, CurrencySymbol::BRL),
+///     format_currency_with_width(dec!(1234.56), 0, CurrencySymbol::Brl),
 ///     "R$ 1.234,56"
 /// );
 ///
@@ -71,7 +71,7 @@ pub fn format_currency_with_width(value: Decimal, width: usize, symbol: Currency
 
     let sign = if is_negative { "-" } else { "" };
     let prefix = match symbol {
-        CurrencySymbol::BRL => "R$ ",
+        CurrencySymbol::Brl => "R$ ",
         CurrencySymbol::None => "",
     };
 
@@ -98,7 +98,7 @@ pub fn format_currency_with_width(value: Decimal, width: usize, symbol: Currency
 /// assert_eq!(format_currency(dec!(-500)), "R$ -500,00");
 /// ```
 pub fn format_currency(value: Decimal) -> String {
-    format_currency_with_width(value, 0, CurrencySymbol::BRL)
+    format_currency_with_width(value, 0, CurrencySymbol::Brl)
 }
 
 /// Format as Brazilian Real, right-aligned to specified width.
@@ -112,7 +112,7 @@ pub fn format_currency(value: Decimal) -> String {
 /// assert_eq!(result, "      R$ 100,00");
 /// ```
 pub fn format_currency_aligned(value: Decimal, width: usize) -> String {
-    format_currency_with_width(value, width, CurrencySymbol::BRL)
+    format_currency_with_width(value, width, CurrencySymbol::Brl)
 }
 
 /// Format number only (no symbol): "1.234,56"

@@ -19,6 +19,9 @@ pub struct ImportStats {
     pub skipped_actions_old: usize,
     #[allow(dead_code)]
     pub auto_applied_actions: usize,
+    pub imported_income: usize,
+    pub skipped_income: usize,
+    pub skipped_income_old: usize,
     pub errors: usize,
 }
 
@@ -421,6 +424,96 @@ pub fn import_movimentacao_entries(
         }
     }
 
+    // Process income events
+    let income_events: Vec<_> = entries.iter().filter(|e| e.is_income_event()).collect();
+
+    let mut imported_income = 0;
+    let mut skipped_income = 0;
+    let mut skipped_income_old = 0;
+    let mut max_income_date: Option<chrono::NaiveDate> = None;
+
+    let last_income_date = if track_state {
+        db::get_last_import_date(conn, "MOVIMENTACAO", "income")?
+    } else {
+        None
+    };
+
+    for entry in income_events {
+        if entry.ticker.is_none() {
+            warn!("Skipping income event with no ticker: {:?}", entry.product);
+            skipped_income += 1;
+            continue;
+        }
+
+        let ticker = entry.ticker.as_ref().unwrap();
+        let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
+        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, None) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Error upserting asset {} for income event: {}", ticker, e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Skip if older than last import date
+        if let Some(last_date) = last_income_date {
+            if entry.date <= last_date {
+                skipped_income_old += 1;
+                continue;
+            }
+        }
+
+        let income_event = match entry.to_income_event(asset_id) {
+            Ok(ie) => ie,
+            Err(e) => {
+                warn!("Failed to convert entry to income event: {}", e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Check for duplicate (same asset, date, type, amount)
+        match db::income_event_exists(
+            conn,
+            asset_id,
+            income_event.event_date,
+            &income_event.event_type,
+            income_event.total_amount,
+        ) {
+            Ok(true) => {
+                skipped_income += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!("Error checking for duplicate income event: {}", e);
+                errors += 1;
+                continue;
+            }
+        }
+
+        match db::insert_income_event(conn, &income_event) {
+            Ok(_) => {
+                imported_income += 1;
+                max_income_date = Some(match max_income_date {
+                    Some(current) if current >= income_event.event_date => current,
+                    _ => income_event.event_date,
+                });
+            }
+            Err(e) => {
+                warn!("Error inserting income event: {}", e);
+                errors += 1;
+            }
+        }
+    }
+
+    if track_state {
+        if let Some(last_date) = max_income_date {
+            db::set_last_import_date(conn, "MOVIMENTACAO", "income", last_date)?;
+        }
+    }
+
     Ok(ImportStats {
         imported_trades,
         skipped_trades,
@@ -429,6 +522,9 @@ pub fn import_movimentacao_entries(
         skipped_actions,
         skipped_actions_old,
         auto_applied_actions,
+        imported_income,
+        skipped_income,
+        skipped_income_old,
         errors,
     })
 }

@@ -15,8 +15,8 @@ mod utils;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    ActionCommands, Cli, Commands, PerformanceCommands, PortfolioCommands, PriceCommands,
-    TaxCommands, TransactionCommands,
+    ActionCommands, Cli, Commands, IncomeCommands, PerformanceCommands, PortfolioCommands,
+    PriceCommands, TaxCommands, TransactionCommands,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -122,6 +122,14 @@ async fn main() -> Result<()> {
             PerformanceCommands::Show { period } => {
                 handle_performance_show(&period, cli.json).await
             }
+        },
+
+        Commands::Income { action } => match action {
+            IncomeCommands::Show { year } => handle_income_show(year, cli.json).await,
+            IncomeCommands::Detail { year, asset } => {
+                handle_income_detail(year, asset.as_deref(), cli.json).await
+            }
+            IncomeCommands::Summary { year } => handle_income_summary(year, cli.json).await,
         },
 
         Commands::Actions { action } => match action {
@@ -453,7 +461,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                             .unwrap_or_else(|| "-".to_string()),
                         price: e
                             .unit_price
-                            .map(|p| format_currency(p))
+                            .map(format_currency)
                             .unwrap_or_else(|| "-".to_string()),
                     })
                     .collect();
@@ -487,7 +495,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                 for event in income_events.iter().take(5) {
                     let value = event
                         .operation_value
-                        .map(|v| format_currency(v))
+                        .map(format_currency)
                         .unwrap_or_else(|| "-".to_string());
 
                     println!(
@@ -519,7 +527,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
 
             if !json_output {
                 println!(
-                    "{} Importing trades and corporate actions...",
+                    "{} Importing trades, corporate actions, and income events...",
                     "⏳".cyan().bold()
                 );
             }
@@ -569,10 +577,23 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
                     stats.errors.to_string().red()
                 );
             }
+            println!("  {} Income events:", "💵".cyan());
             println!(
-                "\n{} Income events not yet implemented - coming soon!",
-                "ℹ".blue().bold()
+                "    Imported: {}",
+                stats.imported_income.to_string().green()
             );
+            if stats.skipped_income_old > 0 {
+                println!(
+                    "    Skipped (before last import date): {}",
+                    stats.skipped_income_old.to_string().yellow()
+                );
+            }
+            if stats.skipped_income > 0 {
+                println!(
+                    "    Skipped (duplicates): {}",
+                    stats.skipped_income.to_string().yellow()
+                );
+            }
 
             Ok(())
         }
@@ -791,13 +812,22 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             year
         );
         if losses.stock_swing_loss > Decimal::ZERO {
-            println!("  • Stock Swing Trade: {}", format_currency(losses.stock_swing_loss));
+            println!(
+                "  • Stock Swing Trade: {}",
+                format_currency(losses.stock_swing_loss)
+            );
         }
         if losses.stock_day_loss > Decimal::ZERO {
-            println!("  • Stock Day Trade: {}", format_currency(losses.stock_day_loss));
+            println!(
+                "  • Stock Day Trade: {}",
+                format_currency(losses.stock_day_loss)
+            );
         }
         if losses.fii_fiagro_loss > Decimal::ZERO {
-            println!("  • FII/FIAGRO: {}", format_currency(losses.fii_fiagro_loss));
+            println!(
+                "  • FII/FIAGRO: {}",
+                format_currency(losses.fii_fiagro_loss)
+            );
         }
     }
 
@@ -815,13 +845,22 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
         if has_losses {
             println!("  • Loss carryforward snapshot would be created:");
             if losses.stock_swing_loss > Decimal::ZERO {
-                println!("    - Stock Swing Trade: {}", format_currency(losses.stock_swing_loss));
+                println!(
+                    "    - Stock Swing Trade: {}",
+                    format_currency(losses.stock_swing_loss)
+                );
             }
             if losses.stock_day_loss > Decimal::ZERO {
-                println!("    - Stock Day Trade: {}", format_currency(losses.stock_day_loss));
+                println!(
+                    "    - Stock Day Trade: {}",
+                    format_currency(losses.stock_day_loss)
+                );
             }
             if losses.fii_fiagro_loss > Decimal::ZERO {
-                println!("    - FII/FIAGRO: {}", format_currency(losses.fii_fiagro_loss));
+                println!(
+                    "    - FII/FIAGRO: {}",
+                    format_currency(losses.fii_fiagro_loss)
+                );
             }
         }
         return Ok(());
@@ -991,7 +1030,11 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             Ok(_) => {
                 println!("  {} Loss carryforward snapshot imported", "✓".green());
                 for (category, amount) in &loss_carry {
-                    println!("    • {}: {}", category.display_name(), format_currency(*amount));
+                    println!(
+                        "    • {}: {}",
+                        category.display_name(),
+                        format_currency(*amount)
+                    );
                 }
             }
             Err(e) => {
@@ -1523,8 +1566,10 @@ async fn handle_action_add(
                 "{}% bonus",
                 ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0
             ),
-            db::CorporateActionType::CapitalReturn =>
-                format!("{} per share", format_currency(Decimal::from(ratio_from) / Decimal::from(100))),
+            db::CorporateActionType::CapitalReturn => format!(
+                "{} per share",
+                format_currency(Decimal::from(ratio_from) / Decimal::from(100))
+            ),
         }
     );
     println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
@@ -2254,10 +2299,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
                     payment.darf_code,
                     payment.description
                 );
-                println!(
-                    "    Amount:   {}",
-                    format_currency(payment.tax_due).red()
-                );
+                println!("    Amount:   {}", format_currency(payment.tax_due).red());
                 println!(
                     "    Due Date: {}",
                     payment.due_date.format("%d/%m/%Y").to_string().yellow()
@@ -2309,7 +2351,11 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     if !report.previous_losses_carry_forward.is_empty() {
         println!("{} Carryover from previous years:", "📦".yellow().bold());
         for (category, amount) in &report.previous_losses_carry_forward {
-            println!("  {}: {}", category.display_name(), format_currency(*amount));
+            println!(
+                "  {}: {}",
+                category.display_name(),
+                format_currency(*amount)
+            );
         }
         println!();
     }
@@ -2850,6 +2896,35 @@ impl TaxProgressPrinter {
 async fn handle_performance_show(period: &str, json_output: bool) -> Result<()> {
     use interest::dispatcher::performance;
     performance::dispatch_performance_show(period, json_output).await
+}
+
+/// Handle income show command (summary by asset)
+async fn handle_income_show(year: Option<i32>, json_output: bool) -> Result<()> {
+    dispatcher::dispatch_command(crate::commands::Command::IncomeShow { year }, json_output).await
+}
+
+/// Handle income detail command (detailed events)
+async fn handle_income_detail(
+    year: Option<i32>,
+    asset: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    dispatcher::dispatch_command(
+        crate::commands::Command::IncomeDetail {
+            year,
+            asset: asset.map(|s| s.to_string()),
+        },
+        json_output,
+    )
+    .await
+}
+
+async fn handle_income_summary(year: Option<i32>, json_output: bool) -> Result<()> {
+    dispatcher::dispatch_command(
+        crate::commands::Command::IncomeSummary { year },
+        json_output,
+    )
+    .await
 }
 
 /// Handle manual transaction add command

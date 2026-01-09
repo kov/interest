@@ -73,6 +73,12 @@ pub enum Commands {
         action: PerformanceCommands,
     },
 
+    /// Income events (dividends, JCP, amortization)
+    Income {
+        #[command(subcommand)]
+        action: IncomeCommands,
+    },
+
     /// Corporate actions (splits, bonuses, amortization)
     Actions {
         #[command(subcommand)]
@@ -167,6 +173,31 @@ pub enum PerformanceCommands {
     Show {
         /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
         period: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IncomeCommands {
+    /// Show income summary by asset, grouped by asset type
+    Show {
+        /// Year to filter (optional, defaults to current year)
+        year: Option<i32>,
+    },
+
+    /// Show detailed income events
+    Detail {
+        /// Year to filter (optional, defaults to current year)
+        year: Option<i32>,
+
+        /// Filter by asset ticker
+        #[arg(short, long)]
+        asset: Option<String>,
+    },
+
+    /// Show monthly breakdown (if year given) or yearly totals (if no year)
+    Summary {
+        /// Year (optional - omit for yearly totals)
+        year: Option<i32>,
     },
 }
 

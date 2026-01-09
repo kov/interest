@@ -34,6 +34,11 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             dispatch_tax_report(year, export_csv, json_output).await
         }
         Command::TaxSummary { year } => dispatch_tax_summary(year, json_output).await,
+        Command::IncomeShow { year } => dispatch_income_show(year, json_output).await,
+        Command::IncomeDetail { year, asset } => {
+            dispatch_income_detail(year, asset.as_deref(), json_output).await
+        }
+        Command::IncomeSummary { year } => dispatch_income_summary(year, json_output).await,
         Command::Prices { action } => dispatch_prices(action, json_output).await,
         Command::Help => {
             println!("Help: interest <command> [options]");
@@ -45,6 +50,11 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             );
             println!("  tax report <year>          - Generate tax report");
             println!("  tax summary <year>         - Show tax summary");
+            println!("  income show [year]         - Show income summary by asset");
+            println!("  income detail [year]       - Show detailed income events");
+            println!(
+                "  income summary [year]      - Show yearly totals (or monthly if year given)"
+            );
             println!("  prices import-b3 <year>    - Import B3 COTAHIST data for year");
             println!("  prices import-b3-file <p>  - Import COTAHIST from local ZIP file");
             println!("  prices clear-cache [year]  - Clear B3 COTAHIST cache");
@@ -256,7 +266,11 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
     if !report.previous_losses_carry_forward.is_empty() {
         println!("{} Carryover from previous years:", "📦".yellow().bold());
         for (category, amount) in &report.previous_losses_carry_forward {
-            println!("  {}: {}", category.display_name(), format_currency(*amount));
+            println!(
+                "  {}: {}",
+                category.display_name(),
+                format_currency(*amount)
+            );
         }
         println!();
     }
@@ -273,14 +287,8 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
             "    Profit: {}",
             format_currency(summary.total_profit).green()
         );
-        println!(
-            "    Loss:   {}",
-            format_currency(summary.total_loss).red()
-        );
-        println!(
-            "    Tax:    {}",
-            format_currency(summary.tax_due).yellow()
-        );
+        println!("    Loss:   {}", format_currency(summary.total_loss).red());
+        println!("    Tax:    {}", format_currency(summary.tax_due).yellow());
     }
 
     // Annual totals
@@ -406,6 +414,849 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
         "Tax:".bold(),
         format_currency(report.annual_total_tax).yellow().bold()
     );
+
+    Ok(())
+}
+
+/// Show income summary by asset, grouped by asset type
+async fn dispatch_income_show(year: Option<i32>, json_output: bool) -> Result<()> {
+    use chrono::Datelike;
+    use rust_decimal::Decimal;
+    use serde::Serialize;
+    use std::collections::HashMap;
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
+
+    info!("Showing income summary by asset");
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Determine date range
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date, year_val) = match year {
+        Some(y) => {
+            let from = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
+            let to = chrono::NaiveDate::from_ymd_opt(y, 12, 31).unwrap();
+            (Some(from), Some(to), y)
+        }
+        None => {
+            let y = today.year();
+            let from = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
+            (Some(from), Some(today), y)
+        }
+    };
+
+    // Query income events
+    let events = db::get_income_events_with_assets(&conn, from_date, to_date, None)?;
+
+    if events.is_empty() {
+        println!(
+            "\n{} No income events found for {}.\n",
+            "ℹ".blue().bold(),
+            year_val
+        );
+        return Ok(());
+    }
+
+    // Group by asset type and ticker
+    struct AssetIncome {
+        ticker: String,
+        asset_type: db::AssetType,
+        dividends: Decimal,
+        jcp: Decimal,
+        amortization: Decimal,
+    }
+
+    let mut by_ticker: HashMap<String, AssetIncome> = HashMap::new();
+
+    for (event, asset) in &events {
+        let entry = by_ticker
+            .entry(asset.ticker.clone())
+            .or_insert(AssetIncome {
+                ticker: asset.ticker.clone(),
+                asset_type: asset.asset_type,
+                dividends: Decimal::ZERO,
+                jcp: Decimal::ZERO,
+                amortization: Decimal::ZERO,
+            });
+
+        match event.event_type {
+            db::IncomeEventType::Dividend => entry.dividends += event.total_amount,
+            db::IncomeEventType::Jcp => entry.jcp += event.total_amount,
+            db::IncomeEventType::Amortization => entry.amortization += event.total_amount,
+        }
+    }
+
+    // Group by asset type
+    let mut by_type: HashMap<db::AssetType, Vec<AssetIncome>> = HashMap::new();
+    for (_, income) in by_ticker {
+        by_type.entry(income.asset_type).or_default().push(income);
+    }
+
+    // Sort each group by total (descending)
+    for assets in by_type.values_mut() {
+        assets.sort_by(|a, b| {
+            let total_a = a.dividends + a.jcp + a.amortization;
+            let total_b = b.dividends + b.jcp + b.amortization;
+            total_b.cmp(&total_a)
+        });
+    }
+
+    if json_output {
+        #[derive(Serialize)]
+        struct JsonAssetIncome {
+            ticker: String,
+            asset_type: String,
+            dividends: String,
+            jcp: String,
+            amortization: String,
+            total: String,
+        }
+
+        let mut all_assets: Vec<JsonAssetIncome> = Vec::new();
+        for (asset_type, assets) in &by_type {
+            for a in assets {
+                let total = a.dividends + a.jcp + a.amortization;
+                all_assets.push(JsonAssetIncome {
+                    ticker: a.ticker.clone(),
+                    asset_type: asset_type.as_str().to_string(),
+                    dividends: a.dividends.to_string(),
+                    jcp: a.jcp.to_string(),
+                    amortization: a.amortization.to_string(),
+                    total: total.to_string(),
+                });
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&all_assets)?);
+        return Ok(());
+    }
+
+    println!("\n{} Income Summary - {}\n", "💰".cyan().bold(), year_val);
+
+    // Define display order for asset types
+    let type_order = [
+        db::AssetType::Stock,
+        db::AssetType::Fii,
+        db::AssetType::Fiagro,
+        db::AssetType::FiInfra,
+        db::AssetType::Etf,
+        db::AssetType::Bond,
+        db::AssetType::GovBond,
+    ];
+
+    let mut grand_total = Decimal::ZERO;
+
+    for asset_type in &type_order {
+        if let Some(assets) = by_type.get(asset_type) {
+            if assets.is_empty() {
+                continue;
+            }
+
+            #[derive(Tabled)]
+            struct IncomeRow {
+                #[tabled(rename = "Ticker")]
+                ticker: String,
+                #[tabled(rename = "Dividends")]
+                dividends: String,
+                #[tabled(rename = "JCP")]
+                jcp: String,
+                #[tabled(rename = "Amort")]
+                amort: String,
+                #[tabled(rename = "Total")]
+                total: String,
+            }
+
+            let rows: Vec<IncomeRow> = assets
+                .iter()
+                .map(|a| {
+                    let total = a.dividends + a.jcp + a.amortization;
+                    IncomeRow {
+                        ticker: a.ticker.clone(),
+                        dividends: if a.dividends > Decimal::ZERO {
+                            format_currency(a.dividends)
+                        } else {
+                            "-".to_string()
+                        },
+                        jcp: if a.jcp > Decimal::ZERO {
+                            format_currency(a.jcp)
+                        } else {
+                            "-".to_string()
+                        },
+                        amort: if a.amortization > Decimal::ZERO {
+                            format_currency(a.amortization)
+                        } else {
+                            "-".to_string()
+                        },
+                        total: format_currency(total),
+                    }
+                })
+                .collect();
+
+            let type_total: Decimal = assets
+                .iter()
+                .map(|a| a.dividends + a.jcp + a.amortization)
+                .sum();
+            grand_total += type_total;
+
+            println!(
+                "{} {} ({})",
+                "▸".cyan(),
+                asset_type.as_str().to_uppercase().bold(),
+                format_currency(type_total).cyan()
+            );
+
+            let table = Table::new(&rows)
+                .with(Style::rounded())
+                .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+                .to_string();
+            println!("{}\n", table);
+        }
+    }
+
+    println!(
+        "{} {}\n",
+        "Grand Total:".bold(),
+        format_currency(grand_total).green().bold()
+    );
+
+    Ok(())
+}
+
+/// Show detailed income events
+async fn dispatch_income_detail(
+    year: Option<i32>,
+    asset: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    use chrono::Datelike;
+    use rust_decimal::Decimal;
+    use serde::Serialize;
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
+
+    info!("Showing income events detail");
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Determine date range
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = match year {
+        Some(y) => {
+            let from = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
+            let to = chrono::NaiveDate::from_ymd_opt(y, 12, 31).unwrap();
+            (Some(from), Some(to))
+        }
+        None => {
+            // Default to current year
+            let y = today.year();
+            let from = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
+            (Some(from), Some(today))
+        }
+    };
+
+    // Query income events
+    let events = db::get_income_events_with_assets(&conn, from_date, to_date, asset)?;
+
+    if events.is_empty() {
+        let year_str = year
+            .map(|y| y.to_string())
+            .unwrap_or_else(|| today.year().to_string());
+        let asset_str = asset.map(|a| format!(" for {}", a)).unwrap_or_default();
+        println!(
+            "\n{} No income events found for {}{}.\n",
+            "ℹ".blue().bold(),
+            year_str,
+            asset_str
+        );
+        return Ok(());
+    }
+
+    if json_output {
+        #[derive(Serialize)]
+        struct IncomeRow {
+            date: String,
+            ticker: String,
+            asset_type: String,
+            event_type: String,
+            amount: String,
+            notes: Option<String>,
+        }
+
+        let rows: Vec<IncomeRow> = events
+            .iter()
+            .map(|(event, asset)| IncomeRow {
+                date: event.event_date.to_string(),
+                ticker: asset.ticker.clone(),
+                asset_type: asset.asset_type.as_str().to_string(),
+                event_type: event.event_type.as_str().to_string(),
+                amount: event.total_amount.to_string(),
+                notes: event.notes.clone(),
+            })
+            .collect();
+
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    // Display table
+    let year_str = year
+        .map(|y| y.to_string())
+        .unwrap_or_else(|| today.year().to_string());
+    let asset_str = asset.map(|a| format!(" - {}", a)).unwrap_or_default();
+    println!(
+        "\n{} Income Events - {}{}\n",
+        "💰".cyan().bold(),
+        year_str,
+        asset_str
+    );
+
+    #[derive(Tabled)]
+    struct IncomeTableRow {
+        #[tabled(rename = "Date")]
+        date: String,
+        #[tabled(rename = "Ticker")]
+        ticker: String,
+        #[tabled(rename = "Type")]
+        event_type: String,
+        #[tabled(rename = "Amount")]
+        amount: String,
+        #[tabled(rename = "Notes")]
+        notes: String,
+    }
+
+    let rows: Vec<IncomeTableRow> = events
+        .iter()
+        .map(|(event, asset)| IncomeTableRow {
+            date: event.event_date.format("%Y-%m-%d").to_string(),
+            ticker: asset.ticker.clone(),
+            event_type: match event.event_type {
+                db::IncomeEventType::Dividend => "Dividend",
+                db::IncomeEventType::Jcp => "JCP",
+                db::IncomeEventType::Amortization => "Amort",
+            }
+            .to_string(),
+            amount: format_currency(event.total_amount),
+            notes: event.notes.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    let table = Table::new(&rows)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::new(3..4)).with(Alignment::right()))
+        .to_string();
+    println!("{}", table);
+
+    // Summary
+    let total: Decimal = events.iter().map(|(e, _)| e.total_amount).sum();
+    let dividends: Decimal = events
+        .iter()
+        .filter(|(e, _)| matches!(e.event_type, db::IncomeEventType::Dividend))
+        .map(|(e, _)| e.total_amount)
+        .sum();
+    let jcp: Decimal = events
+        .iter()
+        .filter(|(e, _)| matches!(e.event_type, db::IncomeEventType::Jcp))
+        .map(|(e, _)| e.total_amount)
+        .sum();
+    let amort: Decimal = events
+        .iter()
+        .filter(|(e, _)| matches!(e.event_type, db::IncomeEventType::Amortization))
+        .map(|(e, _)| e.total_amount)
+        .sum();
+
+    println!("\n{} Summary:", "📊".cyan().bold());
+    if dividends > Decimal::ZERO {
+        println!("  Dividends:    {}", format_currency(dividends).green());
+    }
+    if jcp > Decimal::ZERO {
+        println!("  JCP:          {}", format_currency(jcp).green());
+    }
+    if amort > Decimal::ZERO {
+        println!("  Amortization: {}", format_currency(amort).yellow());
+    }
+    println!(
+        "  {} {}\n",
+        "Total:".bold(),
+        format_currency(total).green().bold()
+    );
+
+    Ok(())
+}
+
+/// Show income summary - monthly breakdown if year given, yearly totals otherwise
+pub async fn dispatch_income_summary(year: Option<i32>, json_output: bool) -> Result<()> {
+    use chrono::Datelike;
+    use rust_decimal::Decimal;
+    use serde::Serialize;
+    use std::collections::BTreeMap;
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    match year {
+        Some(y) => {
+            // Monthly breakdown for specific year
+            info!("Showing income summary with monthly breakdown for {}", y);
+
+            let from_date = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
+            let to_date = chrono::NaiveDate::from_ymd_opt(y, 12, 31).unwrap();
+
+            let events =
+                db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
+
+            if events.is_empty() {
+                println!(
+                    "\n{} No income events found for {}.\n",
+                    "ℹ".blue().bold(),
+                    y
+                );
+                return Ok(());
+            }
+
+            let month_names = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+
+            struct MonthlyTotals {
+                dividends: Decimal,
+                jcp: Decimal,
+                amortization: Decimal,
+            }
+
+            let mut monthly: Vec<MonthlyTotals> = (0..12)
+                .map(|_| MonthlyTotals {
+                    dividends: Decimal::ZERO,
+                    jcp: Decimal::ZERO,
+                    amortization: Decimal::ZERO,
+                })
+                .collect();
+
+            for (event, _asset) in &events {
+                let month_idx = (event.event_date.month() - 1) as usize;
+                match event.event_type {
+                    db::IncomeEventType::Dividend => {
+                        monthly[month_idx].dividends += event.total_amount
+                    }
+                    db::IncomeEventType::Jcp => monthly[month_idx].jcp += event.total_amount,
+                    db::IncomeEventType::Amortization => {
+                        monthly[month_idx].amortization += event.total_amount
+                    }
+                }
+            }
+
+            let total_dividends: Decimal = monthly.iter().map(|m| m.dividends).sum();
+            let total_jcp: Decimal = monthly.iter().map(|m| m.jcp).sum();
+            let total_amortization: Decimal = monthly.iter().map(|m| m.amortization).sum();
+            let grand_total = total_dividends + total_jcp + total_amortization;
+
+            let months_with_income = monthly
+                .iter()
+                .filter(|m| m.dividends + m.jcp + m.amortization > Decimal::ZERO)
+                .count();
+            let avg_per_month = if months_with_income > 0 {
+                grand_total / Decimal::from(months_with_income)
+            } else {
+                Decimal::ZERO
+            };
+
+            // Calculate totals by asset type
+            let mut asset_type_totals: std::collections::HashMap<db::AssetType, Decimal> =
+                std::collections::HashMap::new();
+            for (event, asset) in &events {
+                *asset_type_totals
+                    .entry(asset.asset_type)
+                    .or_insert(Decimal::ZERO) += event.total_amount;
+            }
+            let mut asset_type_vec: Vec<_> = asset_type_totals.iter().collect();
+            asset_type_vec.sort_by(|a, b| b.1.cmp(a.1)); // Sort by amount descending
+
+            if json_output {
+                #[derive(Serialize)]
+                struct JsonMonthlyRow {
+                    month: String,
+                    dividends: String,
+                    jcp: String,
+                    amortization: String,
+                    total: String,
+                }
+
+                #[derive(Serialize)]
+                struct JsonSummary {
+                    year: i32,
+                    monthly: Vec<JsonMonthlyRow>,
+                    totals: JsonMonthlyRow,
+                    months_with_income: usize,
+                    avg_per_month: String,
+                }
+
+                let monthly_rows: Vec<JsonMonthlyRow> = monthly
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let total = m.dividends + m.jcp + m.amortization;
+                        JsonMonthlyRow {
+                            month: month_names[i].to_string(),
+                            dividends: m.dividends.to_string(),
+                            jcp: m.jcp.to_string(),
+                            amortization: m.amortization.to_string(),
+                            total: total.to_string(),
+                        }
+                    })
+                    .collect();
+
+                let summary = JsonSummary {
+                    year: y,
+                    monthly: monthly_rows,
+                    totals: JsonMonthlyRow {
+                        month: "TOTAL".to_string(),
+                        dividends: total_dividends.to_string(),
+                        jcp: total_jcp.to_string(),
+                        amortization: total_amortization.to_string(),
+                        total: grand_total.to_string(),
+                    },
+                    months_with_income,
+                    avg_per_month: avg_per_month.to_string(),
+                };
+
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                return Ok(());
+            }
+
+            println!(
+                "\n{} Income Summary - {} (Monthly Breakdown)\n",
+                "💰".cyan().bold(),
+                y
+            );
+
+            #[derive(Tabled)]
+            struct MonthRow {
+                #[tabled(rename = "Month")]
+                month: String,
+                #[tabled(rename = "Dividends")]
+                dividends: String,
+                #[tabled(rename = "JCP")]
+                jcp: String,
+                #[tabled(rename = "Amort")]
+                amort: String,
+                #[tabled(rename = "Total")]
+                total: String,
+            }
+
+            let mut rows: Vec<MonthRow> = monthly
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let total = m.dividends + m.jcp + m.amortization;
+                    MonthRow {
+                        month: month_names[i].to_string(),
+                        dividends: if m.dividends > Decimal::ZERO {
+                            format_currency(m.dividends)
+                        } else {
+                            "-".to_string()
+                        },
+                        jcp: if m.jcp > Decimal::ZERO {
+                            format_currency(m.jcp)
+                        } else {
+                            "-".to_string()
+                        },
+                        amort: if m.amortization > Decimal::ZERO {
+                            format_currency(m.amortization)
+                        } else {
+                            "-".to_string()
+                        },
+                        total: if total > Decimal::ZERO {
+                            format_currency(total)
+                        } else {
+                            "-".to_string()
+                        },
+                    }
+                })
+                .collect();
+
+            rows.push(MonthRow {
+                month: "─────".to_string(),
+                dividends: "───────────".to_string(),
+                jcp: "───────────".to_string(),
+                amort: "───────────".to_string(),
+                total: "───────────".to_string(),
+            });
+            rows.push(MonthRow {
+                month: "TOTAL".to_string(),
+                dividends: format_currency(total_dividends),
+                jcp: format_currency(total_jcp),
+                amort: format_currency(total_amortization),
+                total: format_currency(grand_total),
+            });
+
+            let table = Table::new(&rows)
+                .with(Style::rounded())
+                .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+                .to_string();
+            println!("{}", table);
+
+            println!("\n{} Subtotals by Type:", "📊".cyan().bold());
+            if total_dividends > Decimal::ZERO {
+                println!(
+                    "  Dividends:    {}",
+                    format_currency(total_dividends).green()
+                );
+            }
+            if total_jcp > Decimal::ZERO {
+                println!("  JCP:          {}", format_currency(total_jcp).green());
+            }
+            if total_amortization > Decimal::ZERO {
+                println!(
+                    "  Amortization: {}",
+                    format_currency(total_amortization).yellow()
+                );
+            }
+            println!(
+                "  {} {}",
+                "Total:".bold(),
+                format_currency(grand_total).green().bold()
+            );
+
+            println!("\n{} Subtotals by Asset Type:", "📊".cyan().bold());
+            for (asset_type, total) in asset_type_vec {
+                println!(
+                    "  {:12} {}",
+                    format!("{:?}:", asset_type),
+                    format_currency(*total).green()
+                );
+            }
+
+            println!("\n{} Statistics:", "📈".cyan().bold());
+            println!("  Months with income: {}", months_with_income);
+            println!(
+                "  Average per month:  {}",
+                format_currency(avg_per_month).cyan()
+            );
+            println!();
+        }
+        None => {
+            // Yearly summary across all years
+            info!("Showing income summary with yearly totals");
+
+            let events = db::get_income_events_with_assets(&conn, None, None, None)?;
+
+            if events.is_empty() {
+                println!("\n{} No income events found.\n", "ℹ".blue().bold());
+                return Ok(());
+            }
+
+            struct YearlyTotals {
+                dividends: Decimal,
+                jcp: Decimal,
+                amortization: Decimal,
+            }
+
+            let mut yearly: BTreeMap<i32, YearlyTotals> = BTreeMap::new();
+
+            for (event, _asset) in &events {
+                let year = event.event_date.year();
+                let entry = yearly.entry(year).or_insert(YearlyTotals {
+                    dividends: Decimal::ZERO,
+                    jcp: Decimal::ZERO,
+                    amortization: Decimal::ZERO,
+                });
+                match event.event_type {
+                    db::IncomeEventType::Dividend => entry.dividends += event.total_amount,
+                    db::IncomeEventType::Jcp => entry.jcp += event.total_amount,
+                    db::IncomeEventType::Amortization => entry.amortization += event.total_amount,
+                }
+            }
+
+            let total_dividends: Decimal = yearly.values().map(|y| y.dividends).sum();
+            let total_jcp: Decimal = yearly.values().map(|y| y.jcp).sum();
+            let total_amortization: Decimal = yearly.values().map(|y| y.amortization).sum();
+            let grand_total = total_dividends + total_jcp + total_amortization;
+
+            let years_with_income = yearly.len();
+            let avg_per_year = if years_with_income > 0 {
+                grand_total / Decimal::from(years_with_income)
+            } else {
+                Decimal::ZERO
+            };
+
+            // Calculate totals by asset type
+            let mut asset_type_totals: std::collections::HashMap<db::AssetType, Decimal> =
+                std::collections::HashMap::new();
+            for (event, asset) in &events {
+                *asset_type_totals
+                    .entry(asset.asset_type)
+                    .or_insert(Decimal::ZERO) += event.total_amount;
+            }
+            let mut asset_type_vec: Vec<_> = asset_type_totals.iter().collect();
+            asset_type_vec.sort_by(|a, b| b.1.cmp(a.1)); // Sort by amount descending
+
+            if json_output {
+                #[derive(Serialize)]
+                struct JsonYearlyRow {
+                    year: i32,
+                    dividends: String,
+                    jcp: String,
+                    amortization: String,
+                    total: String,
+                }
+
+                #[derive(Serialize)]
+                struct JsonYearlySummary {
+                    yearly: Vec<JsonYearlyRow>,
+                    totals: JsonYearlyRow,
+                    years_with_income: usize,
+                    avg_per_year: String,
+                }
+
+                let yearly_rows: Vec<JsonYearlyRow> = yearly
+                    .iter()
+                    .map(|(yr, y)| {
+                        let total = y.dividends + y.jcp + y.amortization;
+                        JsonYearlyRow {
+                            year: *yr,
+                            dividends: y.dividends.to_string(),
+                            jcp: y.jcp.to_string(),
+                            amortization: y.amortization.to_string(),
+                            total: total.to_string(),
+                        }
+                    })
+                    .collect();
+
+                let summary = JsonYearlySummary {
+                    yearly: yearly_rows,
+                    totals: JsonYearlyRow {
+                        year: 0,
+                        dividends: total_dividends.to_string(),
+                        jcp: total_jcp.to_string(),
+                        amortization: total_amortization.to_string(),
+                        total: grand_total.to_string(),
+                    },
+                    years_with_income,
+                    avg_per_year: avg_per_year.to_string(),
+                };
+
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                return Ok(());
+            }
+
+            println!(
+                "\n{} Income Summary (Yearly Breakdown)\n",
+                "💰".cyan().bold()
+            );
+
+            #[derive(Tabled)]
+            struct YearRow {
+                #[tabled(rename = "Year")]
+                year: String,
+                #[tabled(rename = "Dividends")]
+                dividends: String,
+                #[tabled(rename = "JCP")]
+                jcp: String,
+                #[tabled(rename = "Amort")]
+                amort: String,
+                #[tabled(rename = "Total")]
+                total: String,
+            }
+
+            let mut rows: Vec<YearRow> = yearly
+                .iter()
+                .map(|(yr, y)| {
+                    let total = y.dividends + y.jcp + y.amortization;
+                    YearRow {
+                        year: yr.to_string(),
+                        dividends: if y.dividends > Decimal::ZERO {
+                            format_currency(y.dividends)
+                        } else {
+                            "-".to_string()
+                        },
+                        jcp: if y.jcp > Decimal::ZERO {
+                            format_currency(y.jcp)
+                        } else {
+                            "-".to_string()
+                        },
+                        amort: if y.amortization > Decimal::ZERO {
+                            format_currency(y.amortization)
+                        } else {
+                            "-".to_string()
+                        },
+                        total: format_currency(total),
+                    }
+                })
+                .collect();
+
+            rows.push(YearRow {
+                year: "─────".to_string(),
+                dividends: "───────────".to_string(),
+                jcp: "───────────".to_string(),
+                amort: "───────────".to_string(),
+                total: "───────────".to_string(),
+            });
+            rows.push(YearRow {
+                year: "TOTAL".to_string(),
+                dividends: format_currency(total_dividends),
+                jcp: format_currency(total_jcp),
+                amort: format_currency(total_amortization),
+                total: format_currency(grand_total),
+            });
+
+            let table = Table::new(&rows)
+                .with(Style::rounded())
+                .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+                .to_string();
+            println!("{}", table);
+
+            println!("\n{} Subtotals by Type:", "📊".cyan().bold());
+            if total_dividends > Decimal::ZERO {
+                println!(
+                    "  Dividends:    {}",
+                    format_currency(total_dividends).green()
+                );
+            }
+            if total_jcp > Decimal::ZERO {
+                println!("  JCP:          {}", format_currency(total_jcp).green());
+            }
+            if total_amortization > Decimal::ZERO {
+                println!(
+                    "  Amortization: {}",
+                    format_currency(total_amortization).yellow()
+                );
+            }
+            println!(
+                "  {} {}",
+                "Total:".bold(),
+                format_currency(grand_total).green().bold()
+            );
+
+            println!("\n{} Subtotals by Asset Type:", "📊".cyan().bold());
+            for (asset_type, total) in asset_type_vec {
+                println!(
+                    "  {:12} {}",
+                    format!("{:?}:", asset_type),
+                    format_currency(*total).green()
+                );
+            }
+
+            println!("\n{} Statistics:", "📈".cyan().bold());
+            println!("  Years with income:  {}", years_with_income);
+            println!(
+                "  Average per year:   {}",
+                format_currency(avg_per_year).cyan()
+            );
+            println!();
+        }
+    }
 
     Ok(())
 }

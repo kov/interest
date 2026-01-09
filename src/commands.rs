@@ -20,6 +20,15 @@ pub enum Command {
     TaxReport { year: i32, export_csv: bool },
     /// Show tax summary: `tax summary <year>`
     TaxSummary { year: i32 },
+    /// Show income summary by asset: `income show [year]`
+    IncomeShow { year: Option<i32> },
+    /// Show income detail: `income detail [year] [--asset <ticker>]`
+    IncomeDetail {
+        year: Option<i32>,
+        asset: Option<String>,
+    },
+    /// Show income summary: `income summary [year]` - monthly if year given, yearly otherwise
+    IncomeSummary { year: Option<i32> },
     /// Price management: `prices import-b3 <year> [--nocache]` or `prices clear-cache [year]`
     Prices { action: PricesAction },
     /// Show help
@@ -189,6 +198,60 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 }),
             }
         }
+        "income" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "income requires action (show, detail, summary). Usage: income show [year], income detail [year] [--asset <ticker>], or income summary <year>"
+                        .to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "show" => {
+                    // income show [year] - summary by asset
+                    let year = parts.next().and_then(|y| y.parse::<i32>().ok());
+                    Ok(Command::IncomeShow { year })
+                }
+                "detail" => {
+                    // income detail [year] [--asset <ticker>] - detailed view
+                    let collected: Vec<_> = parts.collect();
+                    let mut year: Option<i32> = None;
+                    let mut asset: Option<String> = None;
+                    let mut i = 0;
+
+                    while i < collected.len() {
+                        if (collected[i] == "--asset" || collected[i] == "-a")
+                            && i + 1 < collected.len()
+                        {
+                            asset = Some(collected[i + 1].to_uppercase());
+                            i += 2;
+                            continue;
+                        }
+                        // Try to parse as year if no year set yet
+                        if year.is_none() {
+                            if let Ok(y) = collected[i].parse::<i32>() {
+                                year = Some(y);
+                            }
+                        }
+                        i += 1;
+                    }
+
+                    Ok(Command::IncomeDetail { year, asset })
+                }
+                "summary" => {
+                    // income summary [year] - monthly breakdown if year, yearly summary otherwise
+                    let year = parts.next().and_then(|y| y.parse::<i32>().ok());
+                    Ok(Command::IncomeSummary { year })
+                }
+                _ => Err(CommandParseError {
+                    message: format!(
+                        "Unknown income action: {}. Use: show, detail, or summary",
+                        action
+                    ),
+                }),
+            }
+        }
         "prices" | "price" => {
             let action = parts
                 .next()
@@ -350,6 +413,66 @@ mod tests {
     fn test_parse_tax_summary() {
         let cmd = parse_command("tax summary 2023").unwrap();
         assert_eq!(cmd, Command::TaxSummary { year: 2023 });
+    }
+
+    #[test]
+    fn test_parse_income_show() {
+        let cmd = parse_command("income show").unwrap();
+        assert_eq!(cmd, Command::IncomeShow { year: None });
+    }
+
+    #[test]
+    fn test_parse_income_show_with_year() {
+        let cmd = parse_command("income show 2024").unwrap();
+        assert_eq!(cmd, Command::IncomeShow { year: Some(2024) });
+    }
+
+    #[test]
+    fn test_parse_income_detail() {
+        let cmd = parse_command("income detail").unwrap();
+        assert_eq!(
+            cmd,
+            Command::IncomeDetail {
+                year: None,
+                asset: None
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_income_detail_with_asset() {
+        let cmd = parse_command("income detail --asset XPLG11").unwrap();
+        assert_eq!(
+            cmd,
+            Command::IncomeDetail {
+                year: None,
+                asset: Some("XPLG11".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_income_detail_with_year_and_asset() {
+        let cmd = parse_command("income detail 2024 --asset mxrf11").unwrap();
+        assert_eq!(
+            cmd,
+            Command::IncomeDetail {
+                year: Some(2024),
+                asset: Some("MXRF11".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_income_summary() {
+        let cmd = parse_command("income summary 2025").unwrap();
+        assert_eq!(cmd, Command::IncomeSummary { year: Some(2025) });
+    }
+
+    #[test]
+    fn test_parse_income_summary_without_year() {
+        let cmd = parse_command("income summary").unwrap();
+        assert_eq!(cmd, Command::IncomeSummary { year: None });
     }
 
     #[test]

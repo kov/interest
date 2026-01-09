@@ -166,12 +166,11 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
                 let pl_str = p
                     .unrealized_pl
                     .map(|pl: Decimal| {
-                        let colored = if pl >= Decimal::ZERO {
+                        if pl >= Decimal::ZERO {
                             format_currency(pl).green().to_string()
                         } else {
                             format_currency(pl).red().to_string()
-                        };
-                        colored
+                        }
                     })
                     .unwrap_or_else(|| "N/A".to_string());
 

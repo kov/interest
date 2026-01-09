@@ -570,6 +570,102 @@ pub fn insert_income_event(conn: &Connection, event: &IncomeEvent) -> Result<i64
     Ok(conn.last_insert_rowid())
 }
 
+/// Check if an income event already exists (for duplicate detection)
+pub fn income_event_exists(
+    conn: &Connection,
+    asset_id: i64,
+    event_date: NaiveDate,
+    event_type: &IncomeEventType,
+    total_amount: Decimal,
+) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM income_events
+         WHERE asset_id = ?1 AND event_date = ?2 AND event_type = ?3 AND total_amount = ?4",
+        params![
+            asset_id,
+            event_date,
+            event_type.as_str(),
+            total_amount.to_string()
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Get income events with asset information (for display)
+pub fn get_income_events_with_assets(
+    conn: &Connection,
+    from_date: Option<NaiveDate>,
+    to_date: Option<NaiveDate>,
+    asset_filter: Option<&str>,
+) -> Result<Vec<(IncomeEvent, Asset)>> {
+    let mut sql = String::from(
+        "SELECT ie.id, ie.asset_id, ie.event_date, ie.ex_date, ie.event_type,
+                ie.amount_per_quota, ie.total_amount, ie.withholding_tax,
+                ie.is_quota_pre_2026, ie.source, ie.notes, ie.created_at,
+                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+         FROM income_events ie
+         JOIN assets a ON ie.asset_id = a.id
+         WHERE 1=1",
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(f) = from_date {
+        sql.push_str(" AND ie.event_date >= ?");
+        params.push(Box::new(f));
+    }
+    if let Some(t) = to_date {
+        sql.push_str(" AND ie.event_date <= ?");
+        params.push(Box::new(t));
+    }
+    if let Some(ticker) = asset_filter {
+        sql.push_str(" AND a.ticker = ?");
+        params.push(Box::new(ticker.to_uppercase()));
+    }
+
+    sql.push_str(" ORDER BY ie.event_date DESC, a.ticker ASC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let results = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let event = IncomeEvent {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                event_date: row.get(2)?,
+                ex_date: row.get(3)?,
+                event_type: row
+                    .get::<_, String>(4)?
+                    .parse::<IncomeEventType>()
+                    .unwrap_or(IncomeEventType::Dividend),
+                amount_per_quota: get_decimal_value(row, 5)?,
+                total_amount: get_decimal_value(row, 6)?,
+                withholding_tax: get_decimal_value(row, 7)?,
+                is_quota_pre_2026: row.get(8)?,
+                source: row.get(9)?,
+                notes: row.get(10)?,
+                created_at: row.get(11)?,
+            };
+            let asset = Asset {
+                id: Some(row.get(12)?),
+                ticker: row.get(13)?,
+                asset_type: row
+                    .get::<_, String>(14)?
+                    .parse::<AssetType>()
+                    .unwrap_or(AssetType::Stock),
+                name: row.get(15)?,
+                created_at: row.get(16)?,
+                updated_at: row.get(17)?,
+            };
+            Ok((event, asset))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
+}
+
 /// Get all assets (for batch price updates)
 pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
     let mut stmt = conn.prepare(

@@ -365,7 +365,13 @@ where
         match fetch_result {
             Ok(price) => {
                 successful_prices.push((asset_id, price));
-                let msg = format!("{} → {} ({}/{})", ticker, format_currency(price), completed, total);
+                let msg = format!(
+                    "{} → {} ({}/{})",
+                    ticker,
+                    format_currency(price),
+                    completed,
+                    total
+                );
                 progress(&msg);
                 tracing::debug!("Fetched price for {}: {}", ticker, price);
             }

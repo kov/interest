@@ -26,7 +26,7 @@ use std::path::Path;
 use std::str::FromStr;
 use tracing::{debug, info, warn};
 
-use crate::db::models::{Transaction, TransactionType};
+use crate::db::models::{IncomeEvent, IncomeEventType, Transaction, TransactionType};
 use crate::db::{CorporateAction, CorporateActionType};
 
 /// Parsed movimentacao entry
@@ -264,10 +264,68 @@ impl MovimentacaoEntry {
                 | "Reembolso"
                 | "AMORTIZAÇÃO"
                 | "PAGAMENTO DE JUROS"
+                | "INCORPORAÇÃO DE JUROS"
+                | "Juros"
                 | "Rendimento - Transferido"
                 | "Dividendo - Transferido"
                 | "Juros Sobre Capital Próprio - Transferido"
         )
+    }
+
+    /// Convert to IncomeEvent
+    pub fn to_income_event(&self, asset_id: i64) -> Result<IncomeEvent> {
+        // Determine event type and notes from movement_type
+        let (event_type, notes) = match self.movement_type.as_str() {
+            "Rendimento" | "Dividendo" => (IncomeEventType::Dividend, None),
+            "Rendimento - Transferido" => {
+                (IncomeEventType::Dividend, Some("Transferido".to_string()))
+            }
+            "Dividendo - Transferido" => {
+                (IncomeEventType::Dividend, Some("Transferido".to_string()))
+            }
+            "Reembolso" => (IncomeEventType::Dividend, Some("Reembolso".to_string())),
+            "Amortização" | "AMORTIZAÇÃO" => (IncomeEventType::Amortization, None),
+            "Juros Sobre Capital Próprio" => (IncomeEventType::Jcp, None),
+            "Juros Sobre Capital Próprio - Transferido" => {
+                (IncomeEventType::Jcp, Some("Transferido".to_string()))
+            }
+            "Juros" | "PAGAMENTO DE JUROS" => (IncomeEventType::Jcp, None),
+            "INCORPORAÇÃO DE JUROS" => (IncomeEventType::Jcp, Some("Incorporação".to_string())),
+            _ => return Err(anyhow!("Not an income event: {}", self.movement_type)),
+        };
+
+        // Get total amount - prefer operation_value, fall back to quantity * unit_price
+        let total_amount = self
+            .operation_value
+            .or_else(|| self.quantity.zip(self.unit_price).map(|(q, p)| q * p))
+            .ok_or_else(|| anyhow!("No value for income event"))?;
+
+        // Calculate amount per quota if we have quantity
+        let amount_per_quota = if let Some(qty) = self.quantity {
+            if qty > Decimal::ZERO {
+                total_amount / qty
+            } else {
+                self.unit_price.unwrap_or(total_amount)
+            }
+        } else {
+            // If no quantity, use unit_price or total_amount
+            self.unit_price.unwrap_or(total_amount)
+        };
+
+        Ok(IncomeEvent {
+            id: None,
+            asset_id,
+            event_date: self.date,
+            ex_date: None, // Not available in movimentação file
+            event_type,
+            amount_per_quota,
+            total_amount,
+            withholding_tax: Decimal::ZERO, // Not available in movimentação file
+            is_quota_pre_2026: None,        // Will be determined later if needed
+            source: "MOVIMENTACAO".to_string(),
+            notes,
+            created_at: chrono::Utc::now(),
+        })
     }
 
     /// Convert to Transaction (for trades)
