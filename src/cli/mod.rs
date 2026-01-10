@@ -85,6 +85,12 @@ pub enum Commands {
         action: ActionCommands,
     },
 
+    /// Inconsistencies management
+    Inconsistencies {
+        #[command(subcommand)]
+        action: InconsistenciesCommands,
+    },
+
     /// Process term contract liquidations
     ProcessTerms,
 
@@ -286,6 +292,63 @@ pub enum ActionCommands {
         /// New notes
         #[arg(long)]
         notes: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InconsistenciesCommands {
+    /// List inconsistencies
+    List {
+        /// Show only open issues (default)
+        #[arg(long, conflicts_with = "all")]
+        open: bool,
+
+        /// Show all issues
+        #[arg(long)]
+        all: bool,
+
+        /// Filter by status (OPEN, RESOLVED, IGNORED)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by issue type (e.g., MISSING_COST_BASIS)
+        #[arg(long = "type")]
+        issue_type: Option<String>,
+
+        /// Filter by asset ticker
+        #[arg(long)]
+        asset: Option<String>,
+    },
+
+    /// Show details for a single inconsistency
+    Show {
+        /// Inconsistency id
+        id: i64,
+    },
+
+    /// Resolve an inconsistency (interactive if no fields provided)
+    /// If no ID is provided, iterates through all open inconsistencies
+    Resolve {
+        /// Inconsistency id (optional - if not provided, resolves all open issues one by one)
+        id: Option<i64>,
+
+        /// Inline fields (repeatable) in key=value format
+        #[arg(long = "set")]
+        set: Vec<String>,
+
+        /// JSON resolution payload (object as string)
+        #[arg(long = "payload")]
+        json_payload: Option<String>,
+    },
+
+    /// Ignore an inconsistency
+    Ignore {
+        /// Inconsistency id
+        id: i64,
+
+        /// Optional ignore reason
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 

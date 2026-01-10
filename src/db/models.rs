@@ -192,11 +192,126 @@ pub struct CorporateAction {
     pub action_type: CorporateActionType,
     pub event_date: NaiveDate,
     pub ex_date: NaiveDate,
-    pub ratio_from: i32, // e.g., 1 for 1:2 split
-    pub ratio_to: i32,   // e.g., 2 for 1:2 split
+    pub ratio_from: i32, // e.g., 1 for 1:2 split (kept for backwards compat)
+    pub ratio_to: i32,   // e.g., 2 for 1:2 split (kept for backwards compat)
     pub source: String,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Inconsistency severity (blocking or warning)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InconsistencySeverity {
+    Blocking,
+    Warn,
+}
+
+impl InconsistencySeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InconsistencySeverity::Blocking => "BLOCKING",
+            InconsistencySeverity::Warn => "WARN",
+        }
+    }
+}
+
+impl FromStr for InconsistencySeverity {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "BLOCKING" => Ok(InconsistencySeverity::Blocking),
+            "WARN" => Ok(InconsistencySeverity::Warn),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Inconsistency status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InconsistencyStatus {
+    Open,
+    Resolved,
+    Ignored,
+}
+
+impl InconsistencyStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InconsistencyStatus::Open => "OPEN",
+            InconsistencyStatus::Resolved => "RESOLVED",
+            InconsistencyStatus::Ignored => "IGNORED",
+        }
+    }
+}
+
+impl FromStr for InconsistencyStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "OPEN" => Ok(InconsistencyStatus::Open),
+            "RESOLVED" => Ok(InconsistencyStatus::Resolved),
+            "IGNORED" => Ok(InconsistencyStatus::Ignored),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Inconsistency types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InconsistencyType {
+    MissingCostBasis,
+    MissingPurchaseHistory,
+    InvalidTicker,
+    InvalidDate,
+}
+
+impl InconsistencyType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InconsistencyType::MissingCostBasis => "MISSING_COST_BASIS",
+            InconsistencyType::MissingPurchaseHistory => "MISSING_PURCHASE_HISTORY",
+            InconsistencyType::InvalidTicker => "INVALID_TICKER",
+            InconsistencyType::InvalidDate => "INVALID_DATE",
+        }
+    }
+}
+
+impl FromStr for InconsistencyType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "MISSING_COST_BASIS" => Ok(InconsistencyType::MissingCostBasis),
+            "MISSING_PURCHASE_HISTORY" => Ok(InconsistencyType::MissingPurchaseHistory),
+            "INVALID_TICKER" => Ok(InconsistencyType::InvalidTicker),
+            "INVALID_DATE" => Ok(InconsistencyType::InvalidDate),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Inconsistency record stored for later resolution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Inconsistency {
+    pub id: Option<i64>,
+    pub issue_type: InconsistencyType,
+    pub status: InconsistencyStatus,
+    pub severity: InconsistencySeverity,
+    pub asset_id: Option<i64>,
+    pub transaction_id: Option<i64>,
+    pub ticker: Option<String>,
+    pub trade_date: Option<NaiveDate>,
+    pub quantity: Option<Decimal>,
+    pub source: Option<String>,
+    pub source_ref: Option<String>,
+    pub missing_fields_json: Option<String>,
+    pub context_json: Option<String>,
+    pub resolution_action: Option<String>,
+    pub resolution_json: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 /// Price history entry

@@ -47,8 +47,8 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
     action_type TEXT NOT NULL,      -- 'SPLIT', 'REVERSE_SPLIT', 'BONUS', 'CAPITAL_RETURN'
     event_date DATE NOT NULL,        -- Announcement date
     ex_date DATE NOT NULL,           -- Date adjustment takes effect
-    ratio_from INTEGER NOT NULL,     -- e.g., 1 for 1:2 split
-    ratio_to INTEGER NOT NULL,       -- e.g., 2 for 1:2 split
+    ratio_from INTEGER NOT NULL,     -- e.g., 1 for 1:2 split (kept for backwards compat)
+    ratio_to INTEGER NOT NULL,       -- e.g., 2 for 1:2 split (kept for backwards compat)
     source TEXT,                     -- 'BRAPI', 'MANUAL', 'B3'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -194,6 +194,33 @@ CREATE TABLE IF NOT EXISTS income_events (
 CREATE INDEX IF NOT EXISTS idx_income_events_asset ON income_events(asset_id);
 CREATE INDEX IF NOT EXISTS idx_income_events_date ON income_events(event_date);
 CREATE INDEX IF NOT EXISTS idx_income_events_type ON income_events(event_type);
+
+-- Inconsistencies (missing or invalid data tracked for later resolution)
+CREATE TABLE IF NOT EXISTS inconsistencies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_type TEXT NOT NULL,          -- 'MISSING_COST_BASIS', 'MISSING_PURCHASE_HISTORY', etc.
+    status TEXT NOT NULL,              -- 'OPEN', 'RESOLVED', 'IGNORED'
+    severity TEXT NOT NULL,            -- 'BLOCKING', 'WARN'
+    asset_id INTEGER,                  -- nullable if unknown
+    transaction_id INTEGER,            -- nullable if no tx created
+    ticker TEXT,                       -- denormalized for display/search
+    trade_date DATE,                   -- relevant date for the issue
+    quantity DECIMAL(15,4),
+    source TEXT,                       -- 'MOVIMENTACAO', 'CEI', 'MANUAL', etc.
+    source_ref TEXT,                   -- filename/row id/statement ref
+    missing_fields_json TEXT,          -- JSON blob listing missing fields
+    context_json TEXT,                 -- JSON blob with raw import context
+    resolution_action TEXT,            -- 'ADD_TX', 'UPDATE_TX', 'DELETE_TX', 'IGNORE'
+    resolution_json TEXT,              -- JSON blob with user-provided data
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME,
+    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inconsistencies_status ON inconsistencies(status);
+CREATE INDEX IF NOT EXISTS idx_inconsistencies_type ON inconsistencies(issue_type);
+CREATE INDEX IF NOT EXISTS idx_inconsistencies_asset ON inconsistencies(asset_id, trade_date);
 
 -- Loss carryforward tracking (prejuízos a compensar)
 CREATE TABLE IF NOT EXISTS loss_carryforward (

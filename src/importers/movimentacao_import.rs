@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::corporate_actions;
 use crate::db;
 use crate::importers::MovimentacaoEntry;
+use serde_json::json;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ImportStats {
@@ -322,31 +323,50 @@ pub fn import_movimentacao_entries(
                     receipt_match.tickers.join(", "),
                     entry.product
                 );
-                let bonus_tx = db::Transaction {
+                let issue = db::Inconsistency {
                     id: None,
-                    asset_id,
-                    transaction_type: db::TransactionType::Buy,
-                    trade_date: entry.date,
-                    settlement_date: Some(entry.date),
-                    quantity: qty,
-                    price_per_unit: Decimal::ZERO,
-                    total_cost: Decimal::ZERO,
-                    fees: Decimal::ZERO,
-                    is_day_trade: false,
-                    quota_issuance_date: None,
-                    notes: Some(notes),
-                    source: "MOVIMENTACAO".to_string(),
-                    created_at: chrono::Utc::now(),
+                    issue_type: db::InconsistencyType::MissingCostBasis,
+                    status: db::InconsistencyStatus::Open,
+                    severity: db::InconsistencySeverity::Blocking,
+                    asset_id: Some(asset_id),
+                    transaction_id: None,
+                    ticker: Some(ticker.to_string()),
+                    trade_date: Some(entry.date),
+                    quantity: Some(qty),
+                    source: Some("MOVIMENTACAO".to_string()),
+                    source_ref: None,
+                    missing_fields_json: Some(
+                        json!({
+                            "price_per_unit": null,
+                            "total_cost": null,
+                            "fees": null
+                        })
+                        .to_string(),
+                    ),
+                    context_json: Some(
+                        json!({
+                            "notes": notes,
+                            "movement_type": entry.movement_type,
+                            "product": entry.product,
+                            "receipt_tickers": receipt_match.tickers
+                        })
+                        .to_string(),
+                    ),
+                    resolution_action: None,
+                    resolution_json: None,
+                    created_at: None,
+                    resolved_at: None,
                 };
-                match db::insert_transaction(conn, &bonus_tx) {
+                match db::insert_inconsistency(conn, &issue) {
                     Ok(_) => {
-                        imported_trades += 1;
+                        skipped_actions += 1;
+                        max_action_date = Some(match max_action_date {
+                            Some(current) if current >= entry.date => current,
+                            _ => entry.date,
+                        });
                     }
                     Err(e) => {
-                        warn!(
-                            "Error inserting Atualização subscription transaction: {}",
-                            e
-                        );
+                        warn!("Error inserting Atualização inconsistency: {}", e);
                         errors += 1;
                     }
                 }

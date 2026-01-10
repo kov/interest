@@ -15,7 +15,8 @@ use tracing::info;
 use crate::term_contracts;
 pub use models::{
     Asset, AssetType, CorporateAction, CorporateActionType, IncomeEvent, IncomeEventType,
-    PriceHistory, Transaction, TransactionType,
+    Inconsistency, InconsistencySeverity, InconsistencyStatus, InconsistencyType, PriceHistory,
+    Transaction, TransactionType,
 };
 
 /// Get the default database path (~/.interest/data.db)
@@ -112,6 +113,212 @@ pub fn insert_transaction(conn: &Connection, tx: &Transaction) -> Result<i64> {
     )?;
 
     Ok(conn.last_insert_rowid())
+}
+
+/// Insert inconsistency record
+pub fn insert_inconsistency(conn: &Connection, issue: &Inconsistency) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO inconsistencies (
+            issue_type, status, severity, asset_id, transaction_id, ticker, trade_date,
+            quantity, source, source_ref, missing_fields_json, context_json,
+            resolution_action, resolution_json, resolved_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            issue.issue_type.as_str(),
+            issue.status.as_str(),
+            issue.severity.as_str(),
+            issue.asset_id,
+            issue.transaction_id,
+            issue.ticker,
+            issue.trade_date,
+            issue.quantity.as_ref().map(|q| q.to_string()),
+            issue.source,
+            issue.source_ref,
+            issue.missing_fields_json,
+            issue.context_json,
+            issue.resolution_action,
+            issue.resolution_json,
+            issue.resolved_at,
+        ],
+    )?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+/// Fetch a single inconsistency by id
+pub fn get_inconsistency(conn: &Connection, id: i64) -> Result<Option<Inconsistency>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, issue_type, status, severity, asset_id, transaction_id, ticker, trade_date,
+                quantity, source, source_ref, missing_fields_json, context_json,
+                resolution_action, resolution_json, created_at, resolved_at
+         FROM inconsistencies
+         WHERE id = ?1",
+    )?;
+
+    let result = stmt
+        .query_row(params![id], |row| {
+            Ok(Inconsistency {
+                id: Some(row.get(0)?),
+                issue_type: row
+                    .get::<_, String>(1)?
+                    .parse::<InconsistencyType>()
+                    .unwrap_or(InconsistencyType::MissingCostBasis),
+                status: row
+                    .get::<_, String>(2)?
+                    .parse::<InconsistencyStatus>()
+                    .unwrap_or(InconsistencyStatus::Open),
+                severity: row
+                    .get::<_, String>(3)?
+                    .parse::<InconsistencySeverity>()
+                    .unwrap_or(InconsistencySeverity::Warn),
+                asset_id: row.get(4)?,
+                transaction_id: row.get(5)?,
+                ticker: row.get(6)?,
+                trade_date: row.get(7)?,
+                quantity: get_optional_decimal_value(row, 8)?,
+                source: row.get(9)?,
+                source_ref: row.get(10)?,
+                missing_fields_json: row.get(11)?,
+                context_json: row.get(12)?,
+                resolution_action: row.get(13)?,
+                resolution_json: row.get(14)?,
+                created_at: row.get(15)?,
+                resolved_at: row.get(16)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
+/// List inconsistencies with optional filters
+pub fn list_inconsistencies(
+    conn: &Connection,
+    status: Option<InconsistencyStatus>,
+    issue_type: Option<InconsistencyType>,
+    ticker: Option<&str>,
+) -> Result<Vec<Inconsistency>> {
+    let mut query = String::from(
+        "SELECT id, issue_type, status, severity, asset_id, transaction_id, ticker, trade_date,
+                quantity, source, source_ref, missing_fields_json, context_json,
+                resolution_action, resolution_json, created_at, resolved_at
+         FROM inconsistencies
+         WHERE 1=1",
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(status) = status {
+        query.push_str(" AND status = ?");
+        params.push(Box::new(status.as_str()));
+    }
+
+    if let Some(issue_type) = issue_type {
+        query.push_str(" AND issue_type = ?");
+        params.push(Box::new(issue_type.as_str()));
+    }
+
+    if let Some(ticker) = ticker {
+        query.push_str(" AND ticker = ?");
+        params.push(Box::new(ticker));
+    }
+
+    query.push_str(" ORDER BY id ASC");
+
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&query)?;
+
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(Inconsistency {
+            id: Some(row.get(0)?),
+            issue_type: row
+                .get::<_, String>(1)?
+                .parse::<InconsistencyType>()
+                .unwrap_or(InconsistencyType::MissingCostBasis),
+            status: row
+                .get::<_, String>(2)?
+                .parse::<InconsistencyStatus>()
+                .unwrap_or(InconsistencyStatus::Open),
+            severity: row
+                .get::<_, String>(3)?
+                .parse::<InconsistencySeverity>()
+                .unwrap_or(InconsistencySeverity::Warn),
+            asset_id: row.get(4)?,
+            transaction_id: row.get(5)?,
+            ticker: row.get(6)?,
+            trade_date: row.get(7)?,
+            quantity: get_optional_decimal_value(row, 8)?,
+            source: row.get(9)?,
+            source_ref: row.get(10)?,
+            missing_fields_json: row.get(11)?,
+            context_json: row.get(12)?,
+            resolution_action: row.get(13)?,
+            resolution_json: row.get(14)?,
+            created_at: row.get(15)?,
+            resolved_at: row.get(16)?,
+        })
+    })?;
+
+    let results = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(results)
+}
+
+/// Mark inconsistency resolved (caller performs any data changes first)
+pub fn resolve_inconsistency(
+    conn: &Connection,
+    id: i64,
+    resolution_action: Option<&str>,
+    resolution_json: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE inconsistencies
+         SET status = 'RESOLVED',
+             resolution_action = ?1,
+             resolution_json = ?2,
+             resolved_at = CURRENT_TIMESTAMP
+         WHERE id = ?3",
+        params![resolution_action, resolution_json, id],
+    )?;
+    Ok(())
+}
+
+/// Mark inconsistency ignored with optional reason
+pub fn ignore_inconsistency(conn: &Connection, id: i64, reason: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE inconsistencies
+         SET status = 'IGNORED',
+             resolution_action = 'IGNORE',
+             resolution_json = ?1,
+             resolved_at = CURRENT_TIMESTAMP
+         WHERE id = ?2",
+        params![reason, id],
+    )?;
+    Ok(())
+}
+
+/// Get asset IDs and tickers that have open blocking inconsistencies
+pub fn get_blocked_assets(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT i.asset_id, COALESCE(a.ticker, i.ticker)
+         FROM inconsistencies i
+         LEFT JOIN assets a ON i.asset_id = a.id
+         WHERE i.status = 'OPEN' AND i.severity = 'BLOCKING'
+         AND (i.asset_id IS NOT NULL OR i.ticker IS NOT NULL)",
+    )?;
+
+    let mut rows = stmt.query([])?;
+    let mut result = Vec::new();
+
+    while let Some(row) = rows.next()? {
+        let asset_id: Option<i64> = row.get(0)?;
+        let ticker: Option<String> = row.get(1)?;
+
+        if let (Some(id), Some(t)) = (asset_id, ticker) {
+            result.push((id, t));
+        }
+    }
+
+    Ok(result)
 }
 
 /// Get position quantity for an asset before a given date
@@ -387,7 +594,7 @@ pub fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rus
 }
 
 /// Helper to read optional Decimal from SQLite
-fn get_optional_decimal_value(
+pub(crate) fn get_optional_decimal_value(
     row: &rusqlite::Row,
     idx: usize,
 ) -> Result<Option<Decimal>, rusqlite::Error> {
@@ -431,25 +638,6 @@ pub fn insert_corporate_action(conn: &Connection, action: &CorporateAction) -> R
     Ok(conn.last_insert_rowid())
 }
 
-/// Check if corporate action already exists
-pub fn corporate_action_exists(
-    conn: &Connection,
-    asset_id: i64,
-    ex_date: &chrono::NaiveDate,
-    action_type: &CorporateActionType,
-) -> Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT COUNT(*) FROM corporate_actions
-         WHERE asset_id = ?1 AND ex_date = ?2 AND action_type = ?3",
-    )?;
-
-    let count: i64 = stmt.query_row(params![asset_id, ex_date, action_type.as_str()], |row| {
-        row.get(0)
-    })?;
-
-    Ok(count > 0)
-}
-
 /// List corporate actions with optional ticker filter
 pub fn list_corporate_actions(
     conn: &Connection,
@@ -474,70 +662,43 @@ pub fn list_corporate_actions(
 
     let mut stmt = conn.prepare(query)?;
 
+    let parse_row = |row: &rusqlite::Row| {
+        Ok((
+            CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<CorporateActionType>()
+                    .unwrap_or(CorporateActionType::Split),
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                ratio_from: row.get(5)?,
+                ratio_to: row.get(6)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
+            },
+            Asset {
+                id: Some(row.get(10)?),
+                ticker: row.get(11)?,
+                asset_type: row
+                    .get::<_, String>(12)?
+                    .parse::<AssetType>()
+                    .unwrap_or(AssetType::Stock),
+                name: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+            },
+        ))
+    };
+
     let results = if let Some(t) = ticker {
-        stmt.query_map([t], |row| {
-            Ok((
-                CorporateAction {
-                    id: Some(row.get(0)?),
-                    asset_id: row.get(1)?,
-                    action_type: row
-                        .get::<_, String>(2)?
-                        .parse::<CorporateActionType>()
-                        .unwrap_or(CorporateActionType::Split),
-                    event_date: row.get(3)?,
-                    ex_date: row.get(4)?,
-                    ratio_from: row.get(5)?,
-                    ratio_to: row.get(6)?,
-                    source: row.get(7)?,
-                    notes: row.get(8)?,
-                    created_at: row.get(9)?,
-                },
-                Asset {
-                    id: Some(row.get(10)?),
-                    ticker: row.get(11)?,
-                    asset_type: row
-                        .get::<_, String>(12)?
-                        .parse::<AssetType>()
-                        .unwrap_or(AssetType::Stock),
-                    name: row.get(13)?,
-                    created_at: row.get(14)?,
-                    updated_at: row.get(15)?,
-                },
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?
+        stmt.query_map([t], parse_row)?
+            .collect::<Result<Vec<_>, _>>()?
     } else {
-        stmt.query_map([], |row| {
-            Ok((
-                CorporateAction {
-                    id: Some(row.get(0)?),
-                    asset_id: row.get(1)?,
-                    action_type: row
-                        .get::<_, String>(2)?
-                        .parse::<CorporateActionType>()
-                        .unwrap_or(CorporateActionType::Split),
-                    event_date: row.get(3)?,
-                    ex_date: row.get(4)?,
-                    ratio_from: row.get(5)?,
-                    ratio_to: row.get(6)?,
-                    source: row.get(7)?,
-                    notes: row.get(8)?,
-                    created_at: row.get(9)?,
-                },
-                Asset {
-                    id: Some(row.get(10)?),
-                    ticker: row.get(11)?,
-                    asset_type: row
-                        .get::<_, String>(12)?
-                        .parse::<AssetType>()
-                        .unwrap_or(AssetType::Stock),
-                    name: row.get(13)?,
-                    created_at: row.get(14)?,
-                    updated_at: row.get(15)?,
-                },
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?
+        stmt.query_map([], parse_row)?
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     Ok(results)

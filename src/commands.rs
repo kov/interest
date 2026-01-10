@@ -34,6 +34,8 @@ pub enum Command {
     IncomeSummary { year: Option<i32> },
     /// Price management: `prices import-b3 <year> [--nocache]` or `prices clear-cache [year]`
     Prices { action: PricesAction },
+    /// Inconsistencies management
+    Inconsistencies { action: InconsistenciesAction },
     /// Show help
     Help,
     /// Exit/quit
@@ -49,6 +51,28 @@ pub enum PricesAction {
     ImportB3File { path: String },
     /// Clear B3 cache: `prices clear-cache [year]`
     ClearCache { year: Option<i32> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum InconsistenciesAction {
+    /// List inconsistencies
+    List {
+        status: Option<String>,
+        issue_type: Option<String>,
+        asset: Option<String>,
+    },
+    /// Show a single inconsistency
+    Show { id: i64 },
+    /// Resolve an inconsistency (interactive if no fields provided)
+    /// If id is None, iterate through all open inconsistencies
+    Resolve {
+        id: Option<i64>,
+        set: Vec<(String, String)>,
+        json: Option<String>,
+    },
+    /// Ignore an inconsistency
+    Ignore { id: i64, reason: Option<String> },
 }
 
 /// Error type for command parsing
@@ -348,6 +372,149 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 _ => Err(CommandParseError {
                     message: format!(
                         "Unknown prices action: {}. Use: import-b3 or clear-cache",
+                        action
+                    ),
+                }),
+            }
+        }
+        "inconsistencies" | "inconsistency" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "inconsistencies requires action (list, show, resolve, ignore)"
+                        .to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "list" => {
+                    let mut status = None;
+                    let mut issue_type = None;
+                    let mut asset = None;
+                    let collected: Vec<_> = parts.collect();
+                    let mut i = 0;
+                    while i < collected.len() {
+                        match collected[i] {
+                            "--open" => {
+                                status = Some("OPEN".to_string());
+                                i += 1;
+                            }
+                            "--all" => {
+                                status = Some("ALL".to_string());
+                                i += 1;
+                            }
+                            "--status" if i + 1 < collected.len() => {
+                                status = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--type" if i + 1 < collected.len() => {
+                                issue_type = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--asset" if i + 1 < collected.len() => {
+                                asset = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            _ => {
+                                i += 1;
+                            }
+                        }
+                    }
+
+                    Ok(Command::Inconsistencies {
+                        action: InconsistenciesAction::List {
+                            status,
+                            issue_type,
+                            asset,
+                        },
+                    })
+                }
+                "show" => {
+                    let id = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "inconsistencies show requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "inconsistencies show requires a numeric id".to_string(),
+                        })?;
+
+                    Ok(Command::Inconsistencies {
+                        action: InconsistenciesAction::Show { id },
+                    })
+                }
+                "resolve" => {
+                    // ID is optional - if not provided, iterate through all open inconsistencies
+                    let collected: Vec<_> = parts.collect();
+                    let mut i = 0;
+
+                    // Check if first arg is an ID (number) or a flag
+                    let id = if !collected.is_empty()
+                        && !collected[0].starts_with('-')
+                        && collected[0].parse::<i64>().is_ok()
+                    {
+                        let parsed = collected[0].parse::<i64>().ok();
+                        i = 1;
+                        parsed
+                    } else {
+                        None
+                    };
+
+                    let mut set = Vec::new();
+                    let mut json = None;
+                    while i < collected.len() {
+                        match collected[i] {
+                            "--set" if i + 1 < collected.len() => {
+                                if let Some((k, v)) = collected[i + 1].split_once('=') {
+                                    set.push((k.to_string(), v.to_string()));
+                                }
+                                i += 2;
+                            }
+                            "--json" if i + 1 < collected.len() => {
+                                json = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            _ => {
+                                i += 1;
+                            }
+                        }
+                    }
+
+                    Ok(Command::Inconsistencies {
+                        action: InconsistenciesAction::Resolve { id, set, json },
+                    })
+                }
+                "ignore" => {
+                    let id = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "inconsistencies ignore requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "inconsistencies ignore requires a numeric id".to_string(),
+                        })?;
+
+                    let mut reason = None;
+                    let collected: Vec<_> = parts.collect();
+                    let mut i = 0;
+                    while i < collected.len() {
+                        if collected[i] == "--reason" && i + 1 < collected.len() {
+                            reason = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    Ok(Command::Inconsistencies {
+                        action: InconsistenciesAction::Ignore { id, reason },
+                    })
+                }
+                _ => Err(CommandParseError {
+                    message: format!(
+                        "Unknown inconsistencies action: {}. Use: list, show, resolve, ignore",
                         action
                     ),
                 }),

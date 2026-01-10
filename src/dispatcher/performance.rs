@@ -52,9 +52,21 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     db::init_database(None)?;
     let mut conn = db::open_db(None)?;
 
+    // Get blocked assets (those with open blocking inconsistencies)
+    let blocked_assets = db::get_blocked_assets(&conn)?;
+    let blocked_tickers: Vec<&str> = blocked_assets.iter().map(|(_, t)| t.as_str()).collect();
+
+    if !blocked_tickers.is_empty() {
+        anyhow::bail!(
+            "Refusing to show performance due to open blocking inconsistencies.\nAssets: {}\nResolve with `inconsistencies resolve`.",
+            blocked_tickers.join(", ")
+        );
+    }
+
     let period = parse_period_string(period_str)?;
 
     // Ensure prices are available for the required date range
+    // Filter out blocked assets
     let assets = db::get_assets_with_transactions(&conn)?;
     if !assets.is_empty() {
         // Get the date range for prices
@@ -136,7 +148,6 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
         }
     }
 
-    // Calculate performance
     let report = reports::calculate_performance(&mut conn, period)?;
 
     if json_output {

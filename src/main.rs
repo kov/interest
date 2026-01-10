@@ -15,8 +15,8 @@ mod utils;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    ActionCommands, Cli, Commands, IncomeCommands, PerformanceCommands, PortfolioCommands,
-    PriceCommands, TaxCommands, TransactionCommands,
+    ActionCommands, Cli, Commands, IncomeCommands, InconsistenciesCommands, PerformanceCommands,
+    PortfolioCommands, PriceCommands, TaxCommands, TransactionCommands,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -174,6 +174,80 @@ async fn main() -> Result<()> {
                     ratio.as_deref(),
                     date.as_deref(),
                     notes.as_deref(),
+                )
+                .await
+            }
+        },
+
+        Commands::Inconsistencies { action } => match action {
+            InconsistenciesCommands::List {
+                open,
+                all,
+                status,
+                issue_type,
+                asset,
+            } => {
+                let status = if let Some(status) = status {
+                    Some(status)
+                } else if all {
+                    Some("ALL".to_string())
+                } else if open || !all {
+                    Some("OPEN".to_string())
+                } else {
+                    None
+                };
+
+                dispatcher::dispatch_command(
+                    commands::Command::Inconsistencies {
+                        action: commands::InconsistenciesAction::List {
+                            status,
+                            issue_type,
+                            asset,
+                        },
+                    },
+                    cli.json,
+                )
+                .await
+            }
+            InconsistenciesCommands::Show { id } => {
+                dispatcher::dispatch_command(
+                    commands::Command::Inconsistencies {
+                        action: commands::InconsistenciesAction::Show { id },
+                    },
+                    cli.json,
+                )
+                .await
+            }
+            InconsistenciesCommands::Resolve {
+                id,
+                set,
+                json_payload,
+            } => {
+                let mut pairs = Vec::new();
+                for item in set {
+                    if let Some((k, v)) = item.split_once('=') {
+                        pairs.push((k.to_string(), v.to_string()));
+                    }
+                }
+
+                dispatcher::dispatch_command(
+                    commands::Command::Inconsistencies {
+                        action: commands::InconsistenciesAction::Resolve {
+                            id,
+                            set: pairs,
+                            json: json_payload,
+                        },
+                    },
+                    cli.json,
+                )
+                .await
+            }
+            InconsistenciesCommands::Ignore { id, reason } => {
+                dispatcher::dispatch_command(
+                    commands::Command::Inconsistencies {
+                        action: commands::InconsistenciesAction::Ignore { id, reason },
+                    },
+                    cli.json,
                 )
                 .await
             }
@@ -1285,16 +1359,8 @@ async fn handle_actions_update() -> Result<()> {
                             created_at: chrono::Utc::now(),
                         };
 
-                        // Check for duplicates
-                        if !db::corporate_action_exists(
-                            &conn,
-                            asset.id.unwrap(),
-                            &action.ex_date,
-                            &action.action_type,
-                        )? {
-                            db::insert_corporate_action(&conn, &action)?;
-                            count += 1;
-                        }
+                        db::insert_corporate_action(&conn, &action)?;
+                        count += 1;
                     }
                     total_actions += count;
                 }
@@ -1513,17 +1579,6 @@ async fn handle_action_add(
     let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
 
-    // Check if this corporate action already exists
-    if db::corporate_action_exists(&conn, asset_id, &ex_date, &action_type)? {
-        println!(
-            "{} Corporate action already exists for {} on {}",
-            "⚠".yellow().bold(),
-            ticker.cyan().bold(),
-            ex_date
-        );
-        return Ok(());
-    }
-
     // Create corporate action
     let action = db::CorporateAction {
         id: None,
@@ -1733,25 +1788,13 @@ async fn handle_action_scrape(
         println!("\n{} Saving to database...", "💾".cyan().bold());
 
         let mut saved_count = 0;
-        let mut skipped_count = 0;
 
         for action in actions {
-            // Check if already exists
-            if db::corporate_action_exists(&conn, asset_id, &action.ex_date, &action.action_type)? {
-                skipped_count += 1;
-                continue;
-            }
-
             db::insert_corporate_action(&conn, &action)?;
             saved_count += 1;
         }
 
-        println!(
-            "\n{} Saved {} action(s), skipped {} duplicate(s)",
-            "✓".green().bold(),
-            saved_count,
-            skipped_count
-        );
+        println!("\n{} Saved {} action(s)", "✓".green().bold(), saved_count);
 
         if saved_count > 0 {
             println!(
