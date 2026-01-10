@@ -119,6 +119,10 @@ pub enum PortfolioCommands {
         /// Filter by asset type (STOCK, FII, FIAGRO, FI_INFRA)
         #[arg(short, long)]
         asset_type: Option<String>,
+
+        /// Show portfolio as of this date (YYYY-MM-DD, YYYY-MM, or YYYY)
+        #[arg(long)]
+        at: Option<String>,
     },
 }
 

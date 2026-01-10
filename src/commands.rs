@@ -12,8 +12,11 @@
 pub enum Command {
     /// Import transactions from file: `import <path> [--dry-run]`
     Import { path: String, dry_run: bool },
-    /// Show portfolio: `portfolio show [--filter stock|fii|...]`
-    PortfolioShow { filter: Option<String> },
+    /// Show portfolio: `portfolio show [--at <date>] [--filter stock|fii|...]`
+    PortfolioShow {
+        filter: Option<String>,
+        as_of_date: Option<String>,
+    },
     /// Show performance: `performance show <MTD|QTD|YTD|1Y|ALL|from:to>`
     PerformanceShow { period: String },
     /// Show tax report: `tax report <year> [--export]`
@@ -62,6 +65,42 @@ impl std::fmt::Display for CommandParseError {
 }
 
 impl std::error::Error for CommandParseError {}
+
+/// Parse flexible date formats: YYYY-MM-DD, YYYY-MM, or YYYY
+/// Returns the date as a string for later parsing with full error context
+pub fn parse_flexible_date(s: &str) -> Result<String, CommandParseError> {
+    use chrono::{Datelike, NaiveDate};
+
+    // YYYY-MM-DD (exact date)
+    if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+        return Ok(s.to_string());
+    }
+
+    // YYYY-MM (last day of month)
+    if let Ok(ym) = NaiveDate::parse_from_str(&format!("{}-01", s), "%Y-%m-%d") {
+        // Calculate last day of month
+        let next_month = if ym.month() == 12 {
+            NaiveDate::from_ymd_opt(ym.year() + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(ym.year(), ym.month() + 1, 1)
+        };
+        if let Some(nm) = next_month {
+            let last_day = nm.pred_opt().unwrap_or(ym);
+            return Ok(last_day.format("%Y-%m-%d").to_string());
+        }
+    }
+
+    // YYYY (December 31)
+    if let Ok(year) = s.parse::<i32>() {
+        if (1900..=2100).contains(&year) {
+            return Ok(format!("{}-12-31", year));
+        }
+    }
+
+    Err(CommandParseError {
+        message: format!("Invalid date '{}'. Use YYYY-MM-DD, YYYY-MM, or YYYY", s),
+    })
+}
 
 /// Parse a command string into a Command enum
 ///
@@ -115,20 +154,28 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
 
             match action.as_str() {
                 "show" => {
-                    // Look for --asset-type or -a option
+                    // Look for --asset-type/-a and --at options
                     let mut filter = None;
+                    let mut as_of_date = None;
                     let collected: Vec<_> = parts.collect();
 
-                    for i in 0..collected.len() {
+                    let mut i = 0;
+                    while i < collected.len() {
                         if (collected[i] == "--asset-type" || collected[i] == "-a")
                             && i + 1 < collected.len()
                         {
                             filter = Some(collected[i + 1].to_string());
-                            break;
+                            i += 2;
+                        } else if collected[i] == "--at" && i + 1 < collected.len() {
+                            // Parse and validate the date, converting to canonical form
+                            as_of_date = Some(parse_flexible_date(collected[i + 1])?);
+                            i += 2;
+                        } else {
+                            i += 1;
                         }
                     }
 
-                    Ok(Command::PortfolioShow { filter })
+                    Ok(Command::PortfolioShow { filter, as_of_date })
                 }
                 _ => Err(CommandParseError {
                     message: format!("Unknown portfolio action: {}. Use: portfolio show", action),
@@ -322,6 +369,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_flexible_date_full() {
+        let result = parse_flexible_date("2024-06-15").unwrap();
+        assert_eq!(result, "2024-06-15");
+    }
+
+    #[test]
+    fn test_parse_flexible_date_month() {
+        let result = parse_flexible_date("2024-06").unwrap();
+        assert_eq!(result, "2024-06-30"); // Last day of June
+    }
+
+    #[test]
+    fn test_parse_flexible_date_year() {
+        let result = parse_flexible_date("2024").unwrap();
+        assert_eq!(result, "2024-12-31"); // December 31
+    }
+
+    #[test]
+    fn test_parse_flexible_date_december() {
+        let result = parse_flexible_date("2024-12").unwrap();
+        assert_eq!(result, "2024-12-31"); // Last day of December
+    }
+
+    #[test]
+    fn test_parse_flexible_date_february_leap_year() {
+        let result = parse_flexible_date("2024-02").unwrap();
+        assert_eq!(result, "2024-02-29"); // Leap year
+    }
+
+    #[test]
+    fn test_parse_flexible_date_february_non_leap_year() {
+        let result = parse_flexible_date("2023-02").unwrap();
+        assert_eq!(result, "2023-02-28"); // Non-leap year
+    }
+
+    #[test]
+    fn test_parse_flexible_date_invalid() {
+        let result = parse_flexible_date("not-a-date");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Invalid date"));
+    }
+
+    #[test]
     fn test_parse_import_command() {
         let cmd = parse_command("import file.xlsx").unwrap();
         assert_eq!(
@@ -360,7 +450,13 @@ mod tests {
     #[test]
     fn test_parse_portfolio_show() {
         let cmd = parse_command("portfolio show").unwrap();
-        assert_eq!(cmd, Command::PortfolioShow { filter: None });
+        assert_eq!(
+            cmd,
+            Command::PortfolioShow {
+                filter: None,
+                as_of_date: None
+            }
+        );
     }
 
     #[test]
@@ -369,7 +465,8 @@ mod tests {
         assert_eq!(
             cmd,
             Command::PortfolioShow {
-                filter: Some("stock".to_string())
+                filter: Some("stock".to_string()),
+                as_of_date: None
             }
         );
     }
@@ -380,7 +477,56 @@ mod tests {
         assert_eq!(
             cmd,
             Command::PortfolioShow {
-                filter: Some("fii".to_string())
+                filter: Some("fii".to_string()),
+                as_of_date: None
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_portfolio_show_with_date() {
+        let cmd = parse_command("portfolio show --at 2024-06-15").unwrap();
+        assert_eq!(
+            cmd,
+            Command::PortfolioShow {
+                filter: None,
+                as_of_date: Some("2024-06-15".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_portfolio_show_with_month_date() {
+        let cmd = parse_command("portfolio show --at 2024-06").unwrap();
+        assert_eq!(
+            cmd,
+            Command::PortfolioShow {
+                filter: None,
+                as_of_date: Some("2024-06-30".to_string()) // Last day of June
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_portfolio_show_with_year_date() {
+        let cmd = parse_command("portfolio show --at 2024").unwrap();
+        assert_eq!(
+            cmd,
+            Command::PortfolioShow {
+                filter: None,
+                as_of_date: Some("2024-12-31".to_string()) // December 31
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_portfolio_show_with_filter_and_date() {
+        let cmd = parse_command("portfolio show -a fii --at 2024-06-15").unwrap();
+        assert_eq!(
+            cmd,
+            Command::PortfolioShow {
+                filter: Some("fii".to_string()),
+                as_of_date: Some("2024-06-15".to_string())
             }
         );
     }

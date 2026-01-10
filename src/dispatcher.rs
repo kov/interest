@@ -24,8 +24,8 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             eprintln!("Import command: {} (dry_run: {})", path, dry_run);
             Ok(())
         }
-        Command::PortfolioShow { filter } => {
-            dispatch_portfolio_show(filter.as_deref(), json_output).await
+        Command::PortfolioShow { filter, as_of_date } => {
+            dispatch_portfolio_show(filter.as_deref(), as_of_date.as_deref(), json_output).await
         }
         Command::PerformanceShow { period } => {
             dispatch_performance_show(&period, json_output).await
@@ -44,7 +44,9 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             println!("Help: interest <command> [options]");
             println!("\nAvailable commands:");
             println!("  import <file>              - Import transactions");
-            println!("  portfolio show             - Show portfolio");
+            println!(
+                "  portfolio show [--at DATE] - Show portfolio (DATE: YYYY-MM-DD|YYYY-MM|YYYY)"
+            );
             println!(
                 "  performance show <P>       - Show performance (P: MTD|QTD|YTD|1Y|ALL|from:to)"
             );
@@ -68,16 +70,38 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
     }
 }
 
-async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) -> Result<()> {
+async fn dispatch_portfolio_show(
+    asset_type: Option<&str>,
+    as_of_date: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
     info!("Generating portfolio report");
 
     // Initialize database
     db::init_database(None)?;
     let mut conn = db::open_db(None)?;
 
-    let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
-        .map(|v| v != "0")
-        .unwrap_or(false);
+    // Parse date if provided (already validated by parse_flexible_date in commands.rs)
+    let historical_date = if let Some(date_str) = as_of_date {
+        let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+            .map_err(|e| anyhow::anyhow!("Invalid date '{}': {}", date_str, e))?;
+        let today = chrono::Local::now().date_naive();
+        if date > today {
+            return Err(anyhow::anyhow!(
+                "Date cannot be in the future (today is {})",
+                today
+            ));
+        }
+        Some(date)
+    } else {
+        None
+    };
+
+    // Skip live price fetch for historical views (use cached prices from price_history)
+    let skip_price_fetch = historical_date.is_some()
+        || std::env::var("INTEREST_SKIP_PRICE_FETCH")
+            .map(|v| v != "0")
+            .unwrap_or(false);
 
     // Parse asset type filter if provided
     let asset_type_filter = if let Some(type_str) = asset_type {
@@ -104,7 +128,11 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
     let today = chrono::Local::now().date_naive();
 
     // Calculate portfolio positions first (fast, no network calls)
-    let mut report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+    let mut report = if let Some(date) = historical_date {
+        reports::calculate_portfolio_at_date(&conn, date, asset_type_filter.as_ref())?
+    } else {
+        reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?
+    };
 
     if report.positions.is_empty() {
         if !json_output {
@@ -167,7 +195,11 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
                 })?;
 
                 // Recalculate portfolio with updated prices
-                report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+                report = if let Some(date) = historical_date {
+                    reports::calculate_portfolio_at_date(&conn, date, asset_type_filter.as_ref())?
+                } else {
+                    reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?
+                };
             }
         } else {
             // JSON mode: no spinner, just fetch silently
@@ -186,14 +218,26 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
                     Ok::<(), anyhow::Error>(())
                 })?;
 
-                report = reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?;
+                report = if let Some(date) = historical_date {
+                    reports::calculate_portfolio_at_date(&conn, date, asset_type_filter.as_ref())?
+                } else {
+                    reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?
+                };
             }
         }
     }
 
     if report.positions.is_empty() {
         if !json_output {
-            println!("{}", cli::formatters::format_empty_portfolio());
+            if let Some(date) = historical_date {
+                println!(
+                    "{} No positions held as of {}\n",
+                    "ℹ".blue().bold(),
+                    date.format("%Y-%m-%d")
+                );
+            } else {
+                println!("{}", cli::formatters::format_empty_portfolio());
+            }
         }
         return Ok(());
     }
@@ -201,6 +245,15 @@ async fn dispatch_portfolio_show(asset_type: Option<&str>, json_output: bool) ->
     if json_output {
         println!("{}", cli::formatters::format_portfolio_json(&report));
         return Ok(());
+    }
+
+    // Show historical date header if applicable
+    if let Some(date) = historical_date {
+        println!(
+            "\n{} Portfolio as of {}\n",
+            "📅".cyan().bold(),
+            date.format("%Y-%m-%d")
+        );
     }
 
     // Use formatter for table output
@@ -1510,7 +1563,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_portfolio_show() {
-        let result = dispatch_command(Command::PortfolioShow { filter: None }, false).await;
+        let result = dispatch_command(
+            Command::PortfolioShow {
+                filter: None,
+                as_of_date: None,
+            },
+            false,
+        )
+        .await;
         assert!(result.is_ok());
     }
 

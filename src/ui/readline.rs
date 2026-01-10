@@ -302,11 +302,8 @@ mod tests {
     fn test_completer_empty_line() {
         let tmp = std::env::temp_dir().join("interest_history_test_empty");
         let _ = fs::remove_file(&tmp);
-        let rl = Readline::new(
-            &[&["import"], &["portfolio", "show"], &["help"]],
-            Some(tmp),
-        )
-        .unwrap();
+        let rl =
+            Readline::new(&[&["import"], &["portfolio", "show"], &["help"]], Some(tmp)).unwrap();
 
         // Empty line shows all top-level commands
         let completions = rl.completions("");

@@ -94,10 +94,17 @@ async fn main() -> Result<()> {
         } => handle_irpf_import(&file, year, dry_run).await,
 
         Commands::Portfolio { action } => match action {
-            PortfolioCommands::Show { asset_type } => {
+            PortfolioCommands::Show { asset_type, at } => {
+                let as_of_date = match at.as_ref() {
+                    Some(d) => Some(
+                        commands::parse_flexible_date(d).map_err(|e| anyhow::anyhow!("{}", e))?,
+                    ),
+                    None => None,
+                };
                 dispatcher::dispatch_command(
                     commands::Command::PortfolioShow {
                         filter: asset_type.clone(),
+                        as_of_date,
                     },
                     cli.json,
                 )
