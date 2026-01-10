@@ -8,7 +8,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
-use rustyline::{Config, Context, Editor, Helper};
+use rustyline::{CompletionType, Config, Context, Editor, Helper};
 
 #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub struct CommandHelper {
@@ -54,6 +54,11 @@ impl Completer for CommandHelper {
 
         // Treat trailing space as start of a new token
         if before.chars().last().is_some_and(|c| c.is_whitespace()) {
+            tokens.push("");
+        }
+
+        // Empty line: treat as completing first token from scratch
+        if tokens.is_empty() {
             tokens.push("");
         }
 
@@ -128,6 +133,7 @@ impl Readline {
         let config = Config::builder()
             .history_ignore_dups(true)?
             .history_ignore_space(true)
+            .completion_type(CompletionType::List)
             .build();
         let helper = CommandHelper::new(command_patterns);
         let mut editor = Editor::with_config(config)?;
@@ -216,5 +222,97 @@ mod tests {
 
         let bad = rl.completions_with_start("tax foo");
         assert!(bad.is_empty());
+    }
+
+    #[test]
+    fn test_completer_performance() {
+        let tmp = std::env::temp_dir().join("interest_history_test_perf");
+        let _ = fs::remove_file(&tmp);
+        let rl = Readline::new(&[&["performance", "show"]], Some(tmp)).unwrap();
+
+        // Test first token completion
+        let completions = rl.completions("perf");
+        assert!(completions.contains(&"performance ".to_string()));
+
+        // Test subcommand completion
+        let completions = rl.completions("performance ");
+        assert!(completions.contains(&"show ".to_string()));
+    }
+
+    #[test]
+    fn test_completer_income() {
+        let tmp = std::env::temp_dir().join("interest_history_test_income");
+        let _ = fs::remove_file(&tmp);
+        let rl = Readline::new(
+            &[
+                &["income", "show"],
+                &["income", "detail"],
+                &["income", "summary"],
+            ],
+            Some(tmp),
+        )
+        .unwrap();
+
+        let completions = rl.completions("inc");
+        assert!(completions.contains(&"income ".to_string()));
+
+        // Should suggest all three subcommands
+        let completions = rl.completions("income ");
+        assert_eq!(completions.len(), 3);
+        assert!(completions.contains(&"show ".to_string()));
+        assert!(completions.contains(&"detail ".to_string()));
+        assert!(completions.contains(&"summary ".to_string()));
+    }
+
+    #[test]
+    fn test_completer_prices() {
+        let tmp = std::env::temp_dir().join("interest_history_test_prices");
+        let _ = fs::remove_file(&tmp);
+        let rl = Readline::new(
+            &[
+                &["prices", "import-b3"],
+                &["prices", "import-b3-file"],
+                &["prices", "clear-cache"],
+            ],
+            Some(tmp),
+        )
+        .unwrap();
+
+        let completions = rl.completions("pri");
+        assert!(completions.contains(&"prices ".to_string()));
+
+        // Test subcommand partial completion
+        let completions = rl.completions("prices import");
+        assert!(completions.contains(&"import-b3 ".to_string()));
+        assert!(completions.contains(&"import-b3-file ".to_string()));
+    }
+
+    #[test]
+    fn test_completer_no_match_for_invalid_subcommand() {
+        let tmp = std::env::temp_dir().join("interest_history_test_nomatch");
+        let _ = fs::remove_file(&tmp);
+        let rl = Readline::new(&[&["portfolio", "show"]], Some(tmp)).unwrap();
+
+        // "portfolio sum" shouldn't match "portfolio show"
+        let completions = rl.completions("portfolio sum");
+        assert!(completions.is_empty());
+    }
+
+    #[test]
+    fn test_completer_empty_line() {
+        let tmp = std::env::temp_dir().join("interest_history_test_empty");
+        let _ = fs::remove_file(&tmp);
+        let rl = Readline::new(
+            &[&["import"], &["portfolio", "show"], &["help"]],
+            Some(tmp),
+        )
+        .unwrap();
+
+        // Empty line shows all top-level commands
+        let completions = rl.completions("");
+        assert!(!completions.is_empty());
+        assert!(completions.contains(&"import ".to_string()));
+        assert!(completions.contains(&"portfolio ".to_string()));
+        assert!(completions.contains(&"help ".to_string()));
     }
 }
