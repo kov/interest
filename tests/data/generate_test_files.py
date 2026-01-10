@@ -626,6 +626,114 @@ def test_fi_infra():
     print("✓ Created: 09_fi_infra.xlsx")
 
 
+def test_mixed_splits_reverse_splits_and_bonus():
+    """
+    Test complex scenario with mixed split directions, bonus, and trades.
+
+    Scenario:
+    - Buy 1000 KPCA3 @ R$2.00 = R$2,000.00 on 2025-01-15
+    - Split 1:2 on 2025-02-10 (each share becomes 2)
+      - Adjusted: 2000 KPCA3 @ R$1.00 = R$2,000.00
+    - Buy 800 KPCA3 @ R$0.90 = R$720.00 on 2025-03-01
+    - Reverse split 5:1 on 2025-03-15 (5 shares become 1)
+      - First purchase: 2000 -> 400 @ R$5.00 = R$2,000.00
+      - Second purchase: 800 -> 160 @ R$4.50 = R$720.00
+    - Sell 200 KPCA3 @ R$5.50 = R$1,100.00 on 2025-04-01
+    - Bonus 1:2 on 2025-04-20 (each share gets 1 bonus)
+      - Adjusted: 360 -> 720 shares @ R$2.50 = R$1,800.00 (bonus cost = 0)
+    - Sell 400 KPCA3 @ R$3.00 = R$1,200.00 on 2025-05-10
+    - Remaining: 320 shares
+    """
+    wb, ws = create_workbook_with_header()
+
+    # Buy 1000 KPCA3 @ R$2.00
+    ws.append([
+        "Credito",
+        "15/01/2025",
+        "Compra",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        1000,
+        2.00,
+        2000.00
+    ])
+
+    # Split 1:2
+    ws.append([
+        "Credito",
+        "10/02/2025",
+        "Desdobro",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        1000,  # Receives 1000 additional shares
+        "",
+        ""
+    ])
+
+    # Buy 800 more @ R$0.90
+    ws.append([
+        "Credito",
+        "01/03/2025",
+        "Compra",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        800,
+        0.90,
+        720.00
+    ])
+
+    # Reverse split 5:1
+    ws.append([
+        "Debito",
+        "15/03/2025",
+        "Grupamento",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        2400,  # 2800 original -> 560 after split; shows shares removed
+        "",
+        ""
+    ])
+
+    # Sell 200 @ R$5.50
+    ws.append([
+        "Debito",
+        "01/04/2025",
+        "Venda",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        200,
+        5.50,
+        1100.00
+    ])
+
+    # Bonus 1:2
+    ws.append([
+        "Credito",
+        "20/04/2025",
+        "Bonificação",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        360,  # Bonus shares received
+        "",
+        ""
+    ])
+
+    # Sell 400 @ R$3.00
+    ws.append([
+        "Debito",
+        "10/05/2025",
+        "Venda",
+        "KPCA3 - Kluane Capital",
+        "XP INVESTIMENTOS",
+        400,
+        3.00,
+        1200.00
+    ])
+
+    wb.save('tests/data/15_mixed_splits_and_bonus.xlsx')
+    print("✓ Created: 15_mixed_splits_and_bonus.xlsx")
+
+
 if __name__ == "__main__":
     print("Generating test data files...")
     print()
@@ -639,6 +747,7 @@ if __name__ == "__main__":
     test_fii_with_capital_return()
     test_complex_scenario()
     test_fi_infra()
+    test_mixed_splits_reverse_splits_and_bonus()
 
     print()
     print("✅ All test files generated successfully!")
@@ -653,3 +762,4 @@ if __name__ == "__main__":
     print("  07_capital_return.xlsx - FII with capital return")
     print("  08_complex_scenario.xlsx - Complex multi-event scenario")
     print("  09_fi_infra.xlsx - FI-Infra fund")
+    print("  15_mixed_splits_and_bonus.xlsx - Mixed splits, reverse splits, and bonus shares")

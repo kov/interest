@@ -201,7 +201,6 @@ impl InvestingScraper {
                 ex_date: date, // investing.com doesn't distinguish, use same date
                 ratio_from,
                 ratio_to,
-                applied: false,
                 source: "INVESTING.COM".to_string(),
                 notes: Some(format!(
                     "Scraped from investing.com (ratio: {})",

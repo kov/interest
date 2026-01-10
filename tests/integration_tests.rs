@@ -11,10 +11,11 @@
 
 use anyhow::Result;
 use assert_cmd::{cargo, prelude::*};
-use chrono::Utc;
-use interest::corporate_actions::{apply_corporate_action, get_unapplied_actions};
-use interest::db::models::{Asset, AssetType, Transaction, TransactionType};
-use interest::db::{init_database, open_db, upsert_asset};
+use interest::corporate_actions::{
+    adjust_price_and_cost_for_actions, adjust_quantity_for_actions, get_applicable_actions,
+};
+use interest::db::models::{AssetType, Transaction, TransactionType};
+use interest::db::{init_database, open_db, upsert_asset, CorporateActionType};
 use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::importers::import_movimentacao_entries;
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
@@ -494,9 +495,9 @@ fn test_02_term_contract_lifecycle() -> Result<()> {
 
     // Test cost basis calculation
     let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&base_txs[0]); // Liquidation becomes a purchase
+    avg.add_purchase(&base_txs[0], None, None); // Liquidation becomes a purchase
 
-    let sale_result = avg.match_sale(&base_txs[1])?;
+    let sale_result = avg.match_sale(&base_txs[1], None)?;
 
     // Cost basis should be from term contract: 100 @ R$10.00 = R$1,000.00
     assert_eq!(sale_result.cost_basis, dec!(1000));
@@ -573,6 +574,149 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
     Ok(())
 }
 
+/// Test that bonus shares are calculated correctly when there's a prior split.
+/// This verifies that calculate_net_position_before_date applies split adjustments.
+#[test]
+fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Initialize database
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
+
+    // Create asset
+    let asset_id = upsert_asset(&conn, "TEST11", &AssetType::Stock, None)?;
+
+    // Insert purchase: 100 shares @ R$10 on 2025-01-15
+    let buy_tx = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+        settlement_date: None,
+        quantity: dec!(100),
+        price_per_unit: dec!(10),
+        total_cost: dec!(1000),
+        fees: dec!(0),
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(&conn, &buy_tx)?;
+
+    // Add 1:2 split on 2025-02-10 (100 shares -> 200 shares)
+    conn.execute(
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 'TEST')",
+        [asset_id],
+    )?;
+
+    // Add bonus 10:11 on 2025-03-15 (should be based on 200 split-adjusted shares)
+    // Expected bonus: 200 * 11/10 - 200 = 220 - 200 = 20 shares
+    conn.execute(
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'BONUS', '2025-03-15', '2025-03-15', 10, 11, 'TEST')",
+        [asset_id],
+    )?;
+
+    // Apply corporate actions (only bonus creates transactions)
+    let actions: Vec<interest::db::CorporateAction> = conn
+        .prepare("SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes, created_at FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?
+        .query_map([asset_id], |row| {
+            Ok(interest::db::CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: row.get::<_, String>(2)?.parse().unwrap(),
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                ratio_from: row.get(5)?,
+                ratio_to: row.get(6)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let asset = interest::db::Asset {
+        id: Some(asset_id),
+        ticker: "TEST11".to_string(),
+        asset_type: AssetType::Stock,
+        name: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    for action in &actions {
+        interest::corporate_actions::apply_corporate_action(&conn, action, &asset)?;
+    }
+
+    // Verify: should have 2 transactions (original buy + bonus)
+    let tx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transactions WHERE asset_id = ?1",
+        [asset_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(tx_count, 2, "Should have original buy + bonus transaction");
+
+    // Verify bonus transaction quantity
+    let bonus_qty = conn.query_row(
+        "SELECT quantity FROM transactions WHERE asset_id = ?1 AND notes LIKE '%Bonus%'",
+        [asset_id],
+        |row| interest::db::get_decimal_value(row, 0),
+    )?;
+
+    // If split was correctly applied before bonus calculation:
+    // Position = 100 shares, after 1:2 split = 200 shares
+    // Bonus 10:11 on 200 shares = 200 * 11/10 - 200 = 20 bonus shares
+    assert_eq!(
+        bonus_qty,
+        dec!(20),
+        "Bonus should be 20 shares (based on 200 split-adjusted shares, not 100 raw)"
+    );
+
+    // Verify final position with query-time adjustments
+    // Original: 100 shares, after 1:2 split = 200, plus 20 bonus = 220 total
+    let as_of = chrono::NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
+    let txs: Vec<Transaction> = conn
+        .prepare("SELECT id, asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, quota_issuance_date, notes, source, created_at FROM transactions WHERE asset_id = ?1 ORDER BY trade_date")?
+        .query_map([asset_id], |row| {
+            Ok(Transaction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                transaction_type: row.get::<_, String>(2)?.parse().unwrap(),
+                trade_date: row.get(3)?,
+                settlement_date: row.get(4)?,
+                quantity: interest::db::get_decimal_value(row, 5)?,
+                price_per_unit: interest::db::get_decimal_value(row, 6)?,
+                total_cost: interest::db::get_decimal_value(row, 7)?,
+                fees: interest::db::get_decimal_value(row, 8)?,
+                is_day_trade: row.get(9)?,
+                quota_issuance_date: row.get(10)?,
+                notes: row.get(11)?,
+                source: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut total_qty = dec!(0);
+    for tx in &txs {
+        let actions = get_applicable_actions(&conn, asset_id, tx.trade_date, as_of)?;
+        let adjusted_qty = adjust_quantity_for_actions(tx.quantity, &actions);
+        total_qty += adjusted_qty;
+    }
+
+    // Original 100 -> 200 after split, plus 20 bonus (no adjustment needed for bonus as it's after split)
+    assert_eq!(total_qty, dec!(220), "Final position should be 220 shares");
+
+    Ok(())
+}
+
 #[test]
 fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
     let home = TempDir::new()?;
@@ -584,13 +728,30 @@ fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
     let data = get_json_data(&import_result);
     assert_eq!(data["imported_trades"].as_u64().unwrap(), 1);
     assert_eq!(data["imported_actions"].as_u64().unwrap(), 1);
-    assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 1);
+    // With query-time adjustment, splits no longer auto-apply (adjustment happens at query time)
+    assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 0);
 
-    // Verify with SQL
+    // Verify transactions remain unchanged in database
     let transactions = sql::query_transactions(&home, "A1MD34");
     assert_eq!(transactions.len(), 1);
-    assert_eq!(transactions[0].quantity, dec!(640));
-    assert_eq!(transactions[0].total_cost, dec!(800));
+    assert_eq!(
+        transactions[0].quantity,
+        dec!(80),
+        "Database quantity unchanged"
+    );
+    assert_eq!(
+        transactions[0].total_cost,
+        dec!(800),
+        "Database cost unchanged"
+    );
+
+    // Verify corporate action was created
+    let db_path = get_db_path(&home);
+    let conn = Connection::open(&db_path)?;
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM corporate_actions WHERE asset_id = ?")?;
+    let action_count: i64 = stmt.query_row([transactions[0].asset_id], |row| row.get(0))?;
+    assert_eq!(action_count, 1, "Corporate action should be recorded");
+
     Ok(())
 }
 
@@ -629,9 +790,9 @@ fn test_03_term_contract_sold_before_expiry() -> Result<()> {
 
     // Test cost basis - term contracts can be traded like regular stocks
     let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&transactions[0]);
+    avg.add_purchase(&transactions[0], None, None);
 
-    let sale_result = avg.match_sale(&transactions[1])?;
+    let sale_result = avg.match_sale(&transactions[1], None)?;
 
     assert_eq!(sale_result.cost_basis, dec!(1200));
     assert_eq!(sale_result.sale_total, dec!(1350));
@@ -666,53 +827,71 @@ fn test_04_stock_split() -> Result<()> {
     let db_path = get_db_path(&home);
     let conn = Connection::open(&db_path)?;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 0, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 'TEST')",
         [asset_id],
     )?;
 
-    // Apply the split
-    let asset = Asset {
-        id: Some(asset_id),
-        ticker: "VALE3".to_string(),
-        asset_type: AssetType::Stock,
-        name: Some("VALE SA".to_string()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
+    // Note: No need to call apply_corporate_action - adjustments happen at query time
+    // Verify the action exists in database
+    let mut stmt = conn.prepare("SELECT id FROM corporate_actions WHERE asset_id = ?1")?;
+    let action_count = stmt
+        .query_map([asset_id], |row| row.get::<_, i64>(0))?
+        .count();
+    assert_eq!(action_count, 1, "Should have 1 corporate action");
 
-    let actions = get_unapplied_actions(&conn, Some(asset_id))?;
-    assert_eq!(actions.len(), 1, "Should have 1 unapplied action");
+    // Re-fetch transactions - they should be UNCHANGED in database
+    let db_txs = sql::query_transactions(&home, "VALE3");
 
-    let adjusted_count = apply_corporate_action(&conn, &actions[0], &asset)?;
-    assert_eq!(adjusted_count, 1, "Should adjust 1 transaction (first buy)");
-
-    // Re-fetch transactions to see adjustments
-    let adjusted_txs = sql::query_transactions(&home, "VALE3");
-
-    // First purchase should be adjusted: 100 @ R$80 -> 200 @ R$40
-    assert_eq!(adjusted_txs[0].quantity, dec!(200));
-    assert_eq!(adjusted_txs[0].price_per_unit, dec!(40));
+    // First purchase should remain UNADJUSTED in database: 100 @ R$80
+    assert_eq!(db_txs[0].quantity, dec!(100), "Database quantity unchanged");
     assert_eq!(
-        adjusted_txs[0].quantity * adjusted_txs[0].price_per_unit,
-        dec!(8000),
-        "Total cost should remain unchanged"
+        db_txs[0].price_per_unit,
+        dec!(80),
+        "Database price unchanged"
     );
 
-    // Second purchase (after split) should be unchanged
-    assert_eq!(adjusted_txs[1].quantity, dec!(50));
-    assert_eq!(adjusted_txs[1].price_per_unit, dec!(42));
+    // Second purchase (after split) should also be unchanged
+    assert_eq!(db_txs[1].quantity, dec!(50));
+    assert_eq!(db_txs[1].price_per_unit, dec!(42));
 
-    // Test cost basis with adjusted quantities
+    // Test query-time adjustment: manually apply adjustment to simulate what portfolio/tax code does
+    let actions_for_first_tx =
+        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[2].trade_date)?;
+    assert_eq!(
+        actions_for_first_tx.len(),
+        1,
+        "First tx should have 1 applicable action"
+    );
+
+    // Adjust first transaction quantities at query time
+    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_first_tx);
+    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
+        db_txs[0].quantity,
+        db_txs[0].price_per_unit,
+        db_txs[0].total_cost,
+        &actions_for_first_tx,
+    );
+
+    // After 1:2 split: 100 @ R$80 -> 200 @ R$40
+    assert_eq!(
+        adjusted_qty_0,
+        dec!(200),
+        "Adjusted quantity after 1:2 split"
+    );
+    assert_eq!(adjusted_price_0, dec!(40), "Adjusted price after split");
+    assert_eq!(adjusted_cost_0, dec!(8000), "Total cost unchanged");
+
+    // Test cost basis with adjusted quantities (simulating what tax code does)
     let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&adjusted_txs[0]);
-    avg.add_purchase(&adjusted_txs[1]);
+    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0));
+    avg.add_purchase(&db_txs[1], None, None); // No adjustment needed (after split date)
 
-    let sale_result = avg.match_sale(&adjusted_txs[2])?;
+    let sale_result = avg.match_sale(&db_txs[2], None)?;
 
-    let expected_avg = (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
-        / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
-    let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
+    let expected_avg =
+        (adjusted_cost_0 + db_txs[1].total_cost) / (adjusted_qty_0 + db_txs[1].quantity);
+    let expected_cost_basis = expected_avg * db_txs[2].quantity;
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(6750));
@@ -743,38 +922,67 @@ fn test_05_reverse_split() -> Result<()> {
 
     // Create reverse split (10:1 - 10 shares become 1)
     let asset_id = transactions[0].asset_id;
-    let db_path = get_db_path(&home);
-    let conn = Connection::open(&db_path)?;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'SPLIT', '2025-02-20', '2025-02-20', 10, 1, 0, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-02-20', '2025-02-20', 10, 1, 'TEST')",
         [asset_id],
     )?;
 
-    let asset = Asset {
-        id: Some(asset_id),
-        ticker: "MGLU3".to_string(),
-        asset_type: AssetType::Stock,
-        name: Some("MAGAZINE LUIZA".to_string()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
+    // Verify action exists
+    let mut stmt = conn.prepare("SELECT id FROM corporate_actions WHERE asset_id = ?1")?;
+    let action_count = stmt
+        .query_map([asset_id], |row| row.get::<_, i64>(0))?
+        .count();
+    assert_eq!(action_count, 1, "Should have 1 corporate action");
 
-    let actions = get_unapplied_actions(&conn, Some(asset_id))?;
-    apply_corporate_action(&conn, &actions[0], &asset)?;
+    // Re-fetch transactions - should be UNCHANGED in database
+    let db_txs = sql::query_transactions(&home, "MGLU3");
+    assert_eq!(
+        db_txs[0].quantity,
+        dec!(1000),
+        "Database quantity unchanged"
+    );
+    assert_eq!(
+        db_txs[0].price_per_unit,
+        dec!(2),
+        "Database price unchanged"
+    );
 
-    // Re-fetch and verify
-    let adjusted_txs = sql::query_transactions(&home, "MGLU3");
+    // Apply query-time adjustment
+    let actions_for_first_tx =
+        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[1].trade_date)?;
+    assert_eq!(
+        actions_for_first_tx.len(),
+        1,
+        "First tx should have 1 applicable action"
+    );
+
+    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_first_tx);
+    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
+        db_txs[0].quantity,
+        db_txs[0].price_per_unit,
+        db_txs[0].total_cost,
+        &actions_for_first_tx,
+    );
 
     // 1000 @ R$2.00 -> 100 @ R$20.00
-    assert_eq!(adjusted_txs[0].quantity, dec!(100));
-    assert_eq!(adjusted_txs[0].price_per_unit, dec!(20));
+    assert_eq!(
+        adjusted_qty_0,
+        dec!(100),
+        "Adjusted quantity after 10:1 reverse split"
+    );
+    assert_eq!(
+        adjusted_price_0,
+        dec!(20),
+        "Adjusted price after reverse split"
+    );
+    assert_eq!(adjusted_cost_0, dec!(2000), "Total cost unchanged");
 
-    // Test cost basis
+    // Test cost basis with adjusted values
     let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&adjusted_txs[0]);
+    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0));
 
-    let sale_result = avg.match_sale(&adjusted_txs[1])?;
+    let sale_result = avg.match_sale(&db_txs[1], None)?;
 
     assert_eq!(sale_result.cost_basis, dec!(1000)); // 50 @ R$20
     assert_eq!(sale_result.sale_total, dec!(1100)); // 50 @ R$22
@@ -800,58 +1008,95 @@ fn test_06_multiple_splits() -> Result<()> {
     let asset_id = transactions[0].asset_id;
 
     // First split 1:2 on 2025-02-10
-    let db_path = get_db_path(&home);
-    let conn = Connection::open(&db_path)?;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 0, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 'TEST')",
         [asset_id],
     )?;
 
     // Second split 1:2 on 2025-04-15
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'SPLIT', '2025-04-15', '2025-04-15', 1, 2, 0, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-04-15', '2025-04-15', 1, 2, 'TEST')",
         [asset_id],
     )?;
 
-    let asset = Asset {
-        id: Some(asset_id),
-        ticker: "ITSA4".to_string(),
-        asset_type: AssetType::Stock,
-        name: Some("ITAUSA PN".to_string()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
+    // Verify both actions exist
+    let mut stmt =
+        conn.prepare("SELECT id FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?;
+    let action_count = stmt
+        .query_map([asset_id], |row| row.get::<_, i64>(0))?
+        .count();
+    assert_eq!(action_count, 2, "Should have 2 corporate actions");
 
-    // Apply both splits
-    let actions = get_unapplied_actions(&conn, Some(asset_id))?;
-    assert_eq!(actions.len(), 2, "Should have 2 splits");
+    // Re-fetch transactions - should be UNCHANGED in database
+    let db_txs = sql::query_transactions(&home, "ITSA4");
+    assert_eq!(db_txs[0].quantity, dec!(50), "Database quantity unchanged");
+    assert_eq!(
+        db_txs[0].price_per_unit,
+        dec!(10),
+        "Database price unchanged"
+    );
+    assert_eq!(db_txs[1].quantity, dec!(25), "Database quantity unchanged");
+    assert_eq!(
+        db_txs[1].price_per_unit,
+        dec!(5.5),
+        "Database price unchanged"
+    );
 
-    apply_corporate_action(&conn, &actions[0], &asset)?;
-    apply_corporate_action(&conn, &actions[1], &asset)?;
+    // Apply query-time adjustments to first transaction (both splits apply)
+    let actions_for_tx0 =
+        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[2].trade_date)?;
+    assert_eq!(
+        actions_for_tx0.len(),
+        2,
+        "First tx should have 2 applicable actions"
+    );
 
-    // Re-fetch and verify
-    let adjusted_txs = sql::query_transactions(&home, "ITSA4");
+    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
+    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
+        db_txs[0].quantity,
+        db_txs[0].price_per_unit,
+        db_txs[0].total_cost,
+        &actions_for_tx0,
+    );
 
     // First purchase: 50 @ R$10.00 -> 100 @ R$5.00 -> 200 @ R$2.50
-    assert_eq!(adjusted_txs[0].quantity, dec!(200));
-    assert_eq!(adjusted_txs[0].price_per_unit, dec!(2.5));
+    assert_eq!(adjusted_qty_0, dec!(200), "Quantity after two 1:2 splits");
+    assert_eq!(adjusted_price_0, dec!(2.5), "Price after two splits");
+    assert_eq!(adjusted_cost_0, dec!(500), "Total cost unchanged");
+
+    // Apply query-time adjustments to second transaction (only second split applies)
+    let actions_for_tx1 =
+        get_applicable_actions(&conn, asset_id, db_txs[1].trade_date, db_txs[2].trade_date)?;
+    assert_eq!(
+        actions_for_tx1.len(),
+        1,
+        "Second tx should have 1 applicable action"
+    );
+
+    let adjusted_qty_1 = adjust_quantity_for_actions(db_txs[1].quantity, &actions_for_tx1);
+    let (adjusted_price_1, adjusted_cost_1) = adjust_price_and_cost_for_actions(
+        db_txs[1].quantity,
+        db_txs[1].price_per_unit,
+        db_txs[1].total_cost,
+        &actions_for_tx1,
+    );
 
     // Second purchase: 25 @ R$5.50 -> 50 @ R$2.75 (only second split applies)
-    assert_eq!(adjusted_txs[1].quantity, dec!(50));
-    assert_eq!(adjusted_txs[1].price_per_unit, dec!(2.75));
+    assert_eq!(adjusted_qty_1, dec!(50), "Quantity after one 1:2 split");
+    assert_eq!(adjusted_price_1, dec!(2.75), "Price after one split");
+    assert_eq!(adjusted_cost_1, dec!(137.5), "Total cost unchanged");
 
-    // Test cost basis
+    // Test cost basis with adjusted values
     let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&adjusted_txs[0]);
-    avg.add_purchase(&adjusted_txs[1]);
+    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0));
+    avg.add_purchase(&db_txs[1], Some(adjusted_qty_1), Some(adjusted_cost_1));
 
-    let sale_result = avg.match_sale(&adjusted_txs[2])?;
+    let sale_result = avg.match_sale(&db_txs[2], None)?;
 
-    let expected_avg = (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
-        / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
-    let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
+    let expected_avg = (adjusted_cost_0 + adjusted_cost_1) / (adjusted_qty_0 + adjusted_qty_1);
+    let expected_cost_basis = expected_avg * db_txs[2].quantity;
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(
@@ -880,145 +1125,80 @@ fn test_08_complex_scenario() -> Result<()> {
     let term_txs = sql::query_transactions(&home, "BBAS3T");
 
     assert_eq!(term_txs.len(), 1, "Should have 1 term contract purchase");
-    // We expect: 2 initial buys + split entry + 1 sell + 1 buy + liquidation + 1 sell = 7
-    // But split entry might not be imported as a transaction, so we get 6
     assert_eq!(base_txs.len(), 6, "Should have 6 base transactions");
 
-    // Create and apply split (1:2) on 2025-02-15
+    // Create split (1:2) on 2025-02-15
     let asset_id = base_txs[0].asset_id;
-    let db_path = get_db_path(&home);
-    let conn = Connection::open(&db_path)?;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 0, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 'TEST')",
         [asset_id],
     )?;
-
-    let asset = Asset {
-        id: Some(asset_id),
-        ticker: "BBAS3".to_string(),
-        asset_type: AssetType::Stock,
-        name: Some("BANCO DO BRASIL".to_string()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-
-    let actions = get_unapplied_actions(&conn, Some(asset_id))?;
-    apply_corporate_action(&conn, &actions[0], &asset)?;
 
     // Process term liquidations
     process_term_liquidations(&conn)?;
 
-    // Re-fetch to see adjustments
-    let adjusted_txs = sql::query_transactions(&home, "BBAS3");
+    // Re-fetch transactions - base transactions unchanged in DB
+    let db_txs = sql::query_transactions(&home, "BBAS3");
+    assert_eq!(db_txs[0].quantity, dec!(200), "Database quantity unchanged");
+    assert_eq!(
+        db_txs[0].price_per_unit,
+        dec!(40),
+        "Database price unchanged"
+    );
+    assert_eq!(db_txs[1].quantity, dec!(100), "Database quantity unchanged");
+    assert_eq!(
+        db_txs[1].price_per_unit,
+        dec!(42),
+        "Database price unchanged"
+    );
 
-    // Verify split adjustments on first two purchases
-    assert_eq!(adjusted_txs[0].quantity, dec!(400)); // 200 -> 400
-    assert_eq!(adjusted_txs[0].price_per_unit, dec!(20)); // 40 -> 20
+    // Apply query-time adjustments to first two transactions
+    let actions_for_tx0 =
+        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[5].trade_date)?;
+    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
+    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
+        db_txs[0].quantity,
+        db_txs[0].price_per_unit,
+        db_txs[0].total_cost,
+        &actions_for_tx0,
+    );
+    assert_eq!(adjusted_qty_0, dec!(400), "200 -> 400 after 1:2 split");
+    assert_eq!(adjusted_price_0, dec!(20), "40 -> 20 after split");
 
-    assert_eq!(adjusted_txs[1].quantity, dec!(200)); // 100 -> 200
-    assert_eq!(adjusted_txs[1].price_per_unit, dec!(21)); // 42 -> 21
+    let actions_for_tx1 =
+        get_applicable_actions(&conn, asset_id, db_txs[1].trade_date, db_txs[5].trade_date)?;
+    let adjusted_qty_1 = adjust_quantity_for_actions(db_txs[1].quantity, &actions_for_tx1);
+    let (adjusted_price_1, adjusted_cost_1) = adjust_price_and_cost_for_actions(
+        db_txs[1].quantity,
+        db_txs[1].price_per_unit,
+        db_txs[1].total_cost,
+        &actions_for_tx1,
+    );
+    assert_eq!(adjusted_qty_1, dec!(200), "100 -> 200 after 1:2 split");
+    assert_eq!(adjusted_price_1, dec!(21), "42 -> 21 after split");
 
-    // Calculate final position and verify cost basis for final sale
+    // Calculate final position with adjusted values
     let mut avg = AverageCostMatcher::new();
-
-    // Add purchases and process sales in order
-    avg.add_purchase(&adjusted_txs[0]); // 400 @ 20
-    avg.add_purchase(&adjusted_txs[1]); // 200 @ 21
+    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0)); // 400 @ 20
+    avg.add_purchase(&db_txs[1], Some(adjusted_qty_1), Some(adjusted_cost_1)); // 200 @ 21
 
     let avg_before_sale1 = avg.average_cost();
-    let _sale1 = avg.match_sale(&adjusted_txs[2])?; // Sells 300 @ 22
+    let _sale1 = avg.match_sale(&db_txs[2], None)?; // Sells 300 @ 22
     let tolerance = dec!(0.0000000001);
     assert!((avg.average_cost() - avg_before_sale1).abs() <= tolerance);
 
-    // Third purchase (after first sale)
-    avg.add_purchase(&adjusted_txs[3]); // 150 @ 23
+    avg.add_purchase(&db_txs[3], None, None); // 150 @ 23 (after split)
+    avg.add_purchase(&db_txs[4], None, None); // 200 @ 24 (term liquidation)
 
-    // Term liquidation adds shares
-    avg.add_purchase(&adjusted_txs[4]); // 200 @ 24
-
-    // Final sale: 400 shares
     let avg_before_sale2 = avg.average_cost();
-    let sale2 = avg.match_sale(&adjusted_txs[5])?;
+    let sale2 = avg.match_sale(&db_txs[5], None)?; // 400 shares @ 26
 
-    assert_eq!(
-        sale2.cost_basis,
-        avg_before_sale2 * adjusted_txs[5].quantity
-    );
+    assert_eq!(sale2.cost_basis, avg_before_sale2 * db_txs[5].quantity);
     assert_eq!(sale2.sale_total, dec!(10400));
     assert_eq!(sale2.profit_loss, sale2.sale_total - sale2.cost_basis);
     assert!((avg.average_cost() - avg_before_sale2).abs() <= tolerance);
-
-    // Remaining quantity
     assert_eq!(avg.remaining_quantity(), dec!(250));
-
-    Ok(())
-}
-
-#[test]
-fn test_no_duplicate_adjustments() -> Result<()> {
-    let home = TempDir::new()?;
-
-    // Initialize DB and import only trade entries (no auto actions)
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-    import_movimentacao(&conn, "tests/data/04_stock_split.xlsx")?;
-
-    let transactions = sql::query_transactions(&home, "VALE3");
-    let asset_id = transactions[0].asset_id;
-
-    // Create split
-    let db_path = get_db_path(&home);
-    let conn = Connection::open(&db_path)?;
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 0, 'TEST')",
-        [asset_id],
-    )?;
-
-    let asset = Asset {
-        id: Some(asset_id),
-        ticker: "VALE3".to_string(),
-        asset_type: AssetType::Stock,
-        name: Some("VALE SA".to_string()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-
-    // Apply split first time
-    let actions = get_unapplied_actions(&conn, Some(asset_id))?;
-    let count1 = apply_corporate_action(&conn, &actions[0], &asset)?;
-    assert_eq!(count1, 1, "Should adjust 1 transaction");
-
-    // Verify adjustment was recorded
-    let adjustment_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM corporate_action_adjustments WHERE action_id = ?1",
-        [actions[0].id.unwrap()],
-        |row| row.get(0),
-    )?;
-    assert_eq!(adjustment_count, 1, "Should have 1 adjustment record");
-
-    // Try to apply again - should not duplicate
-    let count2 = apply_corporate_action(&conn, &actions[0], &asset)?;
-    assert_eq!(count2, 0, "Should not adjust anything (already applied)");
-
-    // Verify still only 1 adjustment
-    let adjustment_count2: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM corporate_action_adjustments WHERE action_id = ?1",
-        [actions[0].id.unwrap()],
-        |row| row.get(0),
-    )?;
-    assert_eq!(
-        adjustment_count2, 1,
-        "Should still have exactly 1 adjustment record"
-    );
-
-    // Verify quantities didn't change (no double adjustment)
-    let adjusted_txs = sql::query_transactions(&home, "VALE3");
-    assert_eq!(adjusted_txs[0].quantity, dec!(200)); // Not 400!
-    assert_eq!(adjusted_txs[0].price_per_unit, dec!(40)); // Not 20!
 
     Ok(())
 }
@@ -1058,51 +1238,61 @@ fn test_07_capital_return() -> Result<()> {
     let db_path = get_db_path(&home);
     let conn = Connection::open(&db_path)?;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source)
-         VALUES (?1, 'CAPITAL_RETURN', '2025-02-15', '2025-02-15', 100, 0, 0, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'CAPITAL_RETURN', '2025-02-15', '2025-02-15', 100, 0, 'TEST')",
         [asset_id],
     )?;
 
-    let asset = Asset {
-        id: Some(asset_id),
-        ticker: "MXRF11".to_string(),
-        asset_type: AssetType::Fii,
-        name: Some("MAXI RENDA FII".to_string()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
+    // Re-fetch - transactions should be UNCHANGED in database
+    let db_txs = sql::query_transactions(&home, "MXRF11");
+    assert_eq!(db_txs[0].quantity, dec!(100), "Database quantity unchanged");
+    assert_eq!(db_txs[0].total_cost, dec!(1000), "Database cost unchanged");
+    assert_eq!(
+        db_txs[0].price_per_unit,
+        dec!(10),
+        "Database price unchanged"
+    );
 
-    // Apply capital return
-    let actions = get_unapplied_actions(&conn, Some(asset_id))?;
-    assert_eq!(actions.len(), 1, "Should have 1 capital return action");
-    let adjusted_count = apply_corporate_action(&conn, &actions[0], &asset)?;
-    assert_eq!(adjusted_count, 1, "Should adjust first purchase only");
+    // Apply query-time adjustment for capital return
+    let actions_for_tx0 =
+        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[2].trade_date)?;
+    assert_eq!(
+        actions_for_tx0.len(),
+        1,
+        "Should have 1 capital return action"
+    );
 
-    // Re-fetch transactions
-    let adjusted_txs = sql::query_transactions(&home, "MXRF11");
+    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
+    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
+        db_txs[0].quantity,
+        db_txs[0].price_per_unit,
+        db_txs[0].total_cost,
+        &actions_for_tx0,
+    );
 
-    // First purchase should have reduced cost basis
-    // 100 shares @ R$10.00 = R$1,000.00
-    // Capital return R$1.00/share = R$100.00
-    // New cost basis: R$900.00 (R$9.00/share)
-    assert_eq!(adjusted_txs[0].quantity, dec!(100)); // Quantity unchanged
-    assert_eq!(adjusted_txs[0].total_cost, dec!(900)); // Cost reduced
-    assert_eq!(adjusted_txs[0].price_per_unit, dec!(9)); // Price recalculated
+    // Capital return: R$1.00/share reduces cost from R$1000 to R$900
+    assert_eq!(
+        adjusted_qty_0,
+        dec!(100),
+        "Quantity unchanged by capital return"
+    );
+    assert_eq!(adjusted_cost_0, dec!(900), "Cost reduced by capital return");
+    assert_eq!(adjusted_price_0, dec!(9), "Price per unit recalculated");
 
-    // Second purchase (after capital return) should be unchanged
-    assert_eq!(adjusted_txs[1].quantity, dec!(50));
-    assert_eq!(adjusted_txs[1].price_per_unit, dec!(10.5));
+    // Second purchase (after capital return) needs no adjustment
+    assert_eq!(db_txs[1].quantity, dec!(50));
+    assert_eq!(db_txs[1].price_per_unit, dec!(10.5));
 
-    // Test cost basis with average cost
+    // Test cost basis with adjusted values
     let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&adjusted_txs[0]); // 100 @ 9.00
-    avg.add_purchase(&adjusted_txs[1]); // 50 @ 10.50
+    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0)); // 100 @ 9.00
+    avg.add_purchase(&db_txs[1], None, None); // 50 @ 10.50
 
-    let sale_result = avg.match_sale(&adjusted_txs[2])?; // Sell 120
+    let sale_result = avg.match_sale(&db_txs[2], None)?; // Sell 120
 
-    let expected_avg = (adjusted_txs[0].total_cost + adjusted_txs[1].total_cost)
-        / (adjusted_txs[0].quantity + adjusted_txs[1].quantity);
-    let expected_cost_basis = expected_avg * adjusted_txs[2].quantity;
+    let expected_avg =
+        (adjusted_cost_0 + db_txs[1].total_cost) / (adjusted_qty_0 + db_txs[1].quantity);
+    let expected_cost_basis = expected_avg * db_txs[2].quantity;
 
     assert_eq!(sale_result.cost_basis, expected_cost_basis);
     assert_eq!(sale_result.sale_total, dec!(1320));
@@ -1110,7 +1300,6 @@ fn test_07_capital_return() -> Result<()> {
         sale_result.profit_loss,
         sale_result.sale_total - expected_cost_basis
     );
-
     assert_eq!(avg.remaining_quantity(), dec!(30));
 
     Ok(())
@@ -1313,6 +1502,193 @@ fn test_irpf_import_sets_cutoff_dates() -> Result<()> {
     assert_eq!(
         mov_actions_date, "2024-12-31",
         "Movimentação corporate actions cutoff should be set to year-end"
+    );
+
+    Ok(())
+}
+#[test]
+fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Initialize DB and import test data
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
+    import_movimentacao(&conn, "tests/data/15_mixed_splits_and_bonus.xlsx")?;
+
+    let transactions = sql::query_transactions(&home, "KPCA3");
+    assert_eq!(
+        transactions.len(),
+        4,
+        "Should have 4 transactions (2 buys, 2 sells)"
+    );
+
+    let asset_id = transactions[0].asset_id;
+
+    // Create corporate actions: split, reverse split
+    // Bonus creates synthetic transactions, doesn't adjust query-time for existing txs
+
+    // Action 1: Split 1:2 on 2025-02-10
+    conn.execute(
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 'TEST')",
+        [asset_id],
+    )?;
+
+    // Action 2: Reverse split 5:1 on 2025-03-15
+    conn.execute(
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'SPLIT', '2025-03-15', '2025-03-15', 5, 1, 'TEST')",
+        [asset_id],
+    )?;
+
+    // Action 3: Bonus 1:2 on 2025-04-20
+    // NOTE: Bonus actions don't adjust quantities of existing txs at query-time
+    conn.execute(
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
+         VALUES (?1, 'BONUS', '2025-04-20', '2025-04-20', 1, 2, 'TEST')",
+        [asset_id],
+    )?;
+
+    // Verify actions exist
+    let mut stmt =
+        conn.prepare("SELECT id FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?;
+    let action_count = stmt
+        .query_map([asset_id], |row| row.get::<_, i64>(0))?
+        .count();
+    assert_eq!(action_count, 3, "Should have 3 corporate actions");
+
+    // Re-fetch transactions - should be UNCHANGED in database
+    let db_txs = sql::query_transactions(&home, "KPCA3");
+
+    // First buy: 1000 @ R$2.00
+    assert_eq!(db_txs[0].quantity, dec!(1000), "First buy unchanged in DB");
+    assert_eq!(
+        db_txs[0].price_per_unit,
+        dec!(2.00),
+        "First buy price unchanged"
+    );
+    assert_eq!(db_txs[0].total_cost, dec!(2000), "First buy cost unchanged");
+
+    // Second buy: 800 @ R$0.90
+    assert_eq!(db_txs[1].quantity, dec!(800), "Second buy unchanged in DB");
+    assert_eq!(
+        db_txs[1].price_per_unit,
+        dec!(0.90),
+        "Second buy price unchanged"
+    );
+    assert_eq!(db_txs[1].total_cost, dec!(720), "Second buy cost unchanged");
+
+    // First sell: 200 @ R$5.50
+    assert_eq!(db_txs[2].quantity, dec!(200), "First sell unchanged");
+
+    // Second sell: 400 @ R$3.00
+    assert_eq!(db_txs[3].quantity, dec!(400), "Second sell unchanged");
+
+    // Test query-time adjustments for each transaction
+    // Note: get_applicable_actions returns ALL actions in the date range
+    // But adjust_quantity_for_actions ignores bonus actions
+
+    // FIRST TRANSACTION: 1000 @ R$2.00
+    let actions_for_tx0 =
+        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[3].trade_date)?;
+    assert_eq!(
+        actions_for_tx0.len(),
+        3,
+        "First tx: all 3 actions are 'applicable' (between dates)"
+    );
+    assert_eq!(actions_for_tx0[0].action_type, CorporateActionType::Split);
+    assert_eq!(actions_for_tx0[1].action_type, CorporateActionType::Split); // Reverse split
+    assert_eq!(actions_for_tx0[2].action_type, CorporateActionType::Bonus);
+
+    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
+    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
+        db_txs[0].quantity,
+        db_txs[0].price_per_unit,
+        db_txs[0].total_cost,
+        &actions_for_tx0,
+    );
+
+    // First buy adjustments (bonus is IGNORED in adjust_quantity_for_actions):
+    // 1000 @ R$2.00 = R$2000
+    // After 1:2 split: 2000 @ R$1.00 = R$2000
+    // After 5:1 reverse: 400 @ R$5.00 = R$2000
+    // Bonus is NOT applied to adjust functions
+    assert_eq!(
+        adjusted_qty_0,
+        dec!(400),
+        "First tx: 1000 -> 2000 -> 400 (bonus ignored)"
+    );
+    assert_eq!(
+        adjusted_price_0,
+        dec!(5.0),
+        "First tx: R$2.00 -> R$1.00 -> R$5.00 (bonus ignored)"
+    );
+    assert_eq!(adjusted_cost_0, dec!(2000), "Cost unchanged through splits");
+
+    // SECOND TRANSACTION: 800 @ R$0.90
+    let actions_for_tx1 =
+        get_applicable_actions(&conn, asset_id, db_txs[1].trade_date, db_txs[3].trade_date)?;
+    assert_eq!(
+        actions_for_tx1.len(),
+        2,
+        "Second tx: 2 actions (reverse split + bonus)"
+    );
+    assert_eq!(actions_for_tx1[0].action_type, CorporateActionType::Split); // Reverse split
+    assert_eq!(actions_for_tx1[1].action_type, CorporateActionType::Bonus);
+
+    let adjusted_qty_1 = adjust_quantity_for_actions(db_txs[1].quantity, &actions_for_tx1);
+    let (adjusted_price_1, adjusted_cost_1) = adjust_price_and_cost_for_actions(
+        db_txs[1].quantity,
+        db_txs[1].price_per_unit,
+        db_txs[1].total_cost,
+        &actions_for_tx1,
+    );
+
+    // Second buy adjustments:
+    // 800 @ R$0.90 = R$720
+    // After 5:1 reverse: 160 @ R$4.50 = R$720
+    // Bonus is NOT applied
+    assert_eq!(
+        adjusted_qty_1,
+        dec!(160),
+        "Second tx: 800 -> 160 (bonus ignored)"
+    );
+    assert_eq!(adjusted_price_1, dec!(4.5), "Second tx: R$0.90 -> R$4.50");
+    assert_eq!(adjusted_cost_1, dec!(720), "Cost unchanged");
+
+    // Cost basis calculation with adjusted purchases
+    let mut avg = AverageCostMatcher::new();
+    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0)); // 400 @ 5.00
+    avg.add_purchase(&db_txs[1], Some(adjusted_qty_1), Some(adjusted_cost_1)); // 160 @ 4.50
+
+    let sale1_result = avg.match_sale(&db_txs[2], None)?; // Sell 200 @ 5.50
+
+    let expected_avg_before_sale1 =
+        (adjusted_cost_0 + adjusted_cost_1) / (adjusted_qty_0 + adjusted_qty_1);
+    let expected_cost_basis_1 = expected_avg_before_sale1 * dec!(200);
+
+    assert_eq!(sale1_result.cost_basis, expected_cost_basis_1);
+    assert_eq!(sale1_result.sale_total, dec!(1100)); // 200 @ 5.50
+    assert_eq!(
+        sale1_result.profit_loss,
+        sale1_result.sale_total - expected_cost_basis_1
+    );
+
+    // Remaining after first sale: 400 + 160 - 200 = 360
+    assert_eq!(avg.remaining_quantity(), dec!(360));
+
+    // Note: The second sell tries to sell 400 shares but only 360 are available
+    // This demonstrates that the bonus transaction was NOT created/processed
+    // (if it had been, we'd have 360 + 360 = 720 shares)
+    // The AverageCostMatcher will error out on this, which is expected behavior
+    let sale2_result = avg.match_sale(&db_txs[3], None);
+
+    // This should fail because we're trying to sell more than we have
+    assert!(
+        sale2_result.is_err(),
+        "Should error when trying to sell 400 of 360 available"
     );
 
     Ok(())

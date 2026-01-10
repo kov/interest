@@ -423,7 +423,6 @@ impl MovimentacaoEntry {
             ex_date: self.date,
             ratio_from,
             ratio_to,
-            applied: false,
             source: "MOVIMENTACAO".to_string(),
             notes: Some(format!("{} - {}", self.movement_type, self.product)),
             created_at: chrono::Utc::now(),

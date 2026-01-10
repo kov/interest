@@ -181,12 +181,32 @@ fn calculate_portfolio_with_cutoff(
         let mut position = AvgCostPosition::new(asset_id);
 
         for tx in transactions {
+            // Apply corporate action adjustments at query time
+            let as_of = as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+            let actions = crate::corporate_actions::get_applicable_actions(
+                conn,
+                asset_id,
+                tx.trade_date,
+                as_of,
+            )?;
+
+            let adjusted_quantity =
+                crate::corporate_actions::adjust_quantity_for_actions(tx.quantity, &actions);
+
+            let (_adjusted_price, adjusted_cost) =
+                crate::corporate_actions::adjust_price_and_cost_for_actions(
+                    tx.quantity,
+                    tx.price_per_unit,
+                    tx.total_cost,
+                    &actions,
+                );
+
             match tx.transaction_type {
                 TransactionType::Buy => {
-                    position.add_buy(tx.quantity, tx.total_cost);
+                    position.add_buy(adjusted_quantity, adjusted_cost);
                 }
                 TransactionType::Sell => {
-                    position.remove_sell(tx.quantity, &asset.ticker)?;
+                    position.remove_sell(adjusted_quantity, &asset.ticker)?;
                 }
             }
         }
@@ -432,7 +452,7 @@ fn apply_actions_to_carryover(
     let mut stmt = conn.prepare(
         "SELECT action_type, ratio_from, ratio_to, ex_date
          FROM corporate_actions
-         WHERE asset_id = ?1 AND applied = 1 AND ex_date >= ?2
+         WHERE asset_id = ?1 AND ex_date >= ?2
          ORDER BY ex_date ASC",
     )?;
 
@@ -518,7 +538,11 @@ pub fn calculate_allocation(report: &PortfolioReport) -> HashMap<AssetType, (Dec
 }
 
 /// Compute a fingerprint for all transactions up to and including a date.
+/// Includes corporate actions to detect when adjustments change.
 pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) -> Result<String> {
+    let mut hasher = Hasher::new();
+
+    // Hash transactions
     let mut stmt = conn.prepare(
         "SELECT id, asset_id, transaction_type, trade_date, quantity, price_per_unit, total_cost
          FROM transactions
@@ -527,7 +551,6 @@ pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) ->
     )?;
 
     let mut rows = stmt.query([as_of_date])?;
-    let mut hasher = Hasher::new();
 
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
@@ -541,6 +564,31 @@ pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) ->
         let line = format!(
             "{}|{}|{}|{}|{}|{}|{}\n",
             id, asset_id, tx_type, trade_date, quantity, price_per_unit, total_cost
+        );
+        hasher.update(line.as_bytes());
+    }
+
+    // Hash corporate actions that apply up to this date
+    let mut ca_stmt = conn.prepare(
+        "SELECT id, asset_id, action_type, ex_date, ratio_from, ratio_to
+         FROM corporate_actions
+         WHERE ex_date <= ?1
+         ORDER BY ex_date ASC, id ASC",
+    )?;
+
+    let mut ca_rows = ca_stmt.query([as_of_date])?;
+
+    while let Some(row) = ca_rows.next()? {
+        let id: i64 = row.get(0)?;
+        let asset_id: i64 = row.get(1)?;
+        let action_type: String = row.get(2)?;
+        let ex_date: NaiveDate = row.get(3)?;
+        let ratio_from: i32 = row.get(4)?;
+        let ratio_to: i32 = row.get(5)?;
+
+        let line = format!(
+            "CA|{}|{}|{}|{}|{}|{}\n",
+            id, asset_id, action_type, ex_date, ratio_from, ratio_to
         );
         hasher.update(line.as_bytes());
     }

@@ -365,7 +365,7 @@ pub fn get_price_on_or_before(
 }
 
 /// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
+pub fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
     use rusqlite::types::ValueRef;
 
     match row.get_ref(idx)? {
@@ -414,8 +414,8 @@ fn get_optional_decimal_value(
 pub fn insert_corporate_action(conn: &Connection, action: &CorporateAction) -> Result<i64> {
     conn.execute(
         "INSERT INTO corporate_actions (
-            asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source, notes
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             action.asset_id,
             action.action_type.as_str(),
@@ -423,7 +423,6 @@ pub fn insert_corporate_action(conn: &Connection, action: &CorporateAction) -> R
             action.ex_date,
             action.ratio_from,
             action.ratio_to,
-            action.applied,
             action.source,
             action.notes,
         ],
@@ -458,7 +457,7 @@ pub fn list_corporate_actions(
 ) -> Result<Vec<(CorporateAction, Asset)>> {
     let query = if ticker.is_some() {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
-                ca.ratio_from, ca.ratio_to, ca.applied, ca.source, ca.notes, ca.created_at,
+                ca.ratio_from, ca.ratio_to, ca.source, ca.notes, ca.created_at,
                 a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
@@ -466,7 +465,7 @@ pub fn list_corporate_actions(
          ORDER BY ca.ex_date DESC"
     } else {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
-                ca.ratio_from, ca.ratio_to, ca.applied, ca.source, ca.notes, ca.created_at,
+                ca.ratio_from, ca.ratio_to, ca.source, ca.notes, ca.created_at,
                 a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
@@ -489,21 +488,20 @@ pub fn list_corporate_actions(
                     ex_date: row.get(4)?,
                     ratio_from: row.get(5)?,
                     ratio_to: row.get(6)?,
-                    applied: row.get(7)?,
-                    source: row.get(8)?,
-                    notes: row.get(9)?,
-                    created_at: row.get(10)?,
+                    source: row.get(7)?,
+                    notes: row.get(8)?,
+                    created_at: row.get(9)?,
                 },
                 Asset {
-                    id: Some(row.get(11)?),
-                    ticker: row.get(12)?,
+                    id: Some(row.get(10)?),
+                    ticker: row.get(11)?,
                     asset_type: row
-                        .get::<_, String>(13)?
+                        .get::<_, String>(12)?
                         .parse::<AssetType>()
                         .unwrap_or(AssetType::Stock),
-                    name: row.get(14)?,
-                    created_at: row.get(15)?,
-                    updated_at: row.get(16)?,
+                    name: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
                 },
             ))
         })?
@@ -522,21 +520,20 @@ pub fn list_corporate_actions(
                     ex_date: row.get(4)?,
                     ratio_from: row.get(5)?,
                     ratio_to: row.get(6)?,
-                    applied: row.get(7)?,
-                    source: row.get(8)?,
-                    notes: row.get(9)?,
-                    created_at: row.get(10)?,
+                    source: row.get(7)?,
+                    notes: row.get(8)?,
+                    created_at: row.get(9)?,
                 },
                 Asset {
-                    id: Some(row.get(11)?),
-                    ticker: row.get(12)?,
+                    id: Some(row.get(10)?),
+                    ticker: row.get(11)?,
                     asset_type: row
-                        .get::<_, String>(13)?
+                        .get::<_, String>(12)?
                         .parse::<AssetType>()
                         .unwrap_or(AssetType::Stock),
-                    name: row.get(14)?,
-                    created_at: row.get(15)?,
-                    updated_at: row.get(16)?,
+                    name: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
                 },
             ))
         })?

@@ -226,12 +226,39 @@ pub fn calculate_monthly_tax(
         let mut day_trade_matcher = AverageCostMatcher::new();
 
         for tx in transactions {
+            // Apply corporate action adjustments at query time
+            let actions = crate::corporate_actions::get_applicable_actions(
+                conn,
+                asset_id,
+                tx.trade_date,
+                month_end,
+            )?;
+
+            let adjusted_quantity =
+                crate::corporate_actions::adjust_quantity_for_actions(tx.quantity, &actions);
+
+            let (_adjusted_price, adjusted_cost) =
+                crate::corporate_actions::adjust_price_and_cost_for_actions(
+                    tx.quantity,
+                    tx.price_per_unit,
+                    tx.total_cost,
+                    &actions,
+                );
+
             match tx.transaction_type {
                 TransactionType::Buy => {
                     if tx.is_day_trade {
-                        day_trade_matcher.add_purchase(&tx);
+                        day_trade_matcher.add_purchase(
+                            &tx,
+                            Some(adjusted_quantity),
+                            Some(adjusted_cost),
+                        );
                     } else {
-                        swing_matcher.add_purchase(&tx);
+                        swing_matcher.add_purchase(
+                            &tx,
+                            Some(adjusted_quantity),
+                            Some(adjusted_cost),
+                        );
                     }
                 }
                 TransactionType::Sell => {
@@ -244,9 +271,9 @@ pub fn calculate_monthly_tax(
                         );
 
                         let mut sale = if tx.is_day_trade {
-                            day_trade_matcher.match_sale(&tx)?
+                            day_trade_matcher.match_sale(&tx, Some(adjusted_quantity))?
                         } else {
-                            swing_matcher.match_sale(&tx)?
+                            swing_matcher.match_sale(&tx, Some(adjusted_quantity))?
                         };
                         sale.asset_type = asset.asset_type;
                         sales_by_category.entry(category).or_default().push(sale);
@@ -256,9 +283,9 @@ pub fn calculate_monthly_tax(
                     } else {
                         // Sale before target month, still need to process to maintain average cost
                         if tx.is_day_trade {
-                            let _ = day_trade_matcher.match_sale(&tx)?;
+                            let _ = day_trade_matcher.match_sale(&tx, Some(adjusted_quantity))?;
                         } else {
-                            let _ = swing_matcher.match_sale(&tx)?;
+                            let _ = swing_matcher.match_sale(&tx, Some(adjusted_quantity))?;
                         }
                     }
                 }
@@ -431,10 +458,31 @@ fn build_rename_carryover_transaction(
             continue;
         }
 
+        // Apply corporate action adjustments for rename carryover
+        let actions = crate::corporate_actions::get_applicable_actions(
+            conn,
+            source_id,
+            tx.trade_date,
+            effective_date,
+        )?;
+
+        let adjusted_quantity =
+            crate::corporate_actions::adjust_quantity_for_actions(tx.quantity, &actions);
+
+        let (_adjusted_price, adjusted_cost) =
+            crate::corporate_actions::adjust_price_and_cost_for_actions(
+                tx.quantity,
+                tx.price_per_unit,
+                tx.total_cost,
+                &actions,
+            );
+
         match tx.transaction_type {
-            TransactionType::Buy => matcher.add_purchase(&tx),
+            TransactionType::Buy => {
+                matcher.add_purchase(&tx, Some(adjusted_quantity), Some(adjusted_cost))
+            }
             TransactionType::Sell => {
-                let _ = matcher.match_sale(&tx)?;
+                let _ = matcher.match_sale(&tx, Some(adjusted_quantity))?;
             }
         }
     }
@@ -490,7 +538,7 @@ fn apply_actions_to_carryover(
     let mut stmt = conn.prepare(
         "SELECT action_type, ratio_from, ratio_to, ex_date
          FROM corporate_actions
-         WHERE asset_id = ?1 AND applied = 1 AND ex_date >= ?2
+         WHERE asset_id = ?1 AND ex_date >= ?2
          ORDER BY ex_date ASC",
     )?;
 

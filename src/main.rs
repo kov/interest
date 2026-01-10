@@ -1280,7 +1280,6 @@ async fn handle_actions_update() -> Result<()> {
                             ex_date: brapi_action.ex_date,
                             ratio_from,
                             ratio_to,
-                            applied: false,
                             source: "BRAPI".to_string(),
                             notes: brapi_action.remarks,
                             created_at: chrono::Utc::now(),
@@ -1387,7 +1386,6 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
             action_type: String,
             ratio: String,
             ex_date: String,
-            applied: bool,
             source: String,
             notes: Option<String>,
         }
@@ -1405,7 +1403,6 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
                 action_type: action.action_type.as_str().to_string(),
                 ratio: format!("{}:{}", action.ratio_from, action.ratio_to),
                 ex_date: action.ex_date.format("%Y-%m-%d").to_string(),
-                applied: action.applied,
                 source: action.source.clone(),
                 notes: action.notes.clone(),
             })
@@ -1430,8 +1427,6 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
         ratio: String,
         #[tabled(rename = "Ex-Date")]
         ex_date: String,
-        #[tabled(rename = "Applied")]
-        applied: String,
         #[tabled(rename = "Source")]
         source: String,
     }
@@ -1444,11 +1439,6 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
             action_type: action.action_type.as_str().to_string(),
             ratio: format!("{}:{}", action.ratio_from, action.ratio_to),
             ex_date: action.ex_date.format("%d/%m/%Y").to_string(),
-            applied: if action.applied {
-                "✓".green().to_string()
-            } else {
-                "○".yellow().to_string()
-            },
             source: action.source.clone(),
         })
         .collect();
@@ -1543,7 +1533,6 @@ async fn handle_action_add(
         ex_date,
         ratio_from,
         ratio_to,
-        applied: false,
         source: "MANUAL".to_string(),
         notes: notes.map(|s| s.to_string()),
         created_at: chrono::Utc::now(),
@@ -1580,10 +1569,6 @@ async fn handle_action_add(
         }
     );
     println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
-    println!(
-        "  Applied:        {}",
-        "No (use 'interest actions apply' to apply)".yellow()
-    );
     if let Some(n) = notes {
         println!("  Notes:          {}", n);
     }
@@ -1925,7 +1910,7 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
 
     // Get the action details before deleting
     let action = conn.query_row(
-        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source, notes, created_at
+        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes, created_at
          FROM corporate_actions WHERE id = ?1",
         rusqlite::params![action_id],
         |row| {
@@ -1940,10 +1925,9 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
                 ex_date: row.get(4)?,
                 ratio_from: row.get(5)?,
                 ratio_to: row.get(6)?,
-                applied: row.get(7)?,
-                source: row.get(8)?,
-                notes: row.get(9)?,
-                created_at: row.get(10)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
             })
         },
     ).context(format!("Corporate action with ID {} not found", action_id))?;
@@ -1953,17 +1937,6 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
         .into_iter()
         .find(|a| a.id == Some(action.asset_id))
         .ok_or_else(|| anyhow::anyhow!("Asset not found for action"))?;
-
-    // Check if already applied
-    if action.applied {
-        println!(
-            "\n{} Cannot delete applied corporate action!",
-            "⚠".yellow().bold()
-        );
-        println!("  This action has already been applied to transactions.");
-        println!("  You would need to manually revert the adjustments first.");
-        return Err(anyhow::anyhow!("Cannot delete applied action"));
-    }
 
     // Display action details
     println!("\n{} Deleting corporate action:\n", "🗑".red().bold());
@@ -2020,7 +1993,7 @@ async fn handle_action_edit(
 
     // Get the action details
     let mut action = conn.query_row(
-        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, applied, source, notes, created_at
+        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes, created_at
          FROM corporate_actions WHERE id = ?1",
         rusqlite::params![action_id],
         |row| {
@@ -2035,24 +2008,14 @@ async fn handle_action_edit(
                 ex_date: row.get(4)?,
                 ratio_from: row.get(5)?,
                 ratio_to: row.get(6)?,
-                applied: row.get(7)?,
-                source: row.get(8)?,
-                notes: row.get(9)?,
-                created_at: row.get(10)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
             })
         },
     ).context(format!("Corporate action with ID {} not found", action_id))?;
 
-    // Check if already applied
-    if action.applied {
-        println!(
-            "\n{} Cannot edit applied corporate action!",
-            "⚠".yellow().bold()
-        );
-        println!("  This action has already been applied to transactions.");
-        println!("  Delete and re-add it if you need to make changes.");
-        return Err(anyhow::anyhow!("Cannot edit applied action"));
-    }
+    // Check if action exists (removed applied check)
 
     // Get asset details
     let asset = db::get_all_assets(&conn)?
@@ -3017,9 +2980,6 @@ async fn handle_transaction_add(
     // Insert transaction
     let tx_id = db::insert_transaction(&conn, &transaction)?;
 
-    // Auto-apply any relevant corporate actions to this historical transaction
-    let actions_applied = crate::corporate_actions::apply_actions_to_transaction(&conn, tx_id)?;
-
     // Display confirmation
     println!("\n{} Transaction added successfully!", "✓".green().bold());
     println!("  Transaction ID: {}", tx_id);
@@ -3037,15 +2997,6 @@ async fn handle_transaction_add(
         println!("  Notes:          {}", n);
     }
 
-    if actions_applied > 0 {
-        println!(
-            "\n{} Auto-applied {} corporate action(s) to this transaction",
-            "ℹ".blue().bold(),
-            actions_applied
-        );
-        println!("  The quantity and price have been adjusted automatically.");
-        println!("  Run 'interest portfolio show' to see the adjusted values.");
-    }
     println!();
 
     Ok(())

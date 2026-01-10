@@ -39,15 +39,16 @@ CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(trade_date);
 CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(transaction_type);
 
 -- Corporate actions (splits, reverse splits, bonuses)
+-- Query-time adjustment: actions are NOT applied to transactions
+-- Adjustments are computed dynamically when calculating positions
 CREATE TABLE IF NOT EXISTS corporate_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     asset_id INTEGER NOT NULL,
-    action_type TEXT NOT NULL,      -- 'SPLIT', 'REVERSE_SPLIT', 'BONUS'
+    action_type TEXT NOT NULL,      -- 'SPLIT', 'REVERSE_SPLIT', 'BONUS', 'CAPITAL_RETURN'
     event_date DATE NOT NULL,        -- Announcement date
     ex_date DATE NOT NULL,           -- Date adjustment takes effect
     ratio_from INTEGER NOT NULL,     -- e.g., 1 for 1:2 split
     ratio_to INTEGER NOT NULL,       -- e.g., 2 for 1:2 split
-    applied BOOLEAN DEFAULT 0,       -- Whether adjustment has been applied
     source TEXT,                     -- 'BRAPI', 'MANUAL', 'B3'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -56,23 +57,6 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
 
 CREATE INDEX IF NOT EXISTS idx_corporate_actions_asset ON corporate_actions(asset_id);
 CREATE INDEX IF NOT EXISTS idx_corporate_actions_date ON corporate_actions(ex_date);
-
--- Corporate action adjustments (tracks which transactions have been adjusted by which actions)
-CREATE TABLE IF NOT EXISTS corporate_action_adjustments (
-    action_id INTEGER NOT NULL,
-    transaction_id INTEGER NOT NULL,
-    adjusted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    old_quantity DECIMAL(15,4) NOT NULL,      -- Quantity before adjustment
-    new_quantity DECIMAL(15,4) NOT NULL,      -- Quantity after adjustment
-    old_price DECIMAL(15,4) NOT NULL,         -- Price before adjustment
-    new_price DECIMAL(15,4) NOT NULL,         -- Price after adjustment
-    PRIMARY KEY (action_id, transaction_id),
-    FOREIGN KEY (action_id) REFERENCES corporate_actions(id),
-    FOREIGN KEY (transaction_id) REFERENCES transactions(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_action_adjustments_action ON corporate_action_adjustments(action_id);
-CREATE INDEX IF NOT EXISTS idx_action_adjustments_transaction ON corporate_action_adjustments(transaction_id);
 
 -- Price history (daily OHLCV data)
 CREATE TABLE IF NOT EXISTS price_history (

@@ -45,23 +45,38 @@ impl AverageCostMatcher {
         }
     }
 
-    /// Add a purchase transaction
-    pub fn add_purchase(&mut self, tx: &Transaction) {
+    /// Add a purchase transaction with optional adjusted values
+    /// If adjusted_quantity and adjusted_cost are None, uses tx values
+    pub fn add_purchase(
+        &mut self,
+        tx: &Transaction,
+        adjusted_quantity: Option<Decimal>,
+        adjusted_cost: Option<Decimal>,
+    ) {
         if tx.transaction_type != TransactionType::Buy {
             return;
         }
 
-        self.total_quantity += tx.quantity;
-        self.total_cost += tx.total_cost;
+        let quantity = adjusted_quantity.unwrap_or(tx.quantity);
+        let cost = adjusted_cost.unwrap_or(tx.total_cost);
+
+        self.total_quantity += quantity;
+        self.total_cost += cost;
     }
 
-    /// Match a sale using average cost up to that point
-    pub fn match_sale(&mut self, tx: &Transaction) -> Result<SaleCostBasis> {
+    /// Match a sale using average cost up to that point, with optional adjusted quantity
+    pub fn match_sale(
+        &mut self,
+        tx: &Transaction,
+        adjusted_quantity: Option<Decimal>,
+    ) -> Result<SaleCostBasis> {
         if tx.transaction_type != TransactionType::Sell {
             return Err(anyhow!("Transaction is not a sale"));
         }
 
-        if tx.quantity > self.total_quantity {
+        let quantity = adjusted_quantity.unwrap_or(tx.quantity);
+
+        if quantity > self.total_quantity {
             return Err(anyhow!(
                 "Insufficient purchase history for sale on {}. Selling {} units but only {} available.\n\
                 \nThis usually means:\n\
@@ -71,7 +86,7 @@ impl AverageCostMatcher {
                 \nTo fix: Manually add the missing purchase transactions to the database or \n\
                 adjust the import file to include all historical purchases.",
                 tx.trade_date,
-                tx.quantity,
+                quantity,
                 self.total_quantity
             ));
         }
@@ -82,8 +97,8 @@ impl AverageCostMatcher {
             Decimal::ZERO
         };
 
-        let cost_basis = avg_cost * tx.quantity;
-        self.total_quantity -= tx.quantity;
+        let cost_basis = avg_cost * quantity;
+        self.total_quantity -= quantity;
         self.total_cost -= cost_basis;
 
         let sale_total = tx.total_cost.abs();
@@ -91,14 +106,14 @@ impl AverageCostMatcher {
 
         Ok(SaleCostBasis {
             sale_date: tx.trade_date,
-            quantity: tx.quantity,
+            quantity,
             sale_price: tx.price_per_unit,
             sale_total,
             cost_basis,
             profit_loss,
             matched_lots: vec![MatchedLot {
                 purchase_date: tx.trade_date,
-                quantity: tx.quantity,
+                quantity,
                 cost: cost_basis,
             }],
             asset_type: AssetType::Stock,
@@ -174,10 +189,10 @@ mod tests {
     fn test_avg_cost_simple() {
         let mut matcher = AverageCostMatcher::new();
         let buy = make_buy(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 100, 10);
-        matcher.add_purchase(&buy);
+        matcher.add_purchase(&buy, None, None);
 
         let sell = make_sell(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(), 50, 12);
-        let result = matcher.match_sale(&sell).unwrap();
+        let result = matcher.match_sale(&sell, None).unwrap();
 
         assert_eq!(result.cost_basis, dec!(500));
         assert_eq!(matcher.remaining_quantity(), dec!(50));
@@ -189,11 +204,11 @@ mod tests {
         let mut matcher = AverageCostMatcher::new();
         let buy1 = make_buy(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 100, 10);
         let buy2 = make_buy(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(), 50, 20);
-        matcher.add_purchase(&buy1);
-        matcher.add_purchase(&buy2);
+        matcher.add_purchase(&buy1, None, None);
+        matcher.add_purchase(&buy2, None, None);
 
         let sell = make_sell(NaiveDate::from_ymd_opt(2025, 3, 10).unwrap(), 60, 15);
-        let result = matcher.match_sale(&sell).unwrap();
+        let result = matcher.match_sale(&sell, None).unwrap();
 
         let expected_avg = (buy1.total_cost + buy2.total_cost) / (buy1.quantity + buy2.quantity);
         let expected_cost_basis = expected_avg * sell.quantity;
@@ -207,12 +222,12 @@ mod tests {
     fn test_avg_cost_with_fees() {
         let mut matcher = AverageCostMatcher::new();
         let buy = make_buy(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 100, 10);
-        matcher.add_purchase(&buy);
+        matcher.add_purchase(&buy, None, None);
 
         let mut sell = make_sell(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(), 40, 12);
         sell.fees = dec!(5);
 
-        let result = matcher.match_sale(&sell).unwrap();
+        let result = matcher.match_sale(&sell, None).unwrap();
         assert_eq!(result.cost_basis, dec!(400));
         assert_eq!(result.profit_loss, dec!(75));
     }
@@ -221,10 +236,10 @@ mod tests {
     fn test_avg_cost_oversell() {
         let mut matcher = AverageCostMatcher::new();
         let buy = make_buy(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(), 10, 10);
-        matcher.add_purchase(&buy);
+        matcher.add_purchase(&buy, None, None);
 
         let sell = make_sell(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap(), 20, 12);
-        let result = matcher.match_sale(&sell);
+        let result = matcher.match_sale(&sell, None);
         assert!(result.is_err());
     }
 }

@@ -7,6 +7,121 @@ use std::str::FromStr;
 use tracing::info;
 
 use crate::db::{Asset, CorporateAction, CorporateActionType, Transaction, TransactionType};
+use chrono::NaiveDate;
+
+/// Get all corporate actions for an asset that occurred between two dates (inclusive)
+///
+/// Used for query-time adjustment: finds actions that should be applied to
+/// a transaction based on trade_date and as_of_date.
+pub fn get_applicable_actions(
+    conn: &Connection,
+    asset_id: i64,
+    after_date: NaiveDate,
+    up_to_date: NaiveDate,
+) -> Result<Vec<CorporateAction>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to,
+                source, notes, created_at
+         FROM corporate_actions
+         WHERE asset_id = ?1 AND ex_date > ?2 AND ex_date <= ?3
+         ORDER BY ex_date ASC",
+    )?;
+
+    let actions = stmt
+        .query_map(rusqlite::params![asset_id, after_date, up_to_date], |row| {
+            Ok(CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<CorporateActionType>()
+                    .unwrap_or(CorporateActionType::Split),
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                ratio_from: row.get(5)?,
+                ratio_to: row.get(6)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(actions)
+}
+
+/// Apply corporate action adjustments to a quantity at query time
+///
+/// For splits/reverse splits: quantity × (ratio_to / ratio_from)
+/// For bonus: no adjustment (bonus creates separate transaction)
+/// For capital return: no quantity adjustment (affects cost basis only)
+///
+/// Returns the adjusted quantity
+pub fn adjust_quantity_for_actions(quantity: Decimal, actions: &[CorporateAction]) -> Decimal {
+    let mut adjusted = quantity;
+    for action in actions {
+        match action.action_type {
+            CorporateActionType::Split | CorporateActionType::ReverseSplit => {
+                let ratio_from = Decimal::from(action.ratio_from);
+                let ratio_to = Decimal::from(action.ratio_to);
+                adjusted = adjusted * ratio_to / ratio_from;
+            }
+            CorporateActionType::Bonus => {
+                // Bonus creates zero-cost BUY transaction, no adjustment to existing transactions
+            }
+            CorporateActionType::CapitalReturn => {
+                // Capital return affects cost basis, not quantity
+            }
+        }
+    }
+    adjusted
+}
+
+/// Adjust price per unit for corporate actions at query time
+///
+/// For splits/reverse splits: price × (ratio_from / ratio_to)
+/// For capital return: affects total cost, compute new price = new_total / quantity
+///
+/// Returns (adjusted_price, adjusted_total_cost)
+pub fn adjust_price_and_cost_for_actions(
+    quantity: Decimal,
+    price: Decimal,
+    total_cost: Decimal,
+    actions: &[CorporateAction],
+) -> (Decimal, Decimal) {
+    let mut adjusted_price = price;
+    let mut adjusted_cost = total_cost;
+    let mut adjusted_qty = quantity;
+
+    for action in actions {
+        match action.action_type {
+            CorporateActionType::Split | CorporateActionType::ReverseSplit => {
+                let ratio_from = Decimal::from(action.ratio_from);
+                let ratio_to = Decimal::from(action.ratio_to);
+                adjusted_price = adjusted_price * ratio_from / ratio_to;
+                adjusted_qty = adjusted_qty * ratio_to / ratio_from;
+                // Total cost stays same for splits
+            }
+            CorporateActionType::CapitalReturn => {
+                // Reduce cost basis by amount_per_share × quantity
+                let ratio_from = Decimal::from(action.ratio_from);
+                let amount_per_share = ratio_from / Decimal::from(100); // cents to reais
+                let reduction = amount_per_share * adjusted_qty;
+                adjusted_cost = (adjusted_cost - reduction).max(Decimal::ZERO);
+                adjusted_price = if adjusted_qty > Decimal::ZERO {
+                    adjusted_cost / adjusted_qty
+                } else {
+                    Decimal::ZERO
+                };
+            }
+            CorporateActionType::Bonus => {
+                // No adjustment to existing transactions
+            }
+        }
+    }
+
+    (adjusted_price, adjusted_cost)
+}
 
 /// Get unapplied corporate actions for an asset (or all assets if None)
 pub fn get_unapplied_actions(
@@ -15,15 +130,14 @@ pub fn get_unapplied_actions(
 ) -> Result<Vec<CorporateAction>> {
     let query = if asset_id_filter.is_some() {
         "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to,
-                applied, source, notes, created_at
+                source, notes, created_at
          FROM corporate_actions
-         WHERE applied = 0 AND asset_id = ?1
+         WHERE asset_id = ?1
          ORDER BY ex_date ASC"
     } else {
         "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to,
-                applied, source, notes, created_at
+                source, notes, created_at
          FROM corporate_actions
-         WHERE applied = 0
          ORDER BY ex_date ASC"
     };
 
@@ -42,10 +156,9 @@ pub fn get_unapplied_actions(
                 ex_date: row.get(4)?,
                 ratio_from: row.get(5)?,
                 ratio_to: row.get(6)?,
-                applied: row.get(7)?,
-                source: row.get(8)?,
-                notes: row.get(9)?,
-                created_at: row.get(10)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?
@@ -62,10 +175,9 @@ pub fn get_unapplied_actions(
                 ex_date: row.get(4)?,
                 ratio_from: row.get(5)?,
                 ratio_to: row.get(6)?,
-                applied: row.get(7)?,
-                source: row.get(8)?,
-                notes: row.get(9)?,
-                created_at: row.get(10)?,
+                source: row.get(7)?,
+                notes: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?
@@ -74,97 +186,36 @@ pub fn get_unapplied_actions(
     Ok(actions)
 }
 
-/// Apply a corporate action to all transactions before the ex-date
+/// Apply a corporate action by creating synthetic transactions (for bonus shares)
 ///
-/// This adjusts quantities and prices while keeping total cost unchanged.
-/// For splits:    new_qty = old_qty × (ratio_to / ratio_from)
-///                new_price = old_price × (ratio_from / ratio_to)
+/// For splits/reverse splits: No mutation - adjustments happen at query time.
+/// For bonus shares: Creates a zero-cost BUY transaction.
+/// For capital return: No synthetic transaction - cost adjustment happens at query time.
 ///
-/// This function is idempotent - safe to call multiple times. It only adjusts
-/// transactions that haven't been adjusted by this action yet.
-///
-/// Returns the number of transactions adjusted.
+/// Returns the number of transactions created (0 or 1).
 pub fn apply_corporate_action(
     conn: &Connection,
     action: &CorporateAction,
     asset: &Asset,
 ) -> Result<usize> {
     info!(
-        "Applying {} for {} (ratio {}:{})",
+        "Processing {} for {} (ratio {}:{})",
         action.action_type.as_str(),
         asset.ticker,
         action.ratio_from,
         action.ratio_to
     );
 
-    let action_id = action
-        .id
-        .ok_or_else(|| anyhow::anyhow!("Corporate action must have an ID"))?;
-
-    // Get all transactions for this asset before the ex-date that haven't been adjusted yet
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.asset_id, t.transaction_type, t.trade_date, t.settlement_date,
-                t.quantity, t.price_per_unit, t.total_cost, t.fees, t.is_day_trade,
-                t.quota_issuance_date, t.notes, t.source, t.created_at
-         FROM transactions t
-         WHERE t.asset_id = ?1 AND t.trade_date < ?2
-           AND NOT EXISTS (
-               SELECT 1 FROM corporate_action_adjustments caa
-               WHERE caa.action_id = ?3 AND caa.transaction_id = t.id
-           )
-         ORDER BY t.trade_date ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map(
-            rusqlite::params![action.asset_id, action.ex_date, action_id],
-            |row| {
-                Ok(Transaction {
-                    id: Some(row.get(0)?),
-                    asset_id: row.get(1)?,
-                    transaction_type: row
-                        .get::<_, String>(2)?
-                        .parse::<TransactionType>()
-                        .unwrap_or(TransactionType::Buy),
-                    trade_date: row.get(3)?,
-                    settlement_date: row.get(4)?,
-                    quantity: get_decimal_value(row, 5)?,
-                    price_per_unit: get_decimal_value(row, 6)?,
-                    total_cost: get_decimal_value(row, 7)?,
-                    fees: get_decimal_value(row, 8)?,
-                    is_day_trade: row.get(9)?,
-                    quota_issuance_date: row.get(10)?,
-                    notes: row.get(11)?,
-                    source: row.get(12)?,
-                    created_at: row.get(13)?,
-                })
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if transactions.is_empty() {
-        info!(
-            "No unadjusted transactions found before ex-date {}",
-            action.ex_date
-        );
-        // Mark as applied anyway
-        mark_action_as_applied(conn, action_id)?;
-        return Ok(0);
-    }
-
-    let ratio_from = Decimal::from(action.ratio_from);
-    let ratio_to = Decimal::from(action.ratio_to);
-
+    // For bonus actions, create a zero-cost BUY transaction
     if action.action_type == crate::db::CorporateActionType::Bonus {
         use rust_decimal::RoundingStrategy;
 
-        let net_qty: Decimal = transactions
-            .iter()
-            .map(|tx| match tx.transaction_type {
-                TransactionType::Buy => tx.quantity,
-                TransactionType::Sell => -tx.quantity,
-            })
-            .sum();
+        // Calculate net position before the bonus
+        let net_qty = calculate_net_position_before_date(conn, action.asset_id, action.ex_date)?;
+
+        let ratio_from = Decimal::from(action.ratio_from);
+        let ratio_to = Decimal::from(action.ratio_to);
+
         let new_total_qty = net_qty * ratio_to / ratio_from;
         let bonus_qty = new_total_qty - net_qty;
         let integer_bonus = bonus_qty.round_dp_with_strategy(0, RoundingStrategy::ToZero);
@@ -198,312 +249,67 @@ pub fn apply_corporate_action(
                 created_at: chrono::Utc::now(),
             };
             crate::db::insert_transaction(conn, &bonus_tx)?;
+
+            info!(
+                "Created bonus transaction: {} shares for {} on {}",
+                integer_bonus, asset.ticker, action.ex_date
+            );
+
+            return Ok(1);
         } else {
             info!(
                 "Bonus action {} for {} resulted in zero bonus quantity",
                 action.id.unwrap_or(0),
                 asset.ticker
             );
+            return Ok(0);
         }
-
-        for tx in &transactions {
-            let tx_id = tx
-                .id
-                .ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
-            conn.execute(
-                "INSERT INTO corporate_action_adjustments
-                 (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    action_id,
-                    tx_id,
-                    tx.quantity.to_string(),
-                    tx.quantity.to_string(),
-                    tx.price_per_unit.to_string(),
-                    tx.price_per_unit.to_string()
-                ],
-            )?;
-        }
-
-        mark_action_as_applied(conn, action_id)?;
-        return Ok(transactions.len());
     }
 
-    // Adjust each transaction
-    let mut adjusted_count = 0;
-    for tx in transactions {
-        let tx_id = tx
-            .id
-            .ok_or_else(|| anyhow::anyhow!("Transaction must have an ID"))?;
-
-        let old_quantity = tx.quantity;
-        let old_price = tx.price_per_unit;
-        let old_total = tx.total_cost;
-
-        let (new_quantity, new_price, new_total) = match action.action_type {
-            CorporateActionType::CapitalReturn => {
-                // Capital return: reduce cost basis by amount_per_share * quantity
-                // ratio_from stores the amount in cents (e.g., 100 for R$1.00)
-                let amount_per_share = ratio_from / Decimal::from(100); // Convert cents to reais
-                let reduction = amount_per_share * old_quantity;
-                let new_total_cost = (old_total - reduction).max(Decimal::ZERO); // Don't go negative
-                let new_price_per_unit = if old_quantity > Decimal::ZERO {
-                    new_total_cost / old_quantity
-                } else {
-                    Decimal::ZERO
-                };
-                (old_quantity, new_price_per_unit, new_total_cost)
-            }
-            _ => {
-                // Split/Reverse split/Bonus: adjust quantity and price, keep total unchanged
-                let new_qty = old_quantity * ratio_to / ratio_from;
-                let new_pr = old_price * ratio_from / ratio_to;
-                (new_qty, new_pr, old_total)
-            }
-        };
-
-        // Verify adjustments (for splits, total cost should remain unchanged)
-        if action.action_type != CorporateActionType::CapitalReturn {
-            let expected_total = old_quantity * old_price;
-            let actual_total = new_quantity * new_price;
-            let diff = (actual_total - expected_total).abs();
-            let tolerance = Decimal::from_str("0.01").unwrap(); // 1 cent tolerance
-
-            if diff > tolerance {
-                tracing::warn!(
-                    "Total cost changed for transaction {}: {} -> {} (diff: {})",
-                    tx_id,
-                    expected_total,
-                    actual_total,
-                    diff
-                );
-            }
-        }
-
-        // Update transaction in database
-        conn.execute(
-            "UPDATE transactions
-             SET quantity = ?1, price_per_unit = ?2, total_cost = ?3
-             WHERE id = ?4",
-            rusqlite::params![
-                new_quantity.to_string(),
-                new_price.to_string(),
-                new_total.to_string(),
-                tx_id
-            ],
-        )?;
-
-        // Record the adjustment in the junction table
-        conn.execute(
-            "INSERT INTO corporate_action_adjustments
-             (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                action_id,
-                tx_id,
-                old_quantity.to_string(),
-                new_quantity.to_string(),
-                old_price.to_string(),
-                new_price.to_string()
-            ],
-        )?;
-
-        adjusted_count += 1;
-    }
-
-    // Mark the corporate action as applied
-    mark_action_as_applied(conn, action_id)?;
-
+    // For splits, reverse splits, and capital returns: no synthetic transactions
+    // Adjustments are applied at query time
     info!(
-        "Successfully adjusted {} transactions for {} {}",
-        adjusted_count,
-        asset.ticker,
-        action.action_type.as_str()
+        "{} for {} will be applied at query time",
+        action.action_type.as_str(),
+        asset.ticker
     );
 
-    Ok(adjusted_count)
+    Ok(0)
 }
 
-/// Apply relevant corporate actions to a single transaction
-///
-/// This is called when adding manual historical transactions. It finds all
-/// corporate actions with ex-date after the transaction's trade date and
-/// applies them in chronological order.
-///
-/// Returns the number of actions applied.
-pub fn apply_actions_to_transaction(conn: &Connection, transaction_id: i64) -> Result<usize> {
-    // Get the transaction details
-    let mut stmt = conn.prepare("SELECT asset_id, trade_date FROM transactions WHERE id = ?1")?;
-
-    let (asset_id, trade_date): (i64, chrono::NaiveDate) =
-        stmt.query_row([transaction_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-    // Find all applied corporate actions for this asset with ex-date after trade_date
-    let mut actions_stmt = conn.prepare(
-        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to,
-                applied, source, notes, created_at
-         FROM corporate_actions
-         WHERE asset_id = ?1 AND ex_date > ?2 AND applied = 1
-         ORDER BY ex_date ASC",
+/// Calculate net position (buys - sells) before a given date, with split adjustments applied
+fn calculate_net_position_before_date(
+    conn: &Connection,
+    asset_id: i64,
+    before_date: NaiveDate,
+) -> Result<Decimal> {
+    let mut stmt = conn.prepare(
+        "SELECT transaction_type, quantity, trade_date
+         FROM transactions
+         WHERE asset_id = ?1 AND trade_date < ?2
+         ORDER BY trade_date ASC",
     )?;
 
-    let actions = actions_stmt
-        .query_map(rusqlite::params![asset_id, trade_date], |row| {
-            Ok(CorporateAction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                action_type: row
-                    .get::<_, String>(2)?
-                    .parse::<crate::db::CorporateActionType>()
-                    .unwrap_or(crate::db::CorporateActionType::Split),
-                event_date: row.get(3)?,
-                ex_date: row.get(4)?,
-                ratio_from: row.get(5)?,
-                ratio_to: row.get(6)?,
-                applied: row.get(7)?,
-                source: row.get(8)?,
-                notes: row.get(9)?,
-                created_at: row.get(10)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut net_qty = Decimal::ZERO;
+    let mut rows = stmt.query(rusqlite::params![asset_id, before_date])?;
 
-    if actions.is_empty() {
-        return Ok(0);
-    }
+    while let Some(row) = rows.next()? {
+        let tx_type: String = row.get(0)?;
+        let quantity = get_decimal_value(row, 1)?;
+        let trade_date: NaiveDate = row.get(2)?;
 
-    // Get the current transaction state
-    let mut tx_stmt =
-        conn.prepare("SELECT quantity, price_per_unit FROM transactions WHERE id = ?1")?;
+        // Apply split adjustments for actions between trade_date and before_date
+        let actions = get_applicable_actions(conn, asset_id, trade_date, before_date)?;
+        let adjusted_qty = adjust_quantity_for_actions(quantity, &actions);
 
-    let (mut quantity, mut price): (Decimal, Decimal) = tx_stmt
-        .query_row([transaction_id], |row| {
-            Ok((get_decimal_value(row, 0)?, get_decimal_value(row, 1)?))
-        })?;
-
-    let mut applied_count = 0;
-
-    // Apply each action in chronological order
-    for action in actions {
-        let action_id = action.id.unwrap();
-
-        // Check if this action has already been applied to this transaction
-        let already_adjusted: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM corporate_action_adjustments
-             WHERE action_id = ?1 AND transaction_id = ?2)",
-            rusqlite::params![action_id, transaction_id],
-            |row| row.get(0),
-        )?;
-
-        if already_adjusted {
-            continue;
+        match tx_type.parse::<TransactionType>() {
+            Ok(TransactionType::Buy) => net_qty += adjusted_qty,
+            Ok(TransactionType::Sell) => net_qty -= adjusted_qty,
+            Err(_) => {}
         }
-
-        let old_quantity = quantity;
-        let old_price = price;
-
-        let ratio_from = Decimal::from(action.ratio_from);
-        let ratio_to = Decimal::from(action.ratio_to);
-
-        if action.action_type == crate::db::CorporateActionType::Bonus {
-            let new_quantity = quantity * ratio_to / ratio_from;
-            let bonus_qty = new_quantity - quantity;
-
-            if bonus_qty > Decimal::ZERO {
-                let bonus_tx = Transaction {
-                    id: None,
-                    asset_id,
-                    transaction_type: TransactionType::Buy,
-                    trade_date: action.ex_date,
-                    settlement_date: Some(action.ex_date),
-                    quantity: bonus_qty,
-                    price_per_unit: Decimal::ZERO,
-                    total_cost: Decimal::ZERO,
-                    fees: Decimal::ZERO,
-                    is_day_trade: false,
-                    quota_issuance_date: None,
-                    notes: Some(format!(
-                        "Bonus shares from {} (ratio {}:{})",
-                        action.action_type.as_str(),
-                        action.ratio_from,
-                        action.ratio_to
-                    )),
-                    source: "CORPORATE_ACTION".to_string(),
-                    created_at: chrono::Utc::now(),
-                };
-                let bonus_id = crate::db::insert_transaction(conn, &bonus_tx)?;
-                apply_actions_to_transaction(conn, bonus_id)?;
-            }
-
-            conn.execute(
-                "INSERT INTO corporate_action_adjustments
-                 (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    action_id,
-                    transaction_id,
-                    old_quantity.to_string(),
-                    old_quantity.to_string(),
-                    old_price.to_string(),
-                    old_price.to_string()
-                ],
-            )?;
-
-            applied_count += 1;
-        } else {
-            quantity = quantity * ratio_to / ratio_from;
-            price = price * ratio_from / ratio_to;
-
-            // Record the adjustment
-            conn.execute(
-                "INSERT INTO corporate_action_adjustments
-                 (action_id, transaction_id, old_quantity, new_quantity, old_price, new_price)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    action_id,
-                    transaction_id,
-                    old_quantity.to_string(),
-                    quantity.to_string(),
-                    old_price.to_string(),
-                    price.to_string()
-                ],
-            )?;
-
-            applied_count += 1;
-        }
-
-        info!(
-            "Auto-applied {} (ratio {}:{}) to transaction {}",
-            action.action_type.as_str(),
-            action.ratio_from,
-            action.ratio_to,
-            transaction_id
-        );
     }
 
-    // Update the transaction with the final adjusted values
-    if applied_count > 0 {
-        conn.execute(
-            "UPDATE transactions SET quantity = ?1, price_per_unit = ?2 WHERE id = ?3",
-            rusqlite::params![quantity.to_string(), price.to_string(), transaction_id],
-        )?;
-
-        info!(
-            "Auto-applied {} corporate action(s) to transaction {}",
-            applied_count, transaction_id
-        );
-    }
-
-    Ok(applied_count)
-}
-
-/// Mark a corporate action as applied
-fn mark_action_as_applied(conn: &Connection, action_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE corporate_actions SET applied = 1 WHERE id = ?1",
-        [action_id],
-    )?;
-    Ok(())
+    Ok(net_qty)
 }
 
 /// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)

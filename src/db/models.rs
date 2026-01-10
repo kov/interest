@@ -184,6 +184,7 @@ impl FromStr for CorporateActionType {
 }
 
 /// Corporate action (split, reverse split, bonus shares)
+/// Query-time adjustment: adjustments computed dynamically, not stored
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorporateAction {
     pub id: Option<i64>,
@@ -193,7 +194,6 @@ pub struct CorporateAction {
     pub ex_date: NaiveDate,
     pub ratio_from: i32, // e.g., 1 for 1:2 split
     pub ratio_to: i32,   // e.g., 2 for 1:2 split
-    pub applied: bool,
     pub source: String,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
