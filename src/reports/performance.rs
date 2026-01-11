@@ -147,11 +147,15 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
     ensure_snapshot(conn, start_date)?;
     ensure_snapshot(conn, end_date)?;
 
-    // Load snapshots
-    let start_snapshot = get_valid_snapshot(conn, start_date)?
-        .ok_or_else(|| anyhow::anyhow!("Failed to load start snapshot"))?;
-    let end_snapshot = get_valid_snapshot(conn, end_date)?
-        .ok_or_else(|| anyhow::anyhow!("Failed to load end snapshot"))?;
+    // Load snapshots, with graceful fallback to on-the-fly portfolio calculation
+    let start_snapshot = match get_valid_snapshot(conn, start_date)? {
+        Some(s) => s,
+        None => calculate_portfolio_at_date(conn, start_date, None)?,
+    };
+    let end_snapshot = match get_valid_snapshot(conn, end_date)? {
+        Some(s) => s,
+        None => calculate_portfolio_at_date(conn, end_date, None)?,
+    };
 
     // Aggregate values
     let start_value = start_snapshot.total_value;

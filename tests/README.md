@@ -91,11 +91,11 @@ This creates test XLS files in `tests/data/`:
    - Bonus 20% (Bonificação em Ativos)
    - Tests: Auto-apply corporate actions on import
 
-12. **12_desdobro_inference.xlsx** - Desdobro ratio inference
+12. **12_desdobro_inference.xlsx** - Desdobro absolute adjustment
    - Buy 80 A1MD34, Desdobro credit of 560 shares
    - Tests: Infer 1:8 split and auto-apply adjustment
 
-14. **14_atualizacao_inference.xlsx** - Atualização ratio inference
+14. **14_atualizacao_inference.xlsx** - Atualização absolute adjustment
    - Buy 378 BRCR11, Atualização credit of 22 shares
    - Tests: Infer 378:400 bonus-style adjustment and auto-apply
 

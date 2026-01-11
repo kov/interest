@@ -22,6 +22,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::io::Write as _;
+use std::str::FromStr;
 use tax::swing_trade::TaxCategory;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -121,7 +122,7 @@ async fn main() -> Result<()> {
 
         Commands::Tax { action } => match action {
             TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
-            TaxCommands::Report { year, export } => handle_tax_report(year, export).await,
+            TaxCommands::Report { year, export } => handle_tax_report(year, export, cli.json).await,
             TaxCommands::Summary { year } => handle_tax_summary(year).await,
         },
 
@@ -1343,17 +1344,15 @@ async fn handle_actions_update() -> Result<()> {
                 // Store corporate actions
                 if let Some(actions) = actions_opt {
                     for brapi_action in actions {
-                        // Parse ratio from factor string (e.g., "1:2", "10%")
-                        let (ratio_from, ratio_to) = parse_factor(&brapi_action.factor);
-
+                        // Quantity-based model cannot infer absolute adjustments from ratios without holdings
+                        // Store as zero adjustment for now (placeholder)
                         let action = db::CorporateAction {
                             id: None,
                             asset_id: asset.id.unwrap(),
                             action_type: brapi_action.action_type,
                             event_date: brapi_action.approved_date,
                             ex_date: brapi_action.ex_date,
-                            ratio_from,
-                            ratio_to,
+                            quantity_adjustment: rust_decimal::Decimal::ZERO,
                             source: "BRAPI".to_string(),
                             notes: brapi_action.remarks,
                             created_at: chrono::Utc::now(),
@@ -1450,7 +1449,7 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
             id: i64,
             ticker: String,
             action_type: String,
-            ratio: String,
+            quantity_adjustment: String,
             ex_date: String,
             source: String,
             notes: Option<String>,
@@ -1467,7 +1466,7 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
                 id: action.id.unwrap(),
                 ticker: asset.ticker.clone(),
                 action_type: action.action_type.as_str().to_string(),
-                ratio: format!("{}:{}", action.ratio_from, action.ratio_to),
+                quantity_adjustment: action.quantity_adjustment.to_string(),
                 ex_date: action.ex_date.format("%Y-%m-%d").to_string(),
                 source: action.source.clone(),
                 notes: action.notes.clone(),
@@ -1489,8 +1488,8 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
         ticker: String,
         #[tabled(rename = "Type")]
         action_type: String,
-        #[tabled(rename = "Ratio")]
-        ratio: String,
+        #[tabled(rename = "Adj Qty")]
+        quantity_adjustment: String,
         #[tabled(rename = "Ex-Date")]
         ex_date: String,
         #[tabled(rename = "Source")]
@@ -1503,7 +1502,7 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
             id: action.id.unwrap().to_string(),
             ticker: asset.ticker.clone(),
             action_type: action.action_type.as_str().to_string(),
-            ratio: format!("{}:{}", action.ratio_from, action.ratio_to),
+            quantity_adjustment: action.quantity_adjustment.to_string(),
             ex_date: action.ex_date.format("%d/%m/%Y").to_string(),
             source: action.source.clone(),
         })
@@ -1524,7 +1523,7 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
 async fn handle_action_add(
     ticker: &str,
     action_type_str: &str,
-    ratio_str: &str,
+    quantity_str: &str,
     date_str: &str,
     notes: Option<&str>,
 ) -> Result<()> {
@@ -1546,26 +1545,9 @@ async fn handle_action_add(
         }
     };
 
-    // Parse ratio (from:to format, e.g., "1:2" or "10:1")
-    let ratio_parts: Vec<&str> = ratio_str.split(':').collect();
-    if ratio_parts.len() != 2 {
-        return Err(anyhow::anyhow!(
-            "Ratio must be in format 'from:to' (e.g., '1:2', '10:1')"
-        ));
-    }
-
-    let ratio_from: i32 = ratio_parts[0]
-        .trim()
-        .parse()
-        .context("Invalid ratio 'from' value. Must be an integer")?;
-    let ratio_to: i32 = ratio_parts[1]
-        .trim()
-        .parse()
-        .context("Invalid ratio 'to' value. Must be an integer")?;
-
-    if ratio_from <= 0 || ratio_to <= 0 {
-        return Err(anyhow::anyhow!("Ratio values must be positive integers"));
-    }
+    // Parse quantity adjustment (signed decimal): positive = add shares; negative = subtract shares
+    let quantity_adjustment = rust_decimal::Decimal::from_str(quantity_str)
+        .context("Invalid quantity adjustment value. Must be a decimal number")?;
 
     // Parse ex-date
     let ex_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
@@ -1586,8 +1568,7 @@ async fn handle_action_add(
         action_type: action_type.clone(),
         event_date: ex_date, // Same as ex_date for manual entries
         ex_date,
-        ratio_from,
-        ratio_to,
+        quantity_adjustment,
         source: "MANUAL".to_string(),
         notes: notes.map(|s| s.to_string()),
         created_at: chrono::Utc::now(),
@@ -1604,25 +1585,7 @@ async fn handle_action_add(
     println!("  Action ID:      {}", action_id);
     println!("  Ticker:         {}", ticker.cyan().bold());
     println!("  Type:           {}", action_type.as_str());
-    println!(
-        "  Ratio:          {}:{} ({})",
-        ratio_from,
-        ratio_to,
-        match action_type {
-            db::CorporateActionType::Split =>
-                format!("each share becomes {}", ratio_to as f64 / ratio_from as f64),
-            db::CorporateActionType::ReverseSplit =>
-                format!("{} shares become 1", ratio_from as f64 / ratio_to as f64),
-            db::CorporateActionType::Bonus => format!(
-                "{}% bonus",
-                ((ratio_to as f64 / ratio_from as f64) - 1.0) * 100.0
-            ),
-            db::CorporateActionType::CapitalReturn => format!(
-                "{} per share",
-                format_currency(Decimal::from(ratio_from) / Decimal::from(100))
-            ),
-        }
-    );
+    println!("  Adjustment:     {} shares", quantity_adjustment);
     println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
     if let Some(n) = notes {
         println!("  Notes:          {}", n);
@@ -1664,66 +1627,17 @@ async fn handle_action_scrape(
     let scrape_url = if let Some(u) = url {
         u.to_string()
     } else {
-        // Try to build URL automatically
+        // Build URL automatically using provided name or fallback to ticker
         let company_name = if let Some(n) = name {
-            // User provided name - save it to database for future use
+            // Save provided name to database for future use
             conn.execute(
                 "UPDATE assets SET name = ?1 WHERE id = ?2",
                 rusqlite::params![n, asset_id],
             )?;
             n.to_string()
         } else {
-            // Try to get asset name from database
-            let assets = db::get_all_assets(&conn)?;
-            let asset = assets
-                .iter()
-                .find(|a| a.ticker.eq_ignore_ascii_case(ticker));
-
-            let db_name = asset.and_then(|a| a.name.clone());
-
-            if let Some(name) = db_name {
-                name
-            } else {
-                // Fetch company name from Yahoo Finance
-                println!(
-                    "{} Fetching company name from Yahoo Finance...",
-                    "🔍".cyan().bold()
-                );
-
-                match pricing::yahoo::fetch_company_name(ticker).await {
-                    Ok(fetched_name) => {
-                        println!("  Found: {}", fetched_name.green());
-
-                        // Save to database for future use
-                        if let Some(asset) = asset {
-                            if let Some(asset_id) = asset.id {
-                                let _ = conn.execute(
-                                    "UPDATE assets SET name = ?1 WHERE id = ?2",
-                                    rusqlite::params![&fetched_name, asset_id],
-                                );
-                            }
-                        }
-
-                        fetched_name
-                    }
-                    Err(e) => {
-                        println!(
-                            "{} Could not fetch company name from Yahoo Finance: {}",
-                            "⚠".yellow().bold(),
-                            e
-                        );
-                        println!("  Please provide either:");
-                        println!("    1. URL with --url flag");
-                        println!("    2. Company name with --name flag");
-                        println!("\n{} Example:", "→".blue().bold());
-                        println!(
-                            "  interest actions scrape {} --name \"Advanced Micro Devices Inc\"",
-                            ticker
-                        );
-                        return Err(anyhow::anyhow!("Could not determine company name"));
-                    }
-                }
-            }
+            // Fallback: use ticker as company name
+            ticker.to_string()
         };
 
         let auto_url = crate::scraping::InvestingScraper::build_splits_url(ticker, &company_name);
@@ -1770,7 +1684,7 @@ async fn handle_action_scrape(
 
     for action in &actions {
         println!(
-            "  {} {} {}:{} on {}",
+            "  {} {} ({} shares) on {}",
             match action.action_type {
                 db::CorporateActionType::Split => "📈",
                 db::CorporateActionType::ReverseSplit => "📉",
@@ -1778,8 +1692,7 @@ async fn handle_action_scrape(
                 db::CorporateActionType::CapitalReturn => "💰",
             },
             action.action_type.as_str().cyan(),
-            action.ratio_from,
-            action.ratio_to,
+            action.quantity_adjustment,
             action.ex_date.format("%Y-%m-%d")
         );
     }
@@ -1953,10 +1866,17 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
 
     // Get the action details before deleting
     let action = conn.query_row(
-        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes, created_at
+        "SELECT id, asset_id, action_type, event_date, ex_date, quantity_adjustment, source, notes, created_at
          FROM corporate_actions WHERE id = ?1",
         rusqlite::params![action_id],
         |row| {
+            use rusqlite::types::ValueRef;
+            let quantity_adjustment = match row.get_ref(5)? {
+                ValueRef::Text(bytes) => Decimal::from_str(std::str::from_utf8(bytes)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                ValueRef::Integer(i) => Decimal::from(i),
+                ValueRef::Real(f) => Decimal::try_from(f).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                _ => Decimal::ZERO,
+            };
             Ok(db::CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
@@ -1966,11 +1886,10 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                ratio_from: row.get(5)?,
-                ratio_to: row.get(6)?,
-                source: row.get(7)?,
-                notes: row.get(8)?,
-                created_at: row.get(9)?,
+                quantity_adjustment,
+                source: row.get(6)?,
+                notes: row.get(7)?,
+                created_at: row.get(8)?,
             })
         },
     ).context(format!("Corporate action with ID {} not found", action_id))?;
@@ -1986,7 +1905,7 @@ async fn handle_action_delete(action_id: i64) -> Result<()> {
     println!("  ID:       {}", action_id);
     println!("  Ticker:   {}", asset.ticker.cyan().bold());
     println!("  Type:     {}", action.action_type.as_str());
-    println!("  Ratio:    {}:{}", action.ratio_from, action.ratio_to);
+    println!("  Adjustment: {} shares", action.quantity_adjustment);
     println!("  Ex-date:  {}", action.ex_date.format("%Y-%m-%d"));
     println!("  Source:   {}", action.source);
     if let Some(ref notes) = action.notes {
@@ -2036,10 +1955,17 @@ async fn handle_action_edit(
 
     // Get the action details
     let mut action = conn.query_row(
-        "SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes, created_at
+        "SELECT id, asset_id, action_type, event_date, ex_date, quantity_adjustment, source, notes, created_at
          FROM corporate_actions WHERE id = ?1",
         rusqlite::params![action_id],
         |row| {
+            use rusqlite::types::ValueRef;
+            let quantity_adjustment = match row.get_ref(5)? {
+                ValueRef::Text(bytes) => Decimal::from_str(std::str::from_utf8(bytes)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                ValueRef::Integer(i) => Decimal::from(i),
+                ValueRef::Real(f) => Decimal::try_from(f).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                _ => Decimal::ZERO,
+            };
             Ok(db::CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
@@ -2049,11 +1975,10 @@ async fn handle_action_edit(
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                ratio_from: row.get(5)?,
-                ratio_to: row.get(6)?,
-                source: row.get(7)?,
-                notes: row.get(8)?,
-                created_at: row.get(9)?,
+                quantity_adjustment,
+                source: row.get(6)?,
+                notes: row.get(7)?,
+                created_at: row.get(8)?,
             })
         },
     ).context(format!("Corporate action with ID {} not found", action_id))?;
@@ -2088,33 +2013,18 @@ async fn handle_action_edit(
         updates.push("action_type");
     }
 
-    if let Some(ratio_str) = ratio {
-        let parts: Vec<&str> = ratio_str.split(':').collect();
-        if parts.len() != 2 {
-            return Err(anyhow::anyhow!(
-                "Invalid ratio format. Use 'from:to' (e.g., '1:8')"
-            ));
-        }
-        let new_from: i32 = parts[0]
-            .trim()
-            .parse()
-            .context("Invalid ratio 'from' value")?;
-        let new_to: i32 = parts[1]
-            .trim()
-            .parse()
-            .context("Invalid ratio 'to' value")?;
+    if let Some(quantity_str) = ratio {
+        let new_adjustment = Decimal::from_str(quantity_str.trim()).context(
+            "Invalid quantity adjustment value. Must be a signed decimal (e.g. +100, -50)",
+        )?;
 
         println!(
-            "  Ratio:    {}:{} → {}:{}",
-            action.ratio_from.to_string().dimmed(),
-            action.ratio_to.to_string().dimmed(),
-            new_from.to_string().green(),
-            new_to.to_string().green()
+            "  Adjustment: {} shares → {} shares",
+            action.quantity_adjustment.to_string().dimmed(),
+            new_adjustment.to_string().green()
         );
-        action.ratio_from = new_from;
-        action.ratio_to = new_to;
-        updates.push("ratio_from");
-        updates.push("ratio_to");
+        action.quantity_adjustment = new_adjustment;
+        updates.push("quantity_adjustment");
     }
 
     if let Some(date_str) = date {
@@ -2142,12 +2052,11 @@ async fn handle_action_edit(
     // Update database
     conn.execute(
         "UPDATE corporate_actions
-         SET action_type = ?1, ratio_from = ?2, ratio_to = ?3, ex_date = ?4, event_date = ?5, notes = ?6
-         WHERE id = ?7",
+         SET action_type = ?1, quantity_adjustment = ?2, ex_date = ?3, event_date = ?4, notes = ?5
+         WHERE id = ?6",
         rusqlite::params![
             action.action_type.as_str(),
-            action.ratio_from,
-            action.ratio_to,
+            action.quantity_adjustment.to_string(),
             action.ex_date,
             action.event_date,
             action.notes,
@@ -2332,7 +2241,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
 }
 
 /// Handle IRPF annual report generation
-async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
+async fn handle_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
     use colored::Colorize;
 
     info!("Generating IRPF annual report for {}", year);
@@ -2341,9 +2250,13 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Generate report with in-place spinner progress
-    let mut printer = TaxProgressPrinter::new(true);
-    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
+    // Generate report; suppress progress in JSON mode
+    let report = if json_output {
+        tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
+    } else {
+        let mut printer = TaxProgressPrinter::new(true);
+        tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
+    };
 
     if report.monthly_summaries.is_empty() {
         println!(
@@ -2354,11 +2267,46 @@ async fn handle_tax_report(year: i32, export_csv: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "\n{} Annual IRPF Tax Report - {}\n",
-        "📊".cyan().bold(),
-        year
-    );
+    if json_output {
+        // Emit concise JSON suitable for tests and scripting
+        #[derive(serde::Serialize)]
+        struct MonthlySummaryJson {
+            month: String,
+            sales: rust_decimal::Decimal,
+            profit: rust_decimal::Decimal,
+            loss: rust_decimal::Decimal,
+            tax_due: rust_decimal::Decimal,
+        }
+
+        let monthly: Vec<MonthlySummaryJson> = report
+            .monthly_summaries
+            .iter()
+            .map(|m| MonthlySummaryJson {
+                month: m.month_name.to_string(),
+                sales: m.total_sales,
+                profit: m.total_profit,
+                loss: m.total_loss,
+                tax_due: m.tax_due,
+            })
+            .collect();
+
+        let payload = serde_json::json!({
+            "year": year,
+            "annual_total_sales": report.annual_total_sales,
+            "annual_total_profit": report.annual_total_profit,
+            "annual_total_loss": report.annual_total_loss,
+            "annual_total_tax": report.annual_total_tax,
+            "monthly_summaries": monthly,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    } else {
+        println!(
+            "\n{} Annual IRPF Tax Report - {}\n",
+            "📊".cyan().bold(),
+            year
+        );
+    }
 
     // Show prior-year carryforward losses if any
     if !report.previous_losses_carry_forward.is_empty() {
@@ -3075,23 +3023,6 @@ async fn handle_process_terms() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Parse factor string into ratio (from, to)
-/// Examples: "1:2" -> (1, 2), "10%" -> (100, 110), "2:1" -> (2, 1)
-fn parse_factor(factor: &str) -> (i32, i32) {
-    if let Some((from, to)) = factor.split_once(':') {
-        let from_val = from.trim().parse::<i32>().unwrap_or(1);
-        let to_val = to.trim().parse::<i32>().unwrap_or(1);
-        (from_val, to_val)
-    } else if factor.contains('%') {
-        // Percentage bonus: "10%" means 100:110
-        let pct = factor.replace('%', "").trim().parse::<f64>().unwrap_or(0.0);
-        let to_val = (100.0 + pct) as i32;
-        (100, to_val)
-    } else {
-        (1, 1)
-    }
 }
 
 /// Handle inspect command - show Excel file structure

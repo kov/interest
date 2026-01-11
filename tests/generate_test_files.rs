@@ -99,12 +99,12 @@ fn generate_13_ofertas_publicas() {
 #[ignore]
 fn generate_12_desdobro_inference() {
     /*
-    Test Desdobro ratio inference from credited quantity.
+    Test Desdobro absolute adjustment from credited quantity.
 
     Scenario:
     - Buy 80 A1MD34 @ R$10.00 on 2022-11-20
     - Desdobro on 2022-11-22 with credit of 560 shares
-      - Expected ratio: 1:8 (80 -> 640)
+      - Expected adjustment: +560 (80 -> 640)
     */
     let mut workbook = create_workbook_with_header();
     let worksheet = workbook.worksheet_from_index(0).unwrap();
@@ -143,12 +143,12 @@ fn generate_12_desdobro_inference() {
 #[ignore]
 fn generate_14_atualizacao_inference() {
     /*
-    Test Atualização ratio inference from credited quantity.
+    Test Atualização absolute adjustment from credited quantity.
 
     Scenario:
     - Buy 378 BRCR11 @ R$10.00 on 2020-09-10
     - Atualização credit of 22 shares on 2020-09-14
-      - Expected ratio: 378:400 (bonus-style adjustment)
+      - Expected adjustment: +22 (bonus-style adjustment)
     */
     let mut workbook = create_workbook_with_header();
     let worksheet = workbook.worksheet_from_index(0).unwrap();

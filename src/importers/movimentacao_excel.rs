@@ -20,7 +20,6 @@
 use anyhow::{anyhow, Context, Result};
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDate;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::path::Path;
 use std::str::FromStr;
@@ -249,7 +248,12 @@ impl MovimentacaoEntry {
     pub fn is_corporate_action(&self) -> bool {
         matches!(
             self.movement_type.as_str(),
-            "Desdobro" | "Bonificação em Ativos" | "Incorporação" | "Atualização"
+            "Desdobro"
+                | "Grupamento"
+                | "Bonificação"
+                | "Bonificação em Ativos"
+                | "Incorporação"
+                | "Atualização"
         )
     }
 
@@ -389,29 +393,13 @@ impl MovimentacaoEntry {
 
     /// Convert to CorporateAction
     pub fn to_corporate_action(&self, asset_id: i64) -> Result<CorporateAction> {
-        let (action_type, ratio_from, ratio_to) = match self.movement_type.as_str() {
-            "Desdobro" => {
-                // Stock split - need to extract ratio from quantity or notes
-                // For now, mark as 1:1; import flow may infer from holdings
-                (CorporateActionType::Split, 1, 1)
-            }
-            "Bonificação em Ativos" => {
-                // Bonus shares - extract percentage from quantity
-                if let Some(qty) = self.quantity {
-                    let bonus_pct = qty.to_i32().unwrap_or(10);
-                    (CorporateActionType::Bonus, 100, 100 + bonus_pct)
-                } else {
-                    (CorporateActionType::Bonus, 100, 110)
-                }
-            }
-            "Atualização" => {
-                // Position update / subscription credit - infer ratio from holdings later
-                (CorporateActionType::Bonus, 1, 1)
-            }
-            "Incorporação" => {
-                // Merger - ratio unknown, use 1:1 as placeholder
-                (CorporateActionType::Split, 1, 1) // May need custom type
-            }
+        let action_type = match self.movement_type.as_str() {
+            "Desdobro" => CorporateActionType::Split,
+            "Grupamento" => CorporateActionType::ReverseSplit,
+            "Bonificação" => CorporateActionType::Bonus,
+            "Bonificação em Ativos" => CorporateActionType::Bonus,
+            "Atualização" => CorporateActionType::Bonus,
+            "Incorporação" => CorporateActionType::Split,
             _ => return Err(anyhow!("Not a corporate action: {}", self.movement_type)),
         };
 
@@ -421,8 +409,7 @@ impl MovimentacaoEntry {
             action_type,
             event_date: self.date,
             ex_date: self.date,
-            ratio_from,
-            ratio_to,
+            quantity_adjustment: Decimal::ZERO, // Will be overwritten by import flow with actual quantity from entry
             source: "MOVIMENTACAO".to_string(),
             notes: Some(format!("{} - {}", self.movement_type, self.product)),
             created_at: chrono::Utc::now(),

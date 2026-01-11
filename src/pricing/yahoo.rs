@@ -257,63 +257,6 @@ pub async fn fetch_historical_prices(
     Ok(prices)
 }
 
-/// Fetch company name from Yahoo Finance by scraping the quote page
-pub async fn fetch_company_name(ticker: &str) -> Result<String> {
-    let symbol = format!("{}.SA", ticker);
-    info!("Fetching company name for {} from Yahoo Finance", symbol);
-
-    let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .build()?;
-
-    let url = format!("https://finance.yahoo.com/quote/{}", symbol);
-
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .context("Failed to send request to Yahoo Finance")?;
-
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "Yahoo Finance returned error status: {}",
-            response.status()
-        ));
-    }
-
-    let html = response
-        .text()
-        .await
-        .context("Failed to get HTML from Yahoo Finance")?;
-
-    // Try to extract company name from <h1> tag
-    // The page typically has: <h1>COMPANY NAME (TICKER)</h1>
-    if let Some(start) = html.find("<h1") {
-        if let Some(content_start) = html[start..].find('>') {
-            let abs_start = start + content_start + 1;
-            if let Some(end) = html[abs_start..].find("</h1>") {
-                let h1_content = &html[abs_start..abs_start + end];
-
-                // Extract just the company name (before the ticker in parentheses)
-                let name = if let Some(paren_pos) = h1_content.find(" (") {
-                    h1_content[..paren_pos].trim()
-                } else {
-                    h1_content.trim()
-                };
-
-                if !name.is_empty() {
-                    info!("Found company name: {}", name);
-                    return Ok(name.to_string());
-                }
-            }
-        }
-    }
-
-    Err(anyhow!(
-        "Could not extract company name from Yahoo Finance page"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -903,16 +903,20 @@ async fn dispatch_portfolio_show(
     Ok(())
 }
 
-async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) -> Result<()> {
+async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
     info!("Generating IRPF annual report for {}", year);
 
     // Initialize database
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    // Generate report with in-place spinner progress
-    let mut printer = TaxProgressPrinter::new(true);
-    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
+    // Generate report; suppress progress output in JSON mode
+    let report = if json_output {
+        tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
+    } else {
+        let mut printer = TaxProgressPrinter::new(true);
+        tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
+    };
 
     if report.monthly_summaries.is_empty() {
         println!(
@@ -923,11 +927,46 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, _json_output: bool) ->
         return Ok(());
     }
 
-    println!(
-        "\n{} Annual IRPF Tax Report - {}\n",
-        "📊".cyan().bold(),
-        year
-    );
+    if json_output {
+        // Emit concise JSON suitable for tests and scripting
+        #[derive(serde::Serialize)]
+        struct MonthlySummaryJson {
+            month: String,
+            sales: rust_decimal::Decimal,
+            profit: rust_decimal::Decimal,
+            loss: rust_decimal::Decimal,
+            tax_due: rust_decimal::Decimal,
+        }
+
+        let monthly: Vec<MonthlySummaryJson> = report
+            .monthly_summaries
+            .iter()
+            .map(|m| MonthlySummaryJson {
+                month: m.month_name.to_string(),
+                sales: m.total_sales,
+                profit: m.total_profit,
+                loss: m.total_loss,
+                tax_due: m.tax_due,
+            })
+            .collect();
+
+        let payload = serde_json::json!({
+            "year": year,
+            "annual_total_sales": report.annual_total_sales,
+            "annual_total_profit": report.annual_total_profit,
+            "annual_total_loss": report.annual_total_loss,
+            "annual_total_tax": report.annual_total_tax,
+            "monthly_summaries": monthly,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    } else {
+        println!(
+            "\n{} Annual IRPF Tax Report - {}\n",
+            "📊".cyan().bold(),
+            year
+        );
+    }
 
     // Show prior-year carryforward losses if any
     if !report.previous_losses_carry_forward.is_empty() {

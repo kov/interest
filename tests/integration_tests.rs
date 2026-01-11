@@ -14,8 +14,8 @@ use assert_cmd::{cargo, prelude::*};
 use interest::corporate_actions::{
     adjust_price_and_cost_for_actions, adjust_quantity_for_actions, get_applicable_actions,
 };
-use interest::db::models::{AssetType, Transaction, TransactionType};
-use interest::db::{init_database, open_db, upsert_asset, CorporateActionType};
+use interest::db::models::{AssetType, IncomeEvent, Transaction, TransactionType};
+use interest::db::{init_database, open_db, upsert_asset};
 use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::importers::import_movimentacao_entries;
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
@@ -131,6 +131,50 @@ mod sql {
         transactions
     }
 
+    /// Query income events for a ticker
+    pub fn query_income_events(home: &TempDir, ticker: &str) -> Vec<IncomeEvent> {
+        let db_path = get_db_path(home);
+        let conn = open_db(Some(db_path)).expect("failed to open db");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT ie.id, ie.asset_id, ie.event_date, ie.ex_date, ie.event_type,
+                        ie.amount_per_quota, ie.total_amount, ie.withholding_tax,
+                        ie.is_quota_pre_2026, ie.source, ie.notes, ie.created_at
+                 FROM income_events ie
+                 JOIN assets a ON ie.asset_id = a.id
+                 WHERE a.ticker = ?1
+                 ORDER BY ie.event_date ASC",
+            )
+            .expect("failed to prepare income query");
+
+        let events = stmt
+            .query_map([ticker], |row| {
+                Ok(IncomeEvent {
+                    id: Some(row.get(0)?),
+                    asset_id: row.get(1)?,
+                    event_date: row.get(2)?,
+                    ex_date: row.get(3)?,
+                    event_type: row
+                        .get::<_, String>(4)?
+                        .parse::<interest::db::IncomeEventType>()
+                        .unwrap_or(interest::db::IncomeEventType::Dividend),
+                    amount_per_quota: get_decimal(row, 5)?,
+                    total_amount: get_decimal(row, 6)?,
+                    withholding_tax: get_decimal(row, 7)?,
+                    is_quota_pre_2026: row.get(8)?,
+                    source: row.get(9)?,
+                    notes: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })
+            .expect("failed to map income rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("failed to collect income rows");
+
+        events
+    }
+
     /// Calculate position (quantity, total_cost) for a ticker
     pub fn query_position(home: &TempDir, ticker: &str) -> (Decimal, Decimal) {
         let transactions = query_transactions(home, ticker);
@@ -236,6 +280,7 @@ fn test_01_basic_purchase_and_sale() -> Result<()> {
 
     // Verify portfolio shows correct position using formatted output
     let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.env("INTEREST_SKIP_PRICE_FETCH", "1");
     portfolio_cmd.arg("portfolio").arg("show");
 
     portfolio_cmd
@@ -571,11 +616,58 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
     let (quantity, cost_basis) = sql::query_position(&home, "ITSA4");
     assert_eq!(quantity, dec!(120));
     assert_eq!(cost_basis, dec!(1000));
+
+    // Verify portfolio snapshot at post-buy date (before bonus)
+    let mut cmd_before = base_cmd(&home);
+    cmd_before
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2021-01-11"); // After initial buy on 2021-01-10, before bonus
+    let out_before = cmd_before.output()?;
+    assert!(out_before.status.success());
+    let stdout_before = String::from_utf8_lossy(&out_before.stdout);
+    let row_before = stdout_before
+        .lines()
+        .find(|l| l.starts_with("│ ITSA4"))
+        .expect("ITSA4 row not found at 2021-01-11");
+    let cols_before: Vec<String> = row_before
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert_eq!(cols_before[1], "100.00", "Qty before bonus should be 100");
+
+    // Verify portfolio snapshot at post-bonus date
+    let mut cmd_after = base_cmd(&home);
+    cmd_after
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2021-12-23"); // After bonus on 2021-12-22
+    let out_after = cmd_after.output()?;
+    assert!(out_after.status.success());
+    let stdout_after = String::from_utf8_lossy(&out_after.stdout);
+    let row_after = stdout_after
+        .lines()
+        .find(|l| l.starts_with("│ ITSA4"))
+        .expect("ITSA4 row not found at 2021-12-23");
+    let cols_after: Vec<String> = row_after
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert_eq!(cols_after[1], "120.00", "Qty after bonus should be 120");
+    assert_eq!(cols_after[2], "R$ 8,33", "Avg cost should be R$8.33");
+    assert_eq!(cols_after[3], "R$ 1.000,00", "Total cost should be R$1000");
+
     Ok(())
 }
 
 /// Test that bonus shares are calculated correctly when there's a prior split.
-/// This verifies that calculate_net_position_before_date applies split adjustments.
+/// This verifies query-time adjustment applies split BEFORE calculating bonus.
 #[test]
 fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
     let home = TempDir::new()?;
@@ -608,36 +700,44 @@ fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
     };
     interest::db::insert_transaction(&conn, &buy_tx)?;
 
-    // Add 1:2 split on 2025-02-10 (100 shares -> 200 shares)
+    // Add 1:2 split on 2025-02-10 (100 shares -> 200 shares, add 100 shares)
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, quantity_adjustment, source)
+         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', '100', 'TEST')",
         [asset_id],
     )?;
 
-    // Add bonus 10:11 on 2025-03-15 (should be based on 200 split-adjusted shares)
-    // Expected bonus: 200 * 11/10 - 200 = 220 - 200 = 20 shares
+    // Add bonus on 2025-03-15 (add 20 shares bonus)
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'BONUS', '2025-03-15', '2025-03-15', 10, 11, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, quantity_adjustment, source)
+         VALUES (?1, 'BONUS', '2025-03-15', '2025-03-15', '20', 'TEST')",
         [asset_id],
     )?;
 
     // Apply corporate actions (only bonus creates transactions)
     let actions: Vec<interest::db::CorporateAction> = conn
-        .prepare("SELECT id, asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes, created_at FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?
+        .prepare("SELECT id, asset_id, action_type, event_date, ex_date, quantity_adjustment, source, notes, created_at FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?
         .query_map([asset_id], |row| {
+            use rusqlite::types::ValueRef;
+            let quantity_adjustment = match row.get_ref(5)? {
+                ValueRef::Text(bytes) => {
+                    let s = std::str::from_utf8(bytes)?;
+                    rust_decimal::Decimal::from_str(s).map_err(|_| rusqlite::Error::InvalidQuery)?
+                }
+                ValueRef::Integer(i) => rust_decimal::Decimal::from(i),
+                ValueRef::Real(f) => rust_decimal::Decimal::try_from(f).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                _ => rust_decimal::Decimal::ZERO,
+            };
             Ok(interest::db::CorporateAction {
                 id: Some(row.get(0)?),
                 asset_id: row.get(1)?,
                 action_type: row.get::<_, String>(2)?.parse().unwrap(),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                ratio_from: row.get(5)?,
-                ratio_to: row.get(6)?,
-                source: row.get(7)?,
-                notes: row.get(8)?,
-                created_at: row.get(9)?,
+                quantity_adjustment,
+                source: row.get(6)?,
+                notes: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -679,46 +779,90 @@ fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
         "Bonus should be 20 shares (based on 200 split-adjusted shares, not 100 raw)"
     );
 
-    // Verify final position with query-time adjustments
-    // Original: 100 shares, after 1:2 split = 200, plus 20 bonus = 220 total
-    let as_of = chrono::NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
-    let txs: Vec<Transaction> = conn
-        .prepare("SELECT id, asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, quota_issuance_date, notes, source, created_at FROM transactions WHERE asset_id = ?1 ORDER BY trade_date")?
-        .query_map([asset_id], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: row.get::<_, String>(2)?.parse().unwrap(),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: interest::db::get_decimal_value(row, 5)?,
-                price_per_unit: interest::db::get_decimal_value(row, 6)?,
-                total_cost: interest::db::get_decimal_value(row, 7)?,
-                fees: interest::db::get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Verify portfolio snapshot BEFORE split (2025-02-09): 100 shares
+    let mut cmd_before_split = base_cmd(&home);
+    cmd_before_split
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-02-09"); // Before split
+    let out_before_split = cmd_before_split.output()?;
+    assert!(out_before_split.status.success());
+    let stdout_before_split = String::from_utf8_lossy(&out_before_split.stdout);
+    let row_before_split = stdout_before_split
+        .lines()
+        .find(|l| l.starts_with("│ TEST11"))
+        .expect("TEST11 row not found at 2025-02-09");
+    let cols_before_split: Vec<String> = row_before_split
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert_eq!(
+        cols_before_split[1], "100.00",
+        "Qty before split should be 100"
+    );
 
-    let mut total_qty = dec!(0);
-    for tx in &txs {
-        let actions = get_applicable_actions(&conn, asset_id, tx.trade_date, as_of)?;
-        let adjusted_qty = adjust_quantity_for_actions(tx.quantity, &actions);
-        total_qty += adjusted_qty;
-    }
+    // Verify portfolio snapshot AFTER split but BEFORE bonus (2025-02-11): 200 shares
+    let mut cmd_after_split = base_cmd(&home);
+    cmd_after_split
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-02-11"); // After split
+    let out_after_split = cmd_after_split.output()?;
+    assert!(out_after_split.status.success());
+    let stdout_after_split = String::from_utf8_lossy(&out_after_split.stdout);
+    let row_after_split = stdout_after_split
+        .lines()
+        .find(|l| l.starts_with("│ TEST11"))
+        .expect("TEST11 row not found at 2025-02-11");
+    let cols_after_split: Vec<String> = row_after_split
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert_eq!(
+        cols_after_split[1], "200.00",
+        "Qty after split should be 200"
+    );
+    assert_eq!(
+        cols_after_split[2], "R$ 5,00",
+        "Avg cost after split should be R$5.00"
+    );
 
-    // Original 100 -> 200 after split, plus 20 bonus (no adjustment needed for bonus as it's after split)
-    assert_eq!(total_qty, dec!(220), "Final position should be 220 shares");
+    // Verify portfolio snapshot AFTER bonus (2025-03-16): 220 shares
+    let mut cmd_after_bonus = base_cmd(&home);
+    cmd_after_bonus
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-03-16"); // After bonus
+    let out_after_bonus = cmd_after_bonus.output()?;
+    assert!(out_after_bonus.status.success());
+    let stdout_after_bonus = String::from_utf8_lossy(&out_after_bonus.stdout);
+    let row_after_bonus = stdout_after_bonus
+        .lines()
+        .find(|l| l.starts_with("│ TEST11"))
+        .expect("TEST11 row not found at 2025-03-16");
+    let cols_after_bonus: Vec<String> = row_after_bonus
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert_eq!(
+        cols_after_bonus[1], "220.00",
+        "Qty after bonus should be 220"
+    );
 
     Ok(())
 }
 
 #[test]
-fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
+fn test_12_desdobro_absolute_adjustment() -> Result<()> {
     let home = TempDir::new()?;
 
     // Import file
@@ -752,11 +896,34 @@ fn test_12_desdobro_ratio_inference_auto_apply() -> Result<()> {
     let action_count: i64 = stmt.query_row([transactions[0].asset_id], |row| row.get(0))?;
     assert_eq!(action_count, 1, "Corporate action should be recorded");
 
+    // Verify portfolio shows adjusted quantity via CLI
+    let mut cmd = base_cmd(&home);
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show");
+    let out = cmd.output()?;
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("│ A1MD34"))
+        .expect("A1MD34 row not found");
+    let cols: Vec<String> = row
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // 80 shares with 1:8 split (desdobro adds 560) = 80 + 560 = 640
+    assert_eq!(
+        cols[1], "640.00",
+        "Qty adjusted for desdobro split (80 + 560)"
+    );
+
     Ok(())
 }
 
 #[test]
-fn test_14_atualizacao_ratio_inference_auto_apply() -> Result<()> {
+fn test_14_atualizacao_absolute_adjustment() -> Result<()> {
     let home = TempDir::new()?;
 
     // Import file
@@ -775,6 +942,28 @@ fn test_14_atualizacao_ratio_inference_auto_apply() -> Result<()> {
     let (quantity, cost_basis) = sql::query_position(&home, "BRCR11");
     assert_eq!(quantity, dec!(378));
     assert_eq!(cost_basis, dec!(3780));
+
+    // Verify portfolio shows consolidated position via CLI
+    let mut cmd = base_cmd(&home);
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("portfolio")
+        .arg("show");
+    let out = cmd.output()?;
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("│ BRCR11"))
+        .expect("BRCR11 row not found");
+    let cols: Vec<String> = row
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert_eq!(cols[1], "378.00", "Qty should be 378");
+    assert_eq!(cols[2], "R$ 10,00", "Avg cost should be R$10.00");
+    assert_eq!(cols[3], "R$ 3.780,00", "Total cost should be R$3780");
+
     Ok(())
 }
 
@@ -827,8 +1016,8 @@ fn test_04_stock_split() -> Result<()> {
     let db_path = get_db_path(&home);
     let conn = Connection::open(&db_path)?;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, quantity_adjustment, source)
+         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', '100', 'TEST')",
         [asset_id],
     )?;
 
@@ -923,8 +1112,8 @@ fn test_05_reverse_split() -> Result<()> {
     // Create reverse split (10:1 - 10 shares become 1)
     let asset_id = transactions[0].asset_id;
     conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-02-20', '2025-02-20', 10, 1, 'TEST')",
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, quantity_adjustment, source)
+         VALUES (?1, 'SPLIT', '2025-02-20', '2025-02-20', '-900', 'TEST')",
         [asset_id],
     )?;
 
@@ -995,116 +1184,249 @@ fn test_05_reverse_split() -> Result<()> {
 fn test_06_multiple_splits() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize DB and import only trade entries (no auto actions)
+    // Initialize DB and import only trade entries (no corporate actions)
     let db_path = get_db_path(&home);
     std::fs::create_dir_all(db_path.parent().unwrap())?;
     init_database(Some(db_path.clone()))?;
     let conn = Connection::open(&db_path)?;
     import_movimentacao(&conn, "tests/data/06_multiple_splits.xlsx")?;
 
+    // Verify initial trades were imported
     let transactions = sql::query_transactions(&home, "ITSA4");
     assert_eq!(transactions.len(), 3, "Should have 3 transactions");
 
-    let asset_id = transactions[0].asset_id;
+    // Verify database transactions are unadjusted
+    assert_eq!(transactions[0].quantity, dec!(50), "First buy: 50 shares");
+    assert_eq!(
+        transactions[0].price_per_unit,
+        dec!(10),
+        "First buy: R$10/share"
+    );
+    assert_eq!(
+        transactions[0].total_cost,
+        dec!(500),
+        "First buy: R$500 total"
+    );
 
-    // First split 1:2 on 2025-02-10
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 'TEST')",
-        [asset_id],
+    assert_eq!(transactions[1].quantity, dec!(25), "Second buy: 25 shares");
+    assert_eq!(
+        transactions[1].price_per_unit,
+        dec!(5.5),
+        "Second buy: R$5.50/share"
+    );
+    assert_eq!(
+        transactions[1].total_cost,
+        dec!(137.5),
+        "Second buy: R$137.50 total"
+    );
+
+    assert_eq!(transactions[2].quantity, dec!(200), "Sell: 200 shares");
+
+    // Import full file to get corporate actions
+    let import_result = run_import_json(&home, "tests/data/06_multiple_splits.xlsx");
+    assert!(assert_json_success(&import_result));
+
+    let data = get_json_data(&import_result);
+    // Should skip trades (already imported) but import corporate actions
+    assert_eq!(data["skipped_trades_old"].as_u64().unwrap(), 3);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 2);
+
+    // Verify corporate actions were created
+    let action_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM corporate_actions WHERE asset_id = ?",
+        [transactions[0].asset_id],
+        |row| row.get(0),
     )?;
+    assert_eq!(action_count, 2, "Should have 2 corporate actions (splits)");
 
-    // Second split 1:2 on 2025-04-15
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-04-15', '2025-04-15', 1, 2, 'TEST')",
-        [asset_id],
+    // Debug: print corporate action details
+    println!("\n=== Corporate Actions ===");
+    let mut stmt = conn.prepare(
+        "SELECT action_type, event_date, ex_date, quantity_adjustment 
+         FROM corporate_actions 
+         WHERE asset_id = ? 
+         ORDER BY ex_date",
     )?;
+    let actions = stmt.query_map([transactions[0].asset_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for action in actions {
+        let (action_type, event_date, ex_date, qty_adj) = action?;
+        println!(
+            "  {} on {} (ex: {}): quantity_adjustment = {}",
+            action_type, event_date, ex_date, qty_adj
+        );
+    }
 
-    // Verify both actions exist
-    let mut stmt =
-        conn.prepare("SELECT id FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?;
-    let action_count = stmt
-        .query_map([asset_id], |row| row.get::<_, i64>(0))?
-        .count();
-    assert_eq!(action_count, 2, "Should have 2 corporate actions");
-
-    // Re-fetch transactions - should be UNCHANGED in database
+    // Verify database transactions remain unchanged
     let db_txs = sql::query_transactions(&home, "ITSA4");
-    assert_eq!(db_txs[0].quantity, dec!(50), "Database quantity unchanged");
+    assert_eq!(
+        db_txs[0].quantity,
+        dec!(50),
+        "Database unchanged after import"
+    );
     assert_eq!(
         db_txs[0].price_per_unit,
         dec!(10),
         "Database price unchanged"
     );
-    assert_eq!(db_txs[1].quantity, dec!(25), "Database quantity unchanged");
-    assert_eq!(
-        db_txs[1].price_per_unit,
-        dec!(5.5),
-        "Database price unchanged"
+
+    // Verify portfolio at different dates to see where it breaks
+    // Timeline: 05/01 - first purchase, 10/02 - split, 01/03 - second purchase, 15/04 - second split, 20/05 - sale
+
+    // After first purchase (2025-01-06): 50 @ R$10
+    let mut cmd1 = base_cmd(&home);
+    cmd1.arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-01-06");
+    println!("\n=== Portfolio at 2025-01-06 (after first purchase) ===");
+    let output1 = cmd1.output().expect("Failed to run portfolio show");
+    println!("{}", String::from_utf8_lossy(&output1.stdout));
+
+    // After first split (2025-02-11): 100 @ R$5
+    let mut cmd2 = base_cmd(&home);
+    cmd2.arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-02-11");
+    println!("\n=== Portfolio at 2025-02-11 (after first split) ===");
+    let output2 = cmd2.output().expect("Failed to run portfolio show");
+    println!("{}", String::from_utf8_lossy(&output2.stdout));
+
+    // After second purchase (2025-03-02): 125 @ R$5.10 average
+    let mut cmd3 = base_cmd(&home);
+    cmd3.arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-03-02");
+    println!("\n=== Portfolio at 2025-03-02 (after second purchase) ===");
+    let output3 = cmd3.output().expect("Failed to run portfolio show");
+    println!("{}", String::from_utf8_lossy(&output3.stdout));
+
+    // After second split (2025-04-16): 250 @ R$2.55 average
+    let mut cmd4 = base_cmd(&home);
+    cmd4.arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-04-16");
+    println!("\n=== Portfolio at 2025-04-16 (after second split) ===");
+    let output4 = cmd4.output().expect("Failed to run portfolio show");
+    println!("{}", String::from_utf8_lossy(&output4.stdout));
+
+    // After sale (2025-05-21): 50 @ R$2.55 average
+    let mut cmd5 = base_cmd(&home);
+    cmd5.arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-05-21");
+    println!("\n=== Portfolio at 2025-05-21 (after sale) ===");
+    let output5 = cmd5.output().expect("Failed to run portfolio show");
+    println!("{}", String::from_utf8_lossy(&output5.stdout));
+
+    // Verify portfolio CLI output shows adjusted quantities as a strict row match
+    // Expected: 50@10 -> 100@5 (split) -> 125 total (buy 25@5.5) -> 250@2.55 (split) -> sell 200 -> 50@2.55
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+    let output = portfolio_cmd
+        .output()
+        .expect("Failed to run portfolio show");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Find the ITSA4 row and validate all columns
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("│ ITSA4"))
+        .expect("ITSA4 row not found in portfolio output");
+    // Split by the vertical bar and trim columns
+    let cols: Vec<String> = row
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        cols.len() >= 8,
+        "Unexpected table column count: {}",
+        cols.len()
     );
+    assert_eq!(cols[0], "ITSA4");
+    assert_eq!(cols[1], "50.00");
+    assert_eq!(cols[2], "R$ 2,55");
+    assert_eq!(cols[3], "R$ 127,50");
+    assert_eq!(cols[4], "N/A");
+    assert_eq!(cols[5], "N/A");
+    assert_eq!(cols[6], "N/A");
+    assert_eq!(cols[7], "N/A");
 
-    // Apply query-time adjustments to first transaction (both splits apply)
-    let actions_for_tx0 =
-        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[2].trade_date)?;
-    assert_eq!(
-        actions_for_tx0.len(),
-        2,
-        "First tx should have 2 applicable actions"
-    );
+    // Check performance for 2025 via interest binary JSON output
+    let perf_out = base_cmd(&home)
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("--json")
+        .arg("performance")
+        .arg("show")
+        .arg("2025")
+        .output()
+        .expect("failed to run performance show");
+    assert!(perf_out.status.success(), "performance show failed");
+    let perf_json: Value =
+        serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
+    let start_value = perf_json
+        .get("start_value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let end_value = perf_json
+        .get("end_value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_return = perf_json
+        .get("total_return")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    assert_eq!(start_value, "0");
+    assert_eq!(end_value, "127.5");
+    assert_eq!(total_return, "127.5");
 
-    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
-    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
-        db_txs[0].quantity,
-        db_txs[0].price_per_unit,
-        db_txs[0].total_cost,
-        &actions_for_tx0,
-    );
-
-    // First purchase: 50 @ R$10.00 -> 100 @ R$5.00 -> 200 @ R$2.50
-    assert_eq!(adjusted_qty_0, dec!(200), "Quantity after two 1:2 splits");
-    assert_eq!(adjusted_price_0, dec!(2.5), "Price after two splits");
-    assert_eq!(adjusted_cost_0, dec!(500), "Total cost unchanged");
-
-    // Apply query-time adjustments to second transaction (only second split applies)
-    let actions_for_tx1 =
-        get_applicable_actions(&conn, asset_id, db_txs[1].trade_date, db_txs[2].trade_date)?;
-    assert_eq!(
-        actions_for_tx1.len(),
-        1,
-        "Second tx should have 1 applicable action"
-    );
-
-    let adjusted_qty_1 = adjust_quantity_for_actions(db_txs[1].quantity, &actions_for_tx1);
-    let (adjusted_price_1, adjusted_cost_1) = adjust_price_and_cost_for_actions(
-        db_txs[1].quantity,
-        db_txs[1].price_per_unit,
-        db_txs[1].total_cost,
-        &actions_for_tx1,
-    );
-
-    // Second purchase: 25 @ R$5.50 -> 50 @ R$2.75 (only second split applies)
-    assert_eq!(adjusted_qty_1, dec!(50), "Quantity after one 1:2 split");
-    assert_eq!(adjusted_price_1, dec!(2.75), "Price after one split");
-    assert_eq!(adjusted_cost_1, dec!(137.5), "Total cost unchanged");
-
-    // Test cost basis with adjusted values
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0));
-    avg.add_purchase(&db_txs[1], Some(adjusted_qty_1), Some(adjusted_cost_1));
-
-    let sale_result = avg.match_sale(&db_txs[2], None)?;
-
-    let expected_avg = (adjusted_cost_0 + adjusted_cost_1) / (adjusted_qty_0 + adjusted_qty_1);
-    let expected_cost_basis = expected_avg * db_txs[2].quantity;
-
-    assert_eq!(sale_result.cost_basis, expected_cost_basis);
-    assert_eq!(
-        sale_result.profit_loss,
-        sale_result.sale_total - expected_cost_basis
-    );
-
-    assert_eq!(avg.remaining_quantity(), dec!(50));
+    // Check tax report for 2025 via interest binary JSON output
+    let sale_tx = db_txs[2].clone();
+    let sale_total = sale_tx.total_cost; // ABS(quantity * price_per_unit)
+    let expected_cost_basis = dec!(2.55) * dec!(200);
+    let expected_profit = sale_total - expected_cost_basis;
+    let tax_out = base_cmd(&home)
+        .arg("--json")
+        .arg("tax")
+        .arg("report")
+        .arg("2025")
+        .output()
+        .expect("failed to run tax report");
+    assert!(tax_out.status.success(), "tax report failed");
+    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
+    use std::str::FromStr as _;
+    let total_sales_str = tax_json
+        .get("annual_total_sales")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_profit_str = tax_json
+        .get("annual_total_profit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_loss_str = tax_json
+        .get("annual_total_loss")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_sales_dec =
+        rust_decimal::Decimal::from_str(total_sales_str).expect("sales decimal parse");
+    let total_profit_dec =
+        rust_decimal::Decimal::from_str(total_profit_str).expect("profit decimal parse");
+    let total_loss_dec =
+        rust_decimal::Decimal::from_str(total_loss_str).expect("loss decimal parse");
+    assert_eq!(total_sales_dec, sale_total);
+    assert_eq!(total_profit_dec, expected_profit);
+    assert_eq!(total_loss_dec, rust_decimal::Decimal::ZERO);
 
     Ok(())
 }
@@ -1113,92 +1435,136 @@ fn test_06_multiple_splits() -> Result<()> {
 fn test_08_complex_scenario() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize DB and import only trade entries (no auto actions)
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-    import_movimentacao(&conn, "tests/data/08_complex_scenario.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/08_complex_scenario.xlsx");
+    assert!(assert_json_success(&import_result));
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 7);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 1);
+    assert_eq!(data["imported_income"].as_u64().unwrap(), 0);
 
-    // Should have transactions for both BBAS3 and BBAS3T
     let base_txs = sql::query_transactions(&home, "BBAS3");
     let term_txs = sql::query_transactions(&home, "BBAS3T");
+    assert_eq!(base_txs.len(), 6, "BBAS3 should have 6 trades");
+    assert_eq!(
+        term_txs.len(),
+        1,
+        "BBAS3T should have the term contract buy"
+    );
 
-    assert_eq!(term_txs.len(), 1, "Should have 1 term contract purchase");
-    assert_eq!(base_txs.len(), 6, "Should have 6 base transactions");
-
-    // Create split (1:2) on 2025-02-15
-    let asset_id = base_txs[0].asset_id;
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-02-15', '2025-02-15', 1, 2, 'TEST')",
-        [asset_id],
+    let conn = open_db(Some(get_db_path(&home)))?;
+    let action_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM corporate_actions WHERE asset_id = ?1",
+        [base_txs[0].asset_id],
+        |row| row.get(0),
     )?;
+    assert_eq!(action_count, 1, "Should import 1 split action");
+    let qty_adj: Decimal = conn.query_row(
+        "SELECT quantity_adjustment FROM corporate_actions WHERE asset_id = ?1",
+        [base_txs[0].asset_id],
+        |row| sql::get_decimal(row, 0),
+    )?;
+    assert_eq!(qty_adj, dec!(300), "Split adds 300 shares");
 
-    // Process term liquidations
-    process_term_liquidations(&conn)?;
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-06-16");
+    let portfolio_out = portfolio_cmd.output().expect("portfolio show failed");
+    assert!(portfolio_out.status.success());
+    let stdout = String::from_utf8_lossy(&portfolio_out.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("│ BBAS3"))
+        .expect("BBAS3 row missing from portfolio output");
+    let cols: Vec<String> = row
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        cols.len() >= 8,
+        "Unexpected table column count: {}",
+        cols.len()
+    );
+    assert_eq!(cols[1], "250.00");
+    assert_eq!(cols[2], "R$ 22,07");
+    assert_eq!(cols[3], "R$ 5.519,23");
+    assert_eq!(cols[4], "N/A");
+    assert_eq!(cols[5], "N/A");
+    assert_eq!(cols[6], "N/A");
+    assert_eq!(cols[7], "N/A");
 
-    // Re-fetch transactions - base transactions unchanged in DB
-    let db_txs = sql::query_transactions(&home, "BBAS3");
-    assert_eq!(db_txs[0].quantity, dec!(200), "Database quantity unchanged");
+    let perf_out = base_cmd(&home)
+        .arg("--json")
+        .arg("performance")
+        .arg("show")
+        .arg("2025")
+        .output()
+        .expect("performance show failed");
+    assert!(perf_out.status.success());
+    let perf_json: Value =
+        serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
+    let end_value = perf_json
+        .get("end_value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_return = perf_json
+        .get("total_return")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    assert_eq!(end_value, "5519.23076923077");
+    assert_eq!(total_return, "5519.23076923077");
+
+    let tax_out = base_cmd(&home)
+        .arg("--json")
+        .arg("tax")
+        .arg("report")
+        .arg("2025")
+        .output()
+        .expect("tax report failed");
+    assert!(tax_out.status.success());
+    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
+    use std::str::FromStr as _;
+    let total_sales = Decimal::from_str(
+        tax_json
+            .get("annual_total_sales")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    let total_profit = Decimal::from_str(
+        tax_json
+            .get("annual_total_profit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    assert_eq!(total_sales, dec!(17000));
     assert_eq!(
-        db_txs[0].price_per_unit,
-        dec!(40),
-        "Database price unchanged"
+        total_profit,
+        Decimal::from_str("2069.2307692307692307692307691")?
     );
-    assert_eq!(db_txs[1].quantity, dec!(100), "Database quantity unchanged");
+
+    let monthly = tax_json
+        .get("monthly_summaries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(monthly.len(), 2);
+    let march_profit = Decimal::from_str(monthly[0]["profit"].as_str().unwrap())?;
+    let march_sales = Decimal::from_str(monthly[0]["sales"].as_str().unwrap())?;
+    let june_profit = Decimal::from_str(monthly[1]["profit"].as_str().unwrap())?;
+    let june_sales = Decimal::from_str(monthly[1]["sales"].as_str().unwrap())?;
     assert_eq!(
-        db_txs[1].price_per_unit,
-        dec!(42),
-        "Database price unchanged"
+        march_profit,
+        Decimal::from_str("500.0000000000000000000000001")?
     );
-
-    // Apply query-time adjustments to first two transactions
-    let actions_for_tx0 =
-        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[5].trade_date)?;
-    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
-    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
-        db_txs[0].quantity,
-        db_txs[0].price_per_unit,
-        db_txs[0].total_cost,
-        &actions_for_tx0,
+    assert_eq!(march_sales, dec!(6600));
+    assert_eq!(
+        june_profit,
+        Decimal::from_str("1569.230769230769230769230769")?
     );
-    assert_eq!(adjusted_qty_0, dec!(400), "200 -> 400 after 1:2 split");
-    assert_eq!(adjusted_price_0, dec!(20), "40 -> 20 after split");
-
-    let actions_for_tx1 =
-        get_applicable_actions(&conn, asset_id, db_txs[1].trade_date, db_txs[5].trade_date)?;
-    let adjusted_qty_1 = adjust_quantity_for_actions(db_txs[1].quantity, &actions_for_tx1);
-    let (adjusted_price_1, adjusted_cost_1) = adjust_price_and_cost_for_actions(
-        db_txs[1].quantity,
-        db_txs[1].price_per_unit,
-        db_txs[1].total_cost,
-        &actions_for_tx1,
-    );
-    assert_eq!(adjusted_qty_1, dec!(200), "100 -> 200 after 1:2 split");
-    assert_eq!(adjusted_price_1, dec!(21), "42 -> 21 after split");
-
-    // Calculate final position with adjusted values
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0)); // 400 @ 20
-    avg.add_purchase(&db_txs[1], Some(adjusted_qty_1), Some(adjusted_cost_1)); // 200 @ 21
-
-    let avg_before_sale1 = avg.average_cost();
-    let _sale1 = avg.match_sale(&db_txs[2], None)?; // Sells 300 @ 22
-    let tolerance = dec!(0.0000000001);
-    assert!((avg.average_cost() - avg_before_sale1).abs() <= tolerance);
-
-    avg.add_purchase(&db_txs[3], None, None); // 150 @ 23 (after split)
-    avg.add_purchase(&db_txs[4], None, None); // 200 @ 24 (term liquidation)
-
-    let avg_before_sale2 = avg.average_cost();
-    let sale2 = avg.match_sale(&db_txs[5], None)?; // 400 shares @ 26
-
-    assert_eq!(sale2.cost_basis, avg_before_sale2 * db_txs[5].quantity);
-    assert_eq!(sale2.sale_total, dec!(10400));
-    assert_eq!(sale2.profit_loss, sale2.sale_total - sale2.cost_basis);
-    assert!((avg.average_cost() - avg_before_sale2).abs() <= tolerance);
-    assert_eq!(avg.remaining_quantity(), dec!(250));
+    assert_eq!(june_sales, dec!(10400));
 
     Ok(())
 }
@@ -1217,90 +1583,117 @@ fn test_position_totals_match() -> Result<()> {
 
     Ok(())
 }
-// This will be inserted into integration_tests.rs
 #[test]
 fn test_07_capital_return() -> Result<()> {
     let home = TempDir::new()?;
 
     let import_result = run_import_json(&home, "tests/data/07_capital_return.xlsx");
     assert!(assert_json_success(&import_result));
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 3);
+    assert_eq!(data["imported_income"].as_u64().unwrap(), 1);
 
     let transactions = sql::query_transactions(&home, "MXRF11");
-    assert_eq!(transactions.len(), 3, "Should have 3 transactions");
-
-    // Verify initial state
+    assert_eq!(
+        transactions.len(),
+        3,
+        "Should have 3 transactions (2 buys, 1 sell)"
+    );
     assert_eq!(transactions[0].quantity, dec!(100));
     assert_eq!(transactions[0].price_per_unit, dec!(10));
     assert_eq!(transactions[0].total_cost, dec!(1000));
 
-    // Create capital return action: R$1.00/share = 100 cents
-    let asset_id = transactions[0].asset_id;
-    let db_path = get_db_path(&home);
-    let conn = Connection::open(&db_path)?;
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'CAPITAL_RETURN', '2025-02-15', '2025-02-15', 100, 0, 'TEST')",
-        [asset_id],
+    // Amortization recorded as income event (capital return)
+    let incomes = sql::query_income_events(&home, "MXRF11");
+    assert_eq!(incomes.len(), 1, "Should have 1 amortization event");
+    let amort = &incomes[0];
+    assert_eq!(amort.total_amount, dec!(100));
+    assert_eq!(amort.amount_per_quota, dec!(1));
+
+    // Portfolio CLI after sale date should reflect reduced cost basis and remaining 30 quotas
+    let output = base_cmd(&home)
+        .arg("portfolio")
+        .arg("show")
+        .arg("--at")
+        .arg("2025-04-20")
+        .output()?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("│ MXRF11"))
+        .expect("MXRF11 row not found in portfolio output");
+    let cols: Vec<String> = row
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        cols.len() >= 8,
+        "Unexpected table column count: {}",
+        cols.len()
+    );
+    assert_eq!(cols[0], "MXRF11");
+    assert_eq!(cols[1], "30.00");
+    assert_eq!(cols[2], "R$ 9,50");
+    assert_eq!(cols[3], "R$ 285,00");
+
+    // Performance JSON for 2025 should carry the reduced cost basis into end_value
+    let perf_out = base_cmd(&home)
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("--json")
+        .arg("performance")
+        .arg("show")
+        .arg("2025")
+        .output()
+        .expect("failed to run performance show");
+    assert!(perf_out.status.success(), "performance show failed");
+    let perf_json: Value =
+        serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
+    let end_value = perf_json
+        .get("end_value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_return = perf_json
+        .get("total_return")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    assert_eq!(end_value, "285");
+    assert_eq!(total_return, end_value);
+
+    // Tax JSON should use the amortization-adjusted average cost
+    let tax_out = base_cmd(&home)
+        .arg("--json")
+        .arg("tax")
+        .arg("report")
+        .arg("2025")
+        .output()
+        .expect("failed to run tax report");
+    assert!(tax_out.status.success(), "tax report failed");
+    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
+    use std::str::FromStr as _;
+    let total_sales = rust_decimal::Decimal::from_str(
+        tax_json
+            .get("annual_total_sales")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    let total_profit = rust_decimal::Decimal::from_str(
+        tax_json
+            .get("annual_total_profit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    let total_loss = rust_decimal::Decimal::from_str(
+        tax_json
+            .get("annual_total_loss")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
     )?;
 
-    // Re-fetch - transactions should be UNCHANGED in database
-    let db_txs = sql::query_transactions(&home, "MXRF11");
-    assert_eq!(db_txs[0].quantity, dec!(100), "Database quantity unchanged");
-    assert_eq!(db_txs[0].total_cost, dec!(1000), "Database cost unchanged");
-    assert_eq!(
-        db_txs[0].price_per_unit,
-        dec!(10),
-        "Database price unchanged"
-    );
-
-    // Apply query-time adjustment for capital return
-    let actions_for_tx0 =
-        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[2].trade_date)?;
-    assert_eq!(
-        actions_for_tx0.len(),
-        1,
-        "Should have 1 capital return action"
-    );
-
-    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
-    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
-        db_txs[0].quantity,
-        db_txs[0].price_per_unit,
-        db_txs[0].total_cost,
-        &actions_for_tx0,
-    );
-
-    // Capital return: R$1.00/share reduces cost from R$1000 to R$900
-    assert_eq!(
-        adjusted_qty_0,
-        dec!(100),
-        "Quantity unchanged by capital return"
-    );
-    assert_eq!(adjusted_cost_0, dec!(900), "Cost reduced by capital return");
-    assert_eq!(adjusted_price_0, dec!(9), "Price per unit recalculated");
-
-    // Second purchase (after capital return) needs no adjustment
-    assert_eq!(db_txs[1].quantity, dec!(50));
-    assert_eq!(db_txs[1].price_per_unit, dec!(10.5));
-
-    // Test cost basis with adjusted values
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0)); // 100 @ 9.00
-    avg.add_purchase(&db_txs[1], None, None); // 50 @ 10.50
-
-    let sale_result = avg.match_sale(&db_txs[2], None)?; // Sell 120
-
-    let expected_avg =
-        (adjusted_cost_0 + db_txs[1].total_cost) / (adjusted_qty_0 + db_txs[1].quantity);
-    let expected_cost_basis = expected_avg * db_txs[2].quantity;
-
-    assert_eq!(sale_result.cost_basis, expected_cost_basis);
-    assert_eq!(sale_result.sale_total, dec!(1320));
-    assert_eq!(
-        sale_result.profit_loss,
-        sale_result.sale_total - expected_cost_basis
-    );
-    assert_eq!(avg.remaining_quantity(), dec!(30));
+    assert_eq!(total_sales, dec!(1320));
+    assert_eq!(total_profit, dec!(180));
+    assert_eq!(total_loss, rust_decimal::Decimal::ZERO);
 
     Ok(())
 }
@@ -1434,6 +1827,180 @@ fn test_11_multi_asset_portfolio() -> Result<()> {
     Ok(())
 }
 
+/// Test that renamed ticker with post-rename split doesn't double-adjust carryover.
+/// This tests the fix for the SIMH3 bug where the carryover from JSLG3 was being
+/// split-adjusted both in apply_actions_to_carryover AND in the main loop.
+/// Regression test for: Carryover transaction getting split-adjusted twice.
+#[test]
+fn test_16_rename_with_post_rename_split() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Initialize database via the standard path (HOME/.interest/data.db)
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = Connection::open(&db_path)?;
+
+    // Create source asset (JSLG3)
+    let source_asset_id = upsert_asset(&conn, "JSLG3", &AssetType::Stock, None)?;
+
+    // JSLG3 transactions before rename
+    // Opening position from IRPF: 1700 shares @ R$10 on 2019-12-31
+    conn.execute(
+        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
+         VALUES (?1, 'BUY', '2019-12-31', '2019-12-31', '1700', '10', '17000', '0', 0, 'IRPF_PDF', datetime('now'))",
+        [source_asset_id],
+    )?;
+
+    // Sell 300 shares @ R$12 on 2020-08-01
+    conn.execute(
+        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
+         VALUES (?1, 'SELL', '2020-08-01', '2020-08-01', '300', '12', '3600', '0', 0, 'TEST', datetime('now'))",
+        [source_asset_id],
+    )?;
+
+    // Create target asset (SIMH3) - rename happens on 2020-09-21
+    let target_asset_id = upsert_asset(&conn, "SIMH3", &AssetType::Stock, None)?;
+
+    // SIMH3 transactions after rename
+    // Buy 2600 shares @ R$8 on 2021-08-01 (before split)
+    conn.execute(
+        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
+         VALUES (?1, 'BUY', '2021-08-01', '2021-08-01', '2600', '8', '20800', '0', 0, 'TEST', datetime('now'))",
+        [target_asset_id],
+    )?;
+
+    // Split on 2021-08-12: +3000 shares (4000 pre-split -> 7000 post-split)
+    conn.execute(
+        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, quantity_adjustment, source)
+         VALUES (?1, 'SPLIT', '2021-08-12', '2021-08-12', '3000', 'TEST')",
+        [target_asset_id],
+    )?;
+
+    // Buy 27500 shares @ R$7 on 2022-01-15 (after split)
+    conn.execute(
+        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
+         VALUES (?1, 'BUY', '2022-01-15', '2022-01-15', '27500', '7', '192500', '0', 0, 'TEST', datetime('now'))",
+        [target_asset_id],
+    )?;
+
+    // Verify database has correct raw transactions
+    let jslg3_txs = sql::query_transactions(&home, "JSLG3");
+    assert_eq!(jslg3_txs.len(), 2, "JSLG3 should have 2 transactions");
+    assert_eq!(jslg3_txs[0].quantity, dec!(1700));
+    assert_eq!(jslg3_txs[1].quantity, dec!(300));
+
+    let simh3_txs = sql::query_transactions(&home, "SIMH3");
+    assert_eq!(simh3_txs.len(), 2, "SIMH3 should have 2 transactions");
+
+    let simh3_actions: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM corporate_actions WHERE asset_id = ?",
+        [target_asset_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(simh3_actions, 1, "SIMH3 should have 1 corporate action");
+
+    // Helper to check portfolio at specific dates (like test_15)
+    let check_portfolio =
+        |date: &str, expected_qty: &str, expected_avg: &str, expected_cost: &str| -> Result<()> {
+            let mut cmd = base_cmd(&home);
+            cmd.env("INTEREST_SKIP_PRICE_FETCH", "1")
+                .arg("portfolio")
+                .arg("show")
+                .arg("--at")
+                .arg(date);
+            let out = cmd.output().expect("portfolio show failed");
+            assert!(out.status.success());
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let row = stdout
+                .lines()
+                .find(|l| l.starts_with("│ SIMH3"))
+                .unwrap_or_else(|| panic!("SIMH3 row missing at {}", date));
+            let cols: Vec<String> = row
+                .split('│')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            assert!(cols.len() >= 8, "Unexpected column count: {}", cols.len());
+            assert_eq!(cols[1], expected_qty, "Quantity mismatch at {}", date);
+            assert_eq!(cols[2], expected_avg, "Avg cost mismatch at {}", date);
+            assert_eq!(cols[3], expected_cost, "Total cost mismatch at {}", date);
+            Ok(())
+        };
+
+    // Timeline verification (following test_06 pattern with detailed checks)
+    // 1. After rename, before split (2021-08-11): 1400 carryover + 2600 buy = 4000 shares
+    //    Avg cost: (1400*10 + 2600*8) / 4000 = (14000 + 20800) / 4000 = 8.70
+    check_portfolio("2021-08-11", "4000.00", "R$ 8,70", "R$ 34.800,00")?;
+
+    // 2. After split (2021-08-13): 4000 -> 7000 shares (+ 3000 from split)
+    //    Avg cost: 34800 / 7000 = 4.97...
+    check_portfolio("2021-08-13", "7000.00", "R$ 4,97", "R$ 34.800,00")?;
+
+    // 3. Final position (2022-01-20): 7000 + 27500 = 34500 shares
+    //    THIS IS THE CRITICAL TEST - ensures carryover wasn't double-adjusted
+    //    Total cost: 34800 + 192500 = 227300
+    //    Avg cost: 227300 / 34500 = 6.59...
+    check_portfolio("2022-01-20", "34500.00", "R$ 6,58", "R$ 227.300,00")?;
+
+    // Verify portfolio CLI output shows correct final position (like test_06)
+    let mut portfolio_cmd = base_cmd(&home);
+    portfolio_cmd.arg("portfolio").arg("show");
+    let output = portfolio_cmd
+        .output()
+        .expect("Failed to run portfolio show");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("│ SIMH3"))
+        .expect("SIMH3 row not found in portfolio output");
+    let cols: Vec<String> = row
+        .split('│')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        cols.len() >= 8,
+        "Unexpected table column count: {}",
+        cols.len()
+    );
+    assert_eq!(cols[0], "SIMH3");
+    assert_eq!(
+        cols[1], "34500.00",
+        "Final quantity should be 34500 (NOT 37500 from double-adjustment bug)"
+    );
+    assert_eq!(cols[2], "R$ 6,58");
+    assert_eq!(cols[3], "R$ 227.300,00");
+
+    // Verify performance and tax outputs (like test_06)
+    let expected_total_cost = dec!(227300);
+
+    let perf_out = base_cmd(&home)
+        .env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("--json")
+        .arg("performance")
+        .arg("show")
+        .arg("2022")
+        .output()
+        .expect("failed to run performance show");
+    assert!(perf_out.status.success(), "performance show failed");
+    let perf_json: Value =
+        serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
+    let end_value = perf_json
+        .get("end_value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+
+    let end_value_dec = Decimal::from_str(end_value).expect("end_value decimal parse");
+    assert_eq!(
+        end_value_dec, expected_total_cost,
+        "Performance end value should match total cost basis"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_irpf_import_sets_cutoff_dates() -> Result<()> {
     let home = TempDir::new()?;
@@ -1510,186 +2077,159 @@ fn test_irpf_import_sets_cutoff_dates() -> Result<()> {
 fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize DB and import test data
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-    import_movimentacao(&conn, "tests/data/15_mixed_splits_and_bonus.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/15_mixed_splits_and_bonus.xlsx");
+    assert!(assert_json_success(&import_result));
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_trades"].as_u64().unwrap(), 4);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 3);
+    assert_eq!(data["imported_income"].as_u64().unwrap(), 0);
 
     let transactions = sql::query_transactions(&home, "KPCA3");
-    assert_eq!(
-        transactions.len(),
-        4,
-        "Should have 4 transactions (2 buys, 2 sells)"
-    );
+    assert_eq!(transactions.len(), 5, "2 buys + 1 bonus + 2 sells");
 
-    let asset_id = transactions[0].asset_id;
-
-    // Create corporate actions: split, reverse split
-    // Bonus creates synthetic transactions, doesn't adjust query-time for existing txs
-
-    // Action 1: Split 1:2 on 2025-02-10
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-02-10', '2025-02-10', 1, 2, 'TEST')",
-        [asset_id],
+    let conn = open_db(Some(get_db_path(&home)))?;
+    let mut stmt = conn.prepare(
+        "SELECT action_type, quantity_adjustment FROM corporate_actions WHERE asset_id = ?1 ORDER BY id",
     )?;
-
-    // Action 2: Reverse split 5:1 on 2025-03-15
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'SPLIT', '2025-03-15', '2025-03-15', 5, 1, 'TEST')",
-        [asset_id],
-    )?;
-
-    // Action 3: Bonus 1:2 on 2025-04-20
-    // NOTE: Bonus actions don't adjust quantities of existing txs at query-time
-    conn.execute(
-        "INSERT INTO corporate_actions (asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source)
-         VALUES (?1, 'BONUS', '2025-04-20', '2025-04-20', 1, 2, 'TEST')",
-        [asset_id],
-    )?;
-
-    // Verify actions exist
-    let mut stmt =
-        conn.prepare("SELECT id FROM corporate_actions WHERE asset_id = ?1 ORDER BY ex_date")?;
-    let action_count = stmt
-        .query_map([asset_id], |row| row.get::<_, i64>(0))?
-        .count();
-    assert_eq!(action_count, 3, "Should have 3 corporate actions");
-
-    // Re-fetch transactions - should be UNCHANGED in database
-    let db_txs = sql::query_transactions(&home, "KPCA3");
-
-    // First buy: 1000 @ R$2.00
-    assert_eq!(db_txs[0].quantity, dec!(1000), "First buy unchanged in DB");
+    let actions: Vec<(String, Decimal)> = stmt
+        .query_map([transactions[0].asset_id], |row| {
+            Ok((row.get(0)?, sql::get_decimal(row, 1)?))
+        })?
+        .collect::<Result<_, _>>()?;
     assert_eq!(
-        db_txs[0].price_per_unit,
-        dec!(2.00),
-        "First buy price unchanged"
-    );
-    assert_eq!(db_txs[0].total_cost, dec!(2000), "First buy cost unchanged");
-
-    // Second buy: 800 @ R$0.90
-    assert_eq!(db_txs[1].quantity, dec!(800), "Second buy unchanged in DB");
-    assert_eq!(
-        db_txs[1].price_per_unit,
-        dec!(0.90),
-        "Second buy price unchanged"
-    );
-    assert_eq!(db_txs[1].total_cost, dec!(720), "Second buy cost unchanged");
-
-    // First sell: 200 @ R$5.50
-    assert_eq!(db_txs[2].quantity, dec!(200), "First sell unchanged");
-
-    // Second sell: 400 @ R$3.00
-    assert_eq!(db_txs[3].quantity, dec!(400), "Second sell unchanged");
-
-    // Test query-time adjustments for each transaction
-    // Note: get_applicable_actions returns ALL actions in the date range
-    // But adjust_quantity_for_actions ignores bonus actions
-
-    // FIRST TRANSACTION: 1000 @ R$2.00
-    let actions_for_tx0 =
-        get_applicable_actions(&conn, asset_id, db_txs[0].trade_date, db_txs[3].trade_date)?;
-    assert_eq!(
-        actions_for_tx0.len(),
-        3,
-        "First tx: all 3 actions are 'applicable' (between dates)"
-    );
-    assert_eq!(actions_for_tx0[0].action_type, CorporateActionType::Split);
-    assert_eq!(actions_for_tx0[1].action_type, CorporateActionType::Split); // Reverse split
-    assert_eq!(actions_for_tx0[2].action_type, CorporateActionType::Bonus);
-
-    let adjusted_qty_0 = adjust_quantity_for_actions(db_txs[0].quantity, &actions_for_tx0);
-    let (adjusted_price_0, adjusted_cost_0) = adjust_price_and_cost_for_actions(
-        db_txs[0].quantity,
-        db_txs[0].price_per_unit,
-        db_txs[0].total_cost,
-        &actions_for_tx0,
-    );
-
-    // First buy adjustments (bonus is IGNORED in adjust_quantity_for_actions):
-    // 1000 @ R$2.00 = R$2000
-    // After 1:2 split: 2000 @ R$1.00 = R$2000
-    // After 5:1 reverse: 400 @ R$5.00 = R$2000
-    // Bonus is NOT applied to adjust functions
-    assert_eq!(
-        adjusted_qty_0,
-        dec!(400),
-        "First tx: 1000 -> 2000 -> 400 (bonus ignored)"
-    );
-    assert_eq!(
-        adjusted_price_0,
-        dec!(5.0),
-        "First tx: R$2.00 -> R$1.00 -> R$5.00 (bonus ignored)"
-    );
-    assert_eq!(adjusted_cost_0, dec!(2000), "Cost unchanged through splits");
-
-    // SECOND TRANSACTION: 800 @ R$0.90
-    let actions_for_tx1 =
-        get_applicable_actions(&conn, asset_id, db_txs[1].trade_date, db_txs[3].trade_date)?;
-    assert_eq!(
-        actions_for_tx1.len(),
+        actions.len(),
         2,
-        "Second tx: 2 actions (reverse split + bonus)"
+        "split + reverse split in corporate_actions"
     );
-    assert_eq!(actions_for_tx1[0].action_type, CorporateActionType::Split); // Reverse split
-    assert_eq!(actions_for_tx1[1].action_type, CorporateActionType::Bonus);
+    assert_eq!(actions[0].0, "SPLIT");
+    assert_eq!(actions[0].1, dec!(1000));
+    assert_eq!(actions[1].0, "REVERSE_SPLIT");
+    assert_eq!(actions[1].1, dec!(-2400));
 
-    let adjusted_qty_1 = adjust_quantity_for_actions(db_txs[1].quantity, &actions_for_tx1);
-    let (adjusted_price_1, adjusted_cost_1) = adjust_price_and_cost_for_actions(
-        db_txs[1].quantity,
-        db_txs[1].price_per_unit,
-        db_txs[1].total_cost,
-        &actions_for_tx1,
-    );
+    let bonus_tx = transactions
+        .iter()
+        .find(|t| t.price_per_unit.is_zero())
+        .expect("bonus transaction missing");
+    assert_eq!(bonus_tx.quantity, dec!(360));
 
-    // Second buy adjustments:
-    // 800 @ R$0.90 = R$720
-    // After 5:1 reverse: 160 @ R$4.50 = R$720
-    // Bonus is NOT applied
+    // Helper to check portfolio at specific date
+    let check_portfolio =
+        |date: &str, expected_qty: &str, expected_avg: &str, expected_cost: &str| -> Result<()> {
+            let mut cmd = base_cmd(&home);
+            cmd.arg("portfolio").arg("show").arg("--at").arg(date);
+            let out = cmd.output().expect("portfolio show failed");
+            assert!(out.status.success());
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let row = stdout
+                .lines()
+                .find(|l| l.starts_with("│ KPCA3"))
+                .expect("KPCA3 row missing");
+            let cols: Vec<String> = row
+                .split('│')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            assert!(cols.len() >= 8, "Unexpected column count: {}", cols.len());
+            assert_eq!(cols[1], expected_qty, "Quantity mismatch at {}", date);
+            assert_eq!(cols[2], expected_avg, "Avg cost mismatch at {}", date);
+            assert_eq!(cols[3], expected_cost, "Total cost mismatch at {}", date);
+            Ok(())
+        };
+
+    // After first buy (15/01/2025): 1000 @ 2
+    check_portfolio("2025-01-16", "1000.00", "R$ 2,00", "R$ 2.000,00")?;
+
+    // After split (10/02/2025): 2000 @ 1
+    check_portfolio("2025-02-11", "2000.00", "R$ 1,00", "R$ 2.000,00")?;
+
+    // After second buy (01/03/2025): 2800 @ 0.97142857...
+    check_portfolio("2025-03-02", "2800.00", "R$ 0,97", "R$ 2.720,00")?;
+
+    // After grupamento (15/03/2025): 400 @ 6.8
+    check_portfolio("2025-03-16", "400.00", "R$ 6,80", "R$ 2.720,00")?;
+
+    // After first sell (01/04/2025): 200 @ 6.8
+    check_portfolio("2025-04-02", "200.00", "R$ 6,80", "R$ 1.360,00")?;
+
+    // After bonus (20/04/2025): 560 @ 2.428571...
+    check_portfolio("2025-04-21", "560.00", "R$ 2,42", "R$ 1.360,00")?;
+
+    // After second sell (10/05/2025): 160 @ 2.428571...
+    check_portfolio("2025-05-11", "160.00", "R$ 2,42", "R$ 388,57")?;
+
+    let perf_out = base_cmd(&home)
+        .arg("--json")
+        .arg("performance")
+        .arg("show")
+        .arg("2025")
+        .output()
+        .expect("performance show failed");
+    assert!(perf_out.status.success());
+    let perf_json: Value =
+        serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
+    let end_value = perf_json
+        .get("end_value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let total_return = perf_json
+        .get("total_return")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    assert_eq!(end_value, "388.5714285714286");
+    assert_eq!(total_return, "388.5714285714286");
+
+    let tax_out = base_cmd(&home)
+        .arg("--json")
+        .arg("tax")
+        .arg("report")
+        .arg("2025")
+        .output()
+        .expect("tax report failed");
+    assert!(tax_out.status.success());
+    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
+    use std::str::FromStr as _;
+    let total_sales = Decimal::from_str(
+        tax_json
+            .get("annual_total_sales")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    let total_profit = Decimal::from_str(
+        tax_json
+            .get("annual_total_profit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    let total_loss = Decimal::from_str(
+        tax_json
+            .get("annual_total_loss")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0"),
+    )?;
+    assert_eq!(total_sales, dec!(2300));
     assert_eq!(
-        adjusted_qty_1,
-        dec!(160),
-        "Second tx: 800 -> 160 (bonus ignored)"
+        total_profit,
+        Decimal::from_str("228.5714285714285714285714286")?
     );
-    assert_eq!(adjusted_price_1, dec!(4.5), "Second tx: R$0.90 -> R$4.50");
-    assert_eq!(adjusted_cost_1, dec!(720), "Cost unchanged");
+    assert_eq!(total_loss, dec!(260));
 
-    // Cost basis calculation with adjusted purchases
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&db_txs[0], Some(adjusted_qty_0), Some(adjusted_cost_0)); // 400 @ 5.00
-    avg.add_purchase(&db_txs[1], Some(adjusted_qty_1), Some(adjusted_cost_1)); // 160 @ 4.50
-
-    let sale1_result = avg.match_sale(&db_txs[2], None)?; // Sell 200 @ 5.50
-
-    let expected_avg_before_sale1 =
-        (adjusted_cost_0 + adjusted_cost_1) / (adjusted_qty_0 + adjusted_qty_1);
-    let expected_cost_basis_1 = expected_avg_before_sale1 * dec!(200);
-
-    assert_eq!(sale1_result.cost_basis, expected_cost_basis_1);
-    assert_eq!(sale1_result.sale_total, dec!(1100)); // 200 @ 5.50
+    let monthly = tax_json
+        .get("monthly_summaries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(monthly.len(), 2);
+    let april_loss = Decimal::from_str(monthly[0]["loss"].as_str().unwrap())?;
+    let april_sales = Decimal::from_str(monthly[0]["sales"].as_str().unwrap())?;
+    let may_profit = Decimal::from_str(monthly[1]["profit"].as_str().unwrap())?;
+    let may_sales = Decimal::from_str(monthly[1]["sales"].as_str().unwrap())?;
+    assert_eq!(april_loss, dec!(260));
+    assert_eq!(april_sales, dec!(1100));
     assert_eq!(
-        sale1_result.profit_loss,
-        sale1_result.sale_total - expected_cost_basis_1
+        may_profit,
+        Decimal::from_str("228.5714285714285714285714286")?
     );
-
-    // Remaining after first sale: 400 + 160 - 200 = 360
-    assert_eq!(avg.remaining_quantity(), dec!(360));
-
-    // Note: The second sell tries to sell 400 shares but only 360 are available
-    // This demonstrates that the bonus transaction was NOT created/processed
-    // (if it had been, we'd have 360 + 360 = 720 shares)
-    // The AverageCostMatcher will error out on this, which is expected behavior
-    let sale2_result = avg.match_sale(&db_txs[3], None);
-
-    // This should fail because we're trying to sell more than we have
-    assert!(
-        sale2_result.is_err(),
-        "Should error when trying to sell 400 of 360 available"
-    );
+    assert_eq!(may_sales, dec!(1200));
 
     Ok(())
 }

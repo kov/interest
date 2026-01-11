@@ -185,6 +185,7 @@ impl FromStr for CorporateActionType {
 
 /// Corporate action (split, reverse split, bonus shares)
 /// Query-time adjustment: adjustments computed dynamically, not stored
+/// quantity_adjustment uses sign convention: positive = add shares, negative = subtract shares
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorporateAction {
     pub id: Option<i64>,
@@ -192,8 +193,7 @@ pub struct CorporateAction {
     pub action_type: CorporateActionType,
     pub event_date: NaiveDate,
     pub ex_date: NaiveDate,
-    pub ratio_from: i32, // e.g., 1 for 1:2 split (kept for backwards compat)
-    pub ratio_to: i32,   // e.g., 2 for 1:2 split (kept for backwards compat)
+    pub quantity_adjustment: Decimal, // Share quantity to add/subtract (positive = add, negative = subtract)
     pub source: String,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,

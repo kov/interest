@@ -128,6 +128,7 @@ src/
 ### Data Flow
 
 1. **User Input**:
+
    - TUI Mode (default): `cargo run` → `launch_tui()` → readline REPL → `parse_command()` → `dispatch_command()`
    - CLI Mode: `cargo run -- <cmd>` → clap parsing → `main()` → legacy handlers → calls same business logic
 
@@ -189,6 +190,7 @@ CREATE TABLE corporate_action_adjustments (
 **Why**: Prevents double-adjustment when reapplying actions. Safe to run `actions apply` multiple times.
 
 **Implementation pattern** in `corporate_actions/mod.rs`:
+
 1. Check if adjustment exists in junction table
 2. If not, apply adjustment and record it
 3. If yes, skip (already adjusted)
@@ -277,6 +279,7 @@ fn main() {
 ```
 
 **Benefits**:
+
 - Zero code duplication
 - Same validation/formatting logic for both modes
 - Easy to test (just test the command handlers)
@@ -313,6 +316,7 @@ pub fn invalidate_snapshots_after(conn: &Connection, earliest_changed_date: Naiv
 ```
 
 **Integration hooks**: Add invalidation calls after every transaction modification:
+
 - After import: `invalidate_snapshots_after(earliest_trade_date)`
 - After corporate action: `invalidate_snapshots_after(action.ex_date)`
 - After manual transaction add/edit: `invalidate_snapshots_after(transaction.trade_date)`
@@ -335,6 +339,7 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
 ```
 
 **Periods supported**:
+
 - MTD (Month-to-date)
 - QTD (Quarter-to-date)
 - YTD (Year-to-date)
@@ -387,6 +392,7 @@ let is_quota_pre_2026 = transaction.settlement_date
 **New pattern** (TUI + CLI dual mode):
 
 1. Add variant to `Command` enum in `src/commands.rs`:
+
 ```rust
 pub enum Command {
     // ... existing commands
@@ -395,6 +401,7 @@ pub enum Command {
 ```
 
 2. Add parsing logic in `parse_command()`:
+
 ```rust
 "mynewcommand" => {
     let arg1 = parts.next().ok_or(...)?.to_string();
@@ -404,6 +411,7 @@ pub enum Command {
 ```
 
 3. Add handler in `src/dispatcher.rs`:
+
 ```rust
 pub async fn dispatch_my_new_command(arg1: &str, arg2: bool, json_output: bool) -> Result<()> {
     // Business logic here
@@ -412,6 +420,7 @@ pub async fn dispatch_my_new_command(arg1: &str, arg2: bool, json_output: bool) 
 ```
 
 4. Wire up in `dispatch_command()`:
+
 ```rust
 Command::MyNewCommand { arg1, arg2 } => {
     dispatch_my_new_command(&arg1, arg2, json_output).await
@@ -423,6 +432,7 @@ Command::MyNewCommand { arg1, arg2 } => {
 6. (Optional) Add legacy clap command in `src/cli/mod.rs` for backwards compatibility
 
 **Old pattern** (pure CLI, deprecated):
+
 - Only add to `src/cli/mod.rs` via clap macros
 - Add handler in `main.rs`
 - Cannot be used from TUI
@@ -457,16 +467,16 @@ See `irpf_pdf.rs` for reference implementation with custom `IrpfPosition` type.
 
 **Key constraint**: `total_cost = quantity × price` must remain constant.
 
-Example reverse split adjustment (10:1):
+Splits are represented using absolute quantity adjustments (the B3 files already provide the final quantity delta). Apply the adjustment forward-only and recompute the average price to preserve total cost:
 
 ```rust
-// Before: 1000 @ R$50 = R$50,000
-let new_quantity = old_quantity * ratio_to / ratio_from;  // 1000 * 1 / 10 = 100
-let new_price = old_price * ratio_from / ratio_to;        // 50 * 10 / 1 = 500
-// After: 100 @ R$500 = R$50,000 ✓
+// Example: pre-split 50 @ R$5.00 (total R$250); B3 provides +50 quantity adjustment
+let new_quantity = old_quantity + quantity_adjustment; // 50 + 50 = 100
+let new_price = total_cost / new_quantity;             // R$250 / 100 = R$2.50
+// Total cost stays R$250 ✓
 ```
 
-Always record adjustment in junction table:
+Always record the adjustment in the junction table to keep idempotency:
 
 ```rust
 db::insert_corporate_action_adjustment(&conn, action_id, tx_id,
@@ -500,11 +510,118 @@ Located in `tests/`:
 
 Run: `cargo test --test generate_test_files -- --nocapture`
 
+### Integration Test Playbook (Binary-Driven)
+
+This project favors binary-driven integration tests that exercise the real CLI. Use the interest binary for validation and prefer JSON output for machine-robust assertions.
+
+Principles:
+
+- Use an isolated HOME directory (`TempDir`) so the binary writes to `.interest/data.db` under the test temp folder.
+- Keep imports deterministic: import trades via helper(s), import corporate actions via the binary or JSON helpers; do NOT mutate transactions for corporate actions—adjustments occur at query time.
+- Disable live price fetching for deterministic outputs by setting `INTEREST_SKIP_PRICE_FETCH=1` when calling the binary.
+- Prefer `--json` for programmatic checks; when parsing tables, match complete rows and columns (not substring contains).
+- Assert quantities, average cost, and total cost precisely using `rust_decimal::Decimal` comparisons rather than string equality to avoid scale differences.
+- Cross-validate portfolio, performance, and tax outputs so they agree on end-state values.
+
+Recommended Flow (modeled after `test_06_multiple_splits`):
+
+- Setup
+
+  - Create `TempDir` and initialize DB using the project helper (`init_database(Some(db_path))`).
+  - Import movements into the DB using `import_movimentacao(&conn, file)`; then import corporate actions (via binary or helper) and assert they exist; verify raw transactions remain unadjusted in DB.
+
+- Portfolio Assertions (CLI table)
+
+  - Call: `interest portfolio show --at YYYY-MM-DD` at key dates.
+  - Parse the table output: find the ticker row beginning with `│ <TICKER>`; split by `│`, trim, and assert all columns: Quantity, Avg Cost, Total Cost, Price, Value, P&L, Return %.
+  - For deterministic runs, set `INTEREST_SKIP_PRICE_FETCH=1` so Price/Value/P&L are `N/A` and cost-driven calculations are stable.
+
+- Performance Assertions (CLI JSON)
+
+  - Call: `interest --json performance show <PERIOD>` (e.g., `2025`).
+  - Parse JSON fields: `start_value`, `end_value`, `total_return`, `realized_gains`, `unrealized_gains`.
+  - For deterministic tests, set `INTEREST_SKIP_PRICE_FETCH=1` and expect values driven by cost snapshots; confirm period end value matches the final portfolio total for the scenario.
+
+- Tax Assertions (CLI JSON)
+
+  - Call: `interest --json tax report <YEAR>`.
+  - Parse JSON fields: `annual_total_sales`, `annual_total_profit`, `annual_total_loss`, `annual_total_tax`, and monthly summaries as needed.
+  - Compare numeric values using `rust_decimal::Decimal::from_str(...)` to avoid string-scale mismatches (e.g., `90.000` vs `90.00`). Validate that computed profit/loss aligns with average cost basis for sales.
+
+- Robustness Tips
+  - Always assert database transactions remain unchanged post-import (corporate actions are applied forward-only at query time).
+  - Validate column count and exact content for portfolio rows; avoid loose `contains()` checks.
+  - When comparing money/quantity, use `Decimal` equality; do not use `f64`.
+  - Prefer env-controlled determinism: `INTEREST_SKIP_PRICE_FETCH=1` for tests that do not require market prices.
+
+Example Skeleton:
+
+```rust
+#[test]
+fn my_integration_test() -> anyhow::Result<()> {
+        let home = tempfile::TempDir::new()?;
+
+        // Setup DB and import trades
+        let db_path = tests::helpers::get_db_path(&home);
+        std::fs::create_dir_all(db_path.parent().unwrap())?;
+        interest::db::init_database(Some(db_path.clone()))?;
+        let conn = rusqlite::Connection::open(&db_path)?;
+        tests::helpers::import_movimentacao(&conn, "tests/data/my_case.xlsx")?;
+
+        // Portfolio check (table)
+        let out = tests::helpers::base_cmd(&home)
+                .env("INTEREST_SKIP_PRICE_FETCH", "1")
+                .arg("portfolio").arg("show").arg("--at").arg("2025-05-21")
+                .output()?;
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let row = stdout.lines().find(|l| l.starts_with("│ TICKR"))
+                .expect("Ticker row not found");
+        let cols: Vec<_> = row.split('│').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        assert_eq!(cols[1], "50.00"); // Quantity
+        assert_eq!(cols[2], "R$ 2,55"); // Avg Cost
+
+        // Performance check (JSON)
+        let perf_out = tests::helpers::base_cmd(&home)
+                .env("INTEREST_SKIP_PRICE_FETCH", "1")
+                .arg("--json").arg("performance").arg("show").arg("2025")
+                .output()?;
+        assert!(perf_out.status.success());
+        let perf_json: serde_json::Value = serde_json::from_slice(&perf_out.stdout)?;
+        assert_eq!(perf_json["end_value"].as_str().unwrap(), "127.5");
+
+        // Tax check (JSON)
+        let tax_out = tests::helpers::base_cmd(&home)
+                .arg("--json").arg("tax").arg("report").arg("2025")
+                .output()?;
+        assert!(tax_out.status.success());
+        let tax_json: serde_json::Value = serde_json::from_slice(&tax_out.stdout)?;
+        use std::str::FromStr as _;
+        let total_sales = rust_decimal::Decimal::from_str(tax_json["annual_total_sales"].as_str().unwrap())?;
+        let total_profit = rust_decimal::Decimal::from_str(tax_json["annual_total_profit"].as_str().unwrap())?;
+        assert!(total_sales > rust_decimal::Decimal::ZERO);
+        assert!(total_profit >= rust_decimal::Decimal::ZERO);
+
+        Ok(())
+}
+```
+
+Following this playbook ensures your tests validate the true CLI behavior end-to-end and remain stable across formatting changes.
+
+### Corporate Actions: Split Handling (Brazil-specific)
+
+- Splits are modeled with fixed absolute quantity adjustments (`quantity_adjustment`), exactly as provided by B3 files. We do **not** use ratios or multipliers.
+- Example: a 1:2 split is stored as `quantity_adjustment = 50` when the pre-split position was 50 → post-split 100. The model applies the absolute adjustment forward-only from the ex-date.
+- Total cost is preserved: new quantity increases, average price decreases proportionally (cost unchanged).
+- Rationale: Brazilian tax flows use average-cost basis (not FIFO). Fixed absolute adjustments match what CEI/Movimentação exports provide and keep average-cost math correct for tax and portfolio.
+- Query-time application: database transactions stay unadjusted; forward-only adjustments are applied when calculating portfolio, performance, and tax, ensuring idempotency and no double-application.
+
 ## TUI Development Workflow
 
 The TUI is being built incrementally following the plan in `INCREMENTAL_TUI_PLAN.md`. Current status:
 
 **Phase 1-2 (COMPLETE)**: Foundation + Command Layer
+
 - ✅ Custom error types in `error.rs`
 - ✅ Validation extraction in `importers/validation.rs`
 - ✅ Command enum + parser in `commands.rs`
@@ -512,6 +629,7 @@ The TUI is being built incrementally following the plan in `INCREMENTAL_TUI_PLAN
 - ✅ CLI refactored to use new command layer
 
 **Phase 3 (IN PROGRESS)**: TUI Infrastructure
+
 - ✅ Basic readline REPL in `ui/mod.rs`
 - ✅ Readline wrapper with completion in `ui/readline.rs`
 - ✅ Crossterm rendering helpers in `ui/crossterm_engine.rs`
@@ -519,14 +637,17 @@ The TUI is being built incrementally following the plan in `INCREMENTAL_TUI_PLAN
 - 🚧 Event loop in `ui/event_loop.rs` (skeleton exists, needs overlay routing)
 
 **Phase 4 (PLANNED)**: Easy Commands → TUI
+
 - Portfolio show, tax report, performance show
 - All will reuse existing dispatcher handlers
 
 **Phase 5 (PLANNED)**: Import Workflow
+
 - Interactive file picker, streaming preview, validation overlays
 - Most complex command to port
 
 **Phase 6 (PLANNED)**: Performance Tracking Features
+
 - See `PERFORMANCE_TRACKING_PLAN.md` for details
 - Snapshot backfilling, live dashboard, B3 COTAHIST import
 
@@ -605,6 +726,7 @@ Current logic: Same `(asset_id, trade_date, transaction_type, quantity)` = dupli
 ### Junction Table Pattern
 
 `corporate_action_adjustments` tracks many-to-many relationship:
+
 - One action can adjust many transactions
 - One transaction can be adjusted by many actions (if multiple splits occurred)
 
@@ -650,6 +772,7 @@ Current support: IRPF 2019 (year 2018 data).
 **Decision**: Build interactive TUI as primary interface, keep CLI for scripting/automation.
 
 **Rationale**:
+
 - Better UX for everyday use (no need to remember exact command syntax)
 - Readline completion reduces typing
 - Future: overlays for file picking, validation, data entry
@@ -663,6 +786,7 @@ Current support: IRPF 2019 (year 2018 data).
 **Decision**: Replace clap with custom `parse_command()` in `commands.rs`.
 
 **Rationale**:
+
 - Clap designed for traditional CLI, doesn't work with readline input
 - Custom parser handles both `/import file.xlsx` (TUI) and `import file.xlsx` (CLI)
 - Simpler error handling (return `CommandParseError` instead of exiting)
@@ -676,6 +800,7 @@ Current support: IRPF 2019 (year 2018 data).
 **Decision**: Store portfolio snapshots with fingerprint invalidation (similar to IRPF caching).
 
 **Rationale**:
+
 - Recalculating full portfolio history for every performance query is slow
 - Snapshots enable fast date-range queries (MTD, YTD, etc.)
 - Fingerprint validation ensures snapshots stay accurate after data changes
@@ -689,6 +814,7 @@ Current support: IRPF 2019 (year 2018 data).
 **Decision**: Central `dispatcher.rs` module routes commands to handlers.
 
 **Rationale**:
+
 - Single source of truth for command execution
 - Both TUI and CLI call same `dispatch_command()` function
 - Easy to add logging/metrics/error handling in one place
@@ -700,6 +826,7 @@ Current support: IRPF 2019 (year 2018 data).
 **Decision**: Separate `reports/performance.rs` from `reports/portfolio.rs`.
 
 **Rationale**:
+
 - Portfolio = current positions + P&L (snapshot in time)
 - Performance = TWR calculation over date ranges (requires 2+ snapshots)
 - Different use cases, different inputs/outputs

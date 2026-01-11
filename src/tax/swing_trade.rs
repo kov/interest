@@ -225,40 +225,48 @@ pub fn calculate_monthly_tax(
         let mut swing_matcher = AverageCostMatcher::new();
         let mut day_trade_matcher = AverageCostMatcher::new();
 
+        // Capital return (amortization) events reduce cost basis without changing quantity
+        let amortizations =
+            crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(month_end))?;
+        let mut amort_idx: usize = 0;
+
+        // Forward-only corporate action adjustments: apply once at ex-date
+        // We only apply quantity adjustments to the swing matcher (persistent holdings)
+        let actions_up_to = crate::corporate_actions::get_actions_up_to(conn, asset_id, month_end)?;
+        let mut action_idx: usize = 0;
+
         for tx in transactions {
-            // Apply corporate action adjustments at query time
-            let actions = crate::corporate_actions::get_applicable_actions(
-                conn,
-                asset_id,
-                tx.trade_date,
-                month_end,
-            )?;
+            // Apply amortizations that occurred on or before this transaction date
+            while amort_idx < amortizations.len()
+                && amortizations[amort_idx].event_date <= tx.trade_date
+            {
+                swing_matcher.apply_amortization(amortizations[amort_idx].total_amount);
+                amort_idx += 1;
+            }
 
-            let adjusted_quantity =
-                crate::corporate_actions::adjust_quantity_for_actions(tx.quantity, &actions);
-
-            let (_adjusted_price, adjusted_cost) =
-                crate::corporate_actions::adjust_price_and_cost_for_actions(
-                    tx.quantity,
-                    tx.price_per_unit,
-                    tx.total_cost,
-                    &actions,
-                );
+            // Before processing this transaction, apply any corporate actions up to its date
+            while action_idx < actions_up_to.len()
+                && actions_up_to[action_idx].ex_date <= tx.trade_date
+            {
+                match actions_up_to[action_idx].action_type {
+                    crate::db::CorporateActionType::Split
+                    | crate::db::CorporateActionType::ReverseSplit => {
+                        swing_matcher.apply_quantity_adjustment(
+                            actions_up_to[action_idx].quantity_adjustment,
+                        );
+                    }
+                    // Bonus is auto-applied as a transaction on import; capital return handled elsewhere
+                    _ => {}
+                }
+                action_idx += 1;
+            }
 
             match tx.transaction_type {
                 TransactionType::Buy => {
                     if tx.is_day_trade {
-                        day_trade_matcher.add_purchase(
-                            &tx,
-                            Some(adjusted_quantity),
-                            Some(adjusted_cost),
-                        );
+                        day_trade_matcher.add_purchase(&tx, None, None);
                     } else {
-                        swing_matcher.add_purchase(
-                            &tx,
-                            Some(adjusted_quantity),
-                            Some(adjusted_cost),
-                        );
+                        swing_matcher.add_purchase(&tx, None, None);
                     }
                 }
                 TransactionType::Sell => {
@@ -271,9 +279,9 @@ pub fn calculate_monthly_tax(
                         );
 
                         let mut sale = if tx.is_day_trade {
-                            day_trade_matcher.match_sale(&tx, Some(adjusted_quantity))?
+                            day_trade_matcher.match_sale(&tx, None)?
                         } else {
-                            swing_matcher.match_sale(&tx, Some(adjusted_quantity))?
+                            swing_matcher.match_sale(&tx, None)?
                         };
                         sale.asset_type = asset.asset_type;
                         sales_by_category.entry(category).or_default().push(sale);
@@ -283,9 +291,9 @@ pub fn calculate_monthly_tax(
                     } else {
                         // Sale before target month, still need to process to maintain average cost
                         if tx.is_day_trade {
-                            let _ = day_trade_matcher.match_sale(&tx, Some(adjusted_quantity))?;
+                            let _ = day_trade_matcher.match_sale(&tx, None)?;
                         } else {
-                            let _ = swing_matcher.match_sale(&tx, Some(adjusted_quantity))?;
+                            let _ = swing_matcher.match_sale(&tx, None)?;
                         }
                     }
                 }
@@ -453,9 +461,20 @@ fn build_rename_carryover_transaction(
     let transactions = get_transactions_before(conn, source_id, effective_date)?;
     let mut matcher = AverageCostMatcher::new();
 
+    let amortizations =
+        crate::db::get_amortizations_for_asset(conn, source_id, None, Some(effective_date))?;
+    let mut amort_idx: usize = 0;
+
     for tx in transactions {
         if tx.is_day_trade {
             continue;
+        }
+
+        while amort_idx < amortizations.len()
+            && amortizations[amort_idx].event_date <= tx.trade_date
+        {
+            matcher.apply_amortization(amortizations[amort_idx].total_amount);
+            amort_idx += 1;
         }
 
         // Apply corporate action adjustments for rename carryover
@@ -485,6 +504,12 @@ fn build_rename_carryover_transaction(
                 let _ = matcher.match_sale(&tx, Some(adjusted_quantity))?;
             }
         }
+    }
+
+    // Apply any remaining amortizations up to the effective date
+    while amort_idx < amortizations.len() && amortizations[amort_idx].event_date <= effective_date {
+        matcher.apply_amortization(amortizations[amort_idx].total_amount);
+        amort_idx += 1;
     }
 
     let mut quantity = matcher.remaining_quantity();
@@ -533,10 +558,10 @@ fn apply_actions_to_carryover(
     asset_id: i64,
     effective_date: NaiveDate,
     quantity: &mut Decimal,
-    total_cost: &mut Decimal,
+    _total_cost: &mut Decimal,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT action_type, ratio_from, ratio_to, ex_date
+        "SELECT action_type, quantity_adjustment, ex_date
          FROM corporate_actions
          WHERE asset_id = ?1 AND ex_date >= ?2
          ORDER BY ex_date ASC",
@@ -546,28 +571,35 @@ fn apply_actions_to_carryover(
         .query_map(rusqlite::params![asset_id, effective_date], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-                row.get::<_, NaiveDate>(3)?,
+                {
+                    use rusqlite::types::ValueRef;
+                    match row.get_ref(1)? {
+                        ValueRef::Text(bytes) => {
+                            let s = std::str::from_utf8(bytes).unwrap_or("0");
+                            Decimal::from_str(s).unwrap_or(Decimal::ZERO)
+                        }
+                        ValueRef::Integer(i) => Decimal::from(i),
+                        ValueRef::Real(f) => Decimal::try_from(f).unwrap_or(Decimal::ZERO),
+                        _ => Decimal::ZERO,
+                    }
+                },
+                row.get::<_, NaiveDate>(2)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
+    for (action_type_str, qty_adj, _ex_date) in actions {
         let action_type = action_type_str
             .parse::<CorporateActionType>()
             .unwrap_or(CorporateActionType::Split);
-        let ratio_from = Decimal::from(ratio_from);
-        let ratio_to = Decimal::from(ratio_to);
 
         match action_type {
             CorporateActionType::CapitalReturn => {
-                let amount_per_share = ratio_from / Decimal::from(100);
-                let reduction = amount_per_share * *quantity;
-                *total_cost = (*total_cost - reduction).max(Decimal::ZERO);
+                // Capital return handling not defined in quantity-based model yet; ignore for now
             }
             _ => {
-                *quantity = *quantity * ratio_to / ratio_from;
+                *quantity += qty_adj;
+                // total_cost remains unchanged; average price adjusts automatically
             }
         }
     }

@@ -321,40 +321,6 @@ pub fn get_blocked_assets(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(result)
 }
 
-/// Get position quantity for an asset before a given date
-pub fn get_asset_position_before_date(
-    conn: &Connection,
-    asset_id: i64,
-    before_date: chrono::NaiveDate,
-) -> Result<Decimal> {
-    let mut stmt = conn.prepare(
-        "SELECT transaction_type, quantity
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let mut rows = stmt.query(params![asset_id, before_date])?;
-    let mut position = Decimal::ZERO;
-
-    while let Some(row) = rows.next()? {
-        let tx_type: String = row.get(0)?;
-        let quantity = get_decimal_value(row, 1).context("Failed to parse transaction quantity")?;
-        match tx_type.parse::<TransactionType>() {
-            Ok(TransactionType::Buy) => position += quantity,
-            Ok(TransactionType::Sell) => position -= quantity,
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "Unknown transaction type '{}' while computing position",
-                    tx_type
-                ));
-            }
-        }
-    }
-
-    Ok(position)
-}
-
 /// Get last imported date for a source and entry type
 pub fn get_last_import_date(
     conn: &Connection,
@@ -621,15 +587,14 @@ pub(crate) fn get_optional_decimal_value(
 pub fn insert_corporate_action(conn: &Connection, action: &CorporateAction) -> Result<i64> {
     conn.execute(
         "INSERT INTO corporate_actions (
-            asset_id, action_type, event_date, ex_date, ratio_from, ratio_to, source, notes
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            asset_id, action_type, event_date, ex_date, quantity_adjustment, source, notes
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             action.asset_id,
             action.action_type.as_str(),
             action.event_date,
             action.ex_date,
-            action.ratio_from,
-            action.ratio_to,
+            action.quantity_adjustment.to_string(),
             action.source,
             action.notes,
         ],
@@ -645,7 +610,7 @@ pub fn list_corporate_actions(
 ) -> Result<Vec<(CorporateAction, Asset)>> {
     let query = if ticker.is_some() {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
-                ca.ratio_from, ca.ratio_to, ca.source, ca.notes, ca.created_at,
+                ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
                 a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
@@ -653,7 +618,7 @@ pub fn list_corporate_actions(
          ORDER BY ca.ex_date DESC"
     } else {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
-                ca.ratio_from, ca.ratio_to, ca.source, ca.notes, ca.created_at,
+                ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
                 a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
@@ -673,22 +638,32 @@ pub fn list_corporate_actions(
                     .unwrap_or(CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                ratio_from: row.get(5)?,
-                ratio_to: row.get(6)?,
-                source: row.get(7)?,
-                notes: row.get(8)?,
-                created_at: row.get(9)?,
+                quantity_adjustment: {
+                    use rusqlite::types::ValueRef;
+                    match row.get_ref(5)? {
+                        ValueRef::Text(bytes) => {
+                            let s = std::str::from_utf8(bytes).unwrap_or("0");
+                            Decimal::from_str(s).unwrap_or(Decimal::ZERO)
+                        }
+                        ValueRef::Integer(i) => Decimal::from(i),
+                        ValueRef::Real(f) => Decimal::try_from(f).unwrap_or(Decimal::ZERO),
+                        _ => Decimal::ZERO,
+                    }
+                },
+                source: row.get(6)?,
+                notes: row.get(7)?,
+                created_at: row.get(8)?,
             },
             Asset {
-                id: Some(row.get(10)?),
-                ticker: row.get(11)?,
+                id: Some(row.get(9)?),
+                ticker: row.get(10)?,
                 asset_type: row
-                    .get::<_, String>(12)?
+                    .get::<_, String>(11)?
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Stock),
-                name: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
+                name: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             },
         ))
     };
@@ -822,6 +797,59 @@ pub fn get_income_events_with_assets(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(results)
+}
+
+/// Get amortization (capital return) events for a specific asset, ordered ASC by event_date.
+pub fn get_amortizations_for_asset(
+    conn: &Connection,
+    asset_id: i64,
+    from_date: Option<NaiveDate>,
+    to_date: Option<NaiveDate>,
+) -> Result<Vec<IncomeEvent>> {
+    let mut sql = String::from(
+        "SELECT id, asset_id, event_date, ex_date, event_type, amount_per_quota, total_amount, \
+                withholding_tax, is_quota_pre_2026, source, notes, created_at\n         FROM income_events\n         WHERE asset_id = ? AND event_type = 'AMORTIZATION'",
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(asset_id)];
+
+    if let Some(from) = from_date {
+        sql.push_str(" AND event_date >= ?");
+        params.push(Box::new(from));
+    }
+    if let Some(to) = to_date {
+        sql.push_str(" AND event_date <= ?");
+        params.push(Box::new(to));
+    }
+
+    sql.push_str(" ORDER BY event_date ASC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let events = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(IncomeEvent {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                event_date: row.get(2)?,
+                ex_date: row.get(3)?,
+                event_type: row
+                    .get::<_, String>(4)?
+                    .parse::<IncomeEventType>()
+                    .unwrap_or(IncomeEventType::Amortization),
+                amount_per_quota: get_decimal_value(row, 5)?,
+                total_amount: get_decimal_value(row, 6)?,
+                withholding_tax: get_decimal_value(row, 7)?,
+                is_quota_pre_2026: row.get(8)?,
+                source: row.get(9)?,
+                notes: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(events)
 }
 
 /// Get all assets (for batch price updates)

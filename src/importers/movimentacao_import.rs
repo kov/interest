@@ -135,7 +135,8 @@ pub fn import_movimentacao_entries(
             }
         };
 
-        if entry.movement_type == "Bonificação em Ativos" {
+        if entry.movement_type == "Bonificação em Ativos" || entry.movement_type == "Bonificação"
+        {
             use rust_decimal::RoundingStrategy;
 
             let qty = match entry.quantity {
@@ -197,7 +198,7 @@ pub fn import_movimentacao_entries(
             continue;
         }
 
-        if entry.movement_type == "Desdobro" {
+        if entry.movement_type == "Desdobro" || entry.movement_type == "Grupamento" {
             let qty = match entry.quantity {
                 Some(qty) if qty > Decimal::ZERO => qty,
                 _ => {
@@ -212,96 +213,66 @@ pub fn import_movimentacao_entries(
                 }
             }
 
-            if let Some((ratio_from, ratio_to)) =
-                infer_split_ratio_from_credit(conn, asset_id, entry, qty)?
-            {
-                let mut action = match entry.to_corporate_action(asset_id) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("Failed to convert entry to corporate action: {}", e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-                action.ratio_from = ratio_from;
-                action.ratio_to = ratio_to;
-                let note_suffix = format!("inferred ratio {}:{}", ratio_from, ratio_to);
-                action.notes = Some(match action.notes.take() {
-                    Some(existing) if !existing.is_empty() => {
-                        format!("{} | {}", existing, note_suffix)
-                    }
-                    _ => note_suffix,
-                });
+            let mut action = match entry.to_corporate_action(asset_id) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("Failed to convert entry to corporate action: {}", e);
+                    errors += 1;
+                    continue;
+                }
+            };
 
-                let action_id = match db::insert_corporate_action(conn, &action) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!("Error inserting corporate action: {}", e);
-                        errors += 1;
-                        continue;
-                    }
-                };
-                action.id = Some(action_id);
-                imported_actions += 1;
-                max_action_date = Some(match max_action_date {
-                    Some(current) if current >= action.event_date => current,
-                    _ => action.event_date,
-                });
+            // Store the absolute quantity adjustment from movimentacao
+            // Positive for stock splits (desdobro), negative for reverse splits (grupamento)
+            action.quantity_adjustment = match entry.movement_type.as_str() {
+                "Desdobro" => qty,    // Stock split: add shares
+                "Grupamento" => -qty, // Reverse split: subtract shares
+                _ => qty,
+            };
 
-                let asset = db::Asset {
-                    id: Some(asset_id),
-                    ticker: ticker.to_string(),
-                    asset_type,
-                    name: None,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                };
-                match corporate_actions::apply_corporate_action(conn, &action, &asset) {
-                    Ok(adjusted) => {
-                        if adjusted > 0 {
-                            auto_applied_actions += 1;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to auto-apply corporate action for {} on {}: {}",
-                            ticker, action.event_date, e
-                        );
-                        errors += 1;
+            let note_suffix = format!("quantity adjustment: {} shares", action.quantity_adjustment);
+            action.notes = Some(match action.notes.take() {
+                Some(existing) if !existing.is_empty() => {
+                    format!("{} | {}", existing, note_suffix)
+                }
+                _ => note_suffix,
+            });
+
+            let action_id = match db::insert_corporate_action(conn, &action) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!("Error inserting corporate action: {}", e);
+                    errors += 1;
+                    continue;
+                }
+            };
+            action.id = Some(action_id);
+            imported_actions += 1;
+            max_action_date = Some(match max_action_date {
+                Some(current) if current >= action.event_date => current,
+                _ => action.event_date,
+            });
+
+            let asset = db::Asset {
+                id: Some(asset_id),
+                ticker: ticker.to_string(),
+                asset_type,
+                name: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            match corporate_actions::apply_corporate_action(conn, &action, &asset) {
+                Ok(adjusted) => {
+                    if adjusted > 0 {
+                        auto_applied_actions += 1;
                     }
                 }
-            } else {
-                let bonus_tx = db::Transaction {
-                    id: None,
-                    asset_id,
-                    transaction_type: db::TransactionType::Buy,
-                    trade_date: entry.date,
-                    settlement_date: Some(entry.date),
-                    quantity: qty,
-                    price_per_unit: Decimal::ZERO,
-                    total_cost: Decimal::ZERO,
-                    fees: Decimal::ZERO,
-                    is_day_trade: false,
-                    quota_issuance_date: None,
-                    notes: Some(format!(
-                        "Desdobro credit from movimentacao: {}",
-                        entry.product
-                    )),
-                    source: "MOVIMENTACAO".to_string(),
-                    created_at: chrono::Utc::now(),
-                };
-                match db::insert_transaction(conn, &bonus_tx) {
-                    Ok(_) => {
-                        imported_actions += 1;
-                        max_action_date = Some(match max_action_date {
-                            Some(current) if current >= entry.date => current,
-                            _ => entry.date,
-                        });
-                    }
-                    Err(e) => {
-                        warn!("Error inserting Desdobro transaction: {}", e);
-                        errors += 1;
-                    }
+                Err(e) => {
+                    warn!(
+                        "Failed to auto-apply corporate action for {} on {}: {}",
+                        ticker, action.event_date, e
+                    );
+                    errors += 1;
                 }
             }
             continue;
@@ -407,7 +378,7 @@ pub fn import_movimentacao_entries(
             _ => action.event_date,
         });
 
-        if action.ratio_from != action.ratio_to {
+        if action.quantity_adjustment != Decimal::ZERO {
             let asset = db::Asset {
                 id: Some(asset_id),
                 ticker: ticker.to_string(),
@@ -694,68 +665,6 @@ fn normalized_product_description(product: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_uppercase()
-}
-
-fn infer_split_ratio_from_credit(
-    conn: &Connection,
-    asset_id: i64,
-    entry: &MovimentacaoEntry,
-    credit_qty: Decimal,
-) -> Result<Option<(i32, i32)>> {
-    use rust_decimal::prelude::ToPrimitive;
-
-    if entry.movement_type != "Desdobro" {
-        return Ok(None);
-    }
-
-    let old_qty = db::get_asset_position_before_date(conn, asset_id, entry.date)?;
-    if old_qty <= Decimal::ZERO {
-        warn!(
-            "Cannot infer split ratio for {} on {}: position before date is {}",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            old_qty
-        );
-        return Ok(None);
-    }
-
-    let ratio_from_increment = (old_qty + credit_qty) / old_qty;
-    let ratio_from_total = credit_qty / old_qty;
-
-    let ratio_increment_i32 = ratio_from_increment.to_i32().and_then(|r| {
-        if r > 1 && Decimal::from(r) == ratio_from_increment {
-            Some(r)
-        } else {
-            None
-        }
-    });
-
-    let ratio_total_i32 = ratio_from_total.to_i32().and_then(|r| {
-        if r > 1 && Decimal::from(r) == ratio_from_total {
-            Some(r)
-        } else {
-            None
-        }
-    });
-
-    let selected_ratio = match (ratio_increment_i32, ratio_total_i32) {
-        (Some(increment), _) => Some(increment),
-        (None, Some(total)) => Some(total),
-        _ => None,
-    };
-
-    if selected_ratio.is_none() {
-        warn!(
-            "Cannot infer split ratio for {} on {}: computed ratios {} and {}",
-            entry.ticker.as_deref().unwrap_or("?"),
-            entry.date,
-            ratio_from_increment,
-            ratio_from_total
-        );
-        return Ok(None);
-    }
-
-    Ok(Some((1, selected_ratio.unwrap())))
 }
 
 #[cfg(test)]

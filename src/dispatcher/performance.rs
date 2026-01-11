@@ -64,6 +64,13 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     }
 
     let period = parse_period_string(period_str)?;
+    // Determine period boundaries (used for price range limiting)
+    let (_period_start, period_end) =
+        crate::reports::performance::get_period_dates(period.clone(), Some(&conn))?;
+    // Allow disabling live price fetching via env var (mirrors portfolio command)
+    let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
+        .map(|v| v != "0")
+        .unwrap_or(false);
 
     // Ensure prices are available for the required date range
     // Filter out blocked assets
@@ -72,9 +79,10 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
         // Get the date range for prices
         let earliest = db::get_earliest_transaction_date(&conn)?;
         if let Some(earliest_date) = earliest {
-            let today = chrono::Local::now().date_naive();
+            // Limit price resolution to the end of the requested period
+            let today = period_end;
 
-            if !json_output {
+            if !json_output && !skip_price_fetch {
                 let total = assets.len();
                 let spinner = Spinner::new();
                 let mut completed = 0usize;
@@ -131,7 +139,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                     // Continue anyway - performance calculation will use available prices
                     Ok::<(), anyhow::Error>(())
                 })?;
-            } else {
+            } else if !skip_price_fetch {
                 // JSON mode: no spinner, just fetch silently
                 crate::pricing::resolver::ensure_prices_available(
                     &mut conn,

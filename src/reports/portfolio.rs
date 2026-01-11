@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
+use crate::db::{Asset, AssetType, Transaction, TransactionType};
 
 /// Summary of a single position
 #[derive(Debug, Clone)]
@@ -84,6 +84,17 @@ impl AvgCostPosition {
         self.total_cost -= cost_basis;
 
         Ok(cost_basis)
+    }
+
+    fn apply_amortization(&mut self, amount: Decimal) {
+        if amount <= Decimal::ZERO {
+            return;
+        }
+
+        self.total_cost -= amount;
+        if self.total_cost < Decimal::ZERO {
+            self.total_cost = Decimal::ZERO;
+        }
     }
 
     fn average_cost(&self) -> Decimal {
@@ -180,36 +191,53 @@ fn calculate_portfolio_with_cutoff(
         // Calculate average-cost position
         let mut position = AvgCostPosition::new(asset_id);
 
+        // Apply fixed split adjustments forward-only, at the time they occur
+        let as_of = as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+        let amortizations =
+            crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(as_of))?;
+        let mut amort_idx = 0usize;
+        let actions = crate::corporate_actions::get_actions_up_to(conn, asset_id, as_of)?;
+
+        let mut action_idx = 0usize;
         for tx in transactions {
-            // Apply corporate action adjustments at query time
-            let as_of = as_of_date.unwrap_or_else(|| chrono::Local::now().date_naive());
-            let actions = crate::corporate_actions::get_applicable_actions(
-                conn,
-                asset_id,
+            while amort_idx < amortizations.len()
+                && amortizations[amort_idx].event_date <= tx.trade_date
+            {
+                position.apply_amortization(amortizations[amort_idx].total_amount);
+                amort_idx += 1;
+            }
+
+            // Apply any corporate actions effective up to this transaction's date
+            crate::corporate_actions::apply_forward_qty_adjustments(
+                &mut position.quantity,
+                &actions,
+                &mut action_idx,
                 tx.trade_date,
-                as_of,
-            )?;
+            );
 
-            let adjusted_quantity =
-                crate::corporate_actions::adjust_quantity_for_actions(tx.quantity, &actions);
-
-            let (_adjusted_price, adjusted_cost) =
-                crate::corporate_actions::adjust_price_and_cost_for_actions(
-                    tx.quantity,
-                    tx.price_per_unit,
-                    tx.total_cost,
-                    &actions,
-                );
-
+            // Build raw position for this transaction
             match tx.transaction_type {
                 TransactionType::Buy => {
-                    position.add_buy(adjusted_quantity, adjusted_cost);
+                    position.add_buy(tx.quantity, tx.total_cost);
                 }
                 TransactionType::Sell => {
-                    position.remove_sell(adjusted_quantity, &asset.ticker)?;
+                    position.remove_sell(tx.quantity, &asset.ticker)?;
                 }
             }
         }
+
+        while amort_idx < amortizations.len() && amortizations[amort_idx].event_date <= as_of {
+            position.apply_amortization(amortizations[amort_idx].total_amount);
+            amort_idx += 1;
+        }
+
+        // Apply any remaining actions after the last transaction but before as_of
+        crate::corporate_actions::apply_forward_qty_adjustments(
+            &mut position.quantity,
+            &actions,
+            &mut action_idx,
+            as_of,
+        );
 
         // Skip assets with zero quantity
         if position.quantity <= Decimal::ZERO {
@@ -396,25 +424,40 @@ fn build_rename_carryover_transaction(
         return Ok(None);
     }
 
-    let mut quantity = position.quantity;
-    let mut total_cost = position.total_cost;
-    apply_actions_to_carryover(
-        conn,
-        target_asset_id,
-        effective_date,
-        &mut quantity,
-        &mut total_cost,
-    )?;
-    if quantity <= Decimal::ZERO {
-        return Ok(None);
-    }
+    let quantity = position.quantity;
+    let total_cost = position.total_cost;
+    // NOTE: Do NOT apply corporate actions here - they will be applied naturally
+    // in the main transaction loop via apply_forward_qty_adjustments based on
+    // the carryover transaction's trade_date
 
     if let Some(target_qty) =
         crate::db::rename_quantity_override(target_ticker, &source_asset.ticker)
     {
         if target_qty > Decimal::ZERO && quantity > Decimal::ZERO && target_qty != quantity {
             // FIXME: consider amortized cash when quantity changes via rename.
-            quantity = target_qty;
+            return Ok(Some(Transaction {
+                id: None,
+                asset_id: target_asset_id,
+                transaction_type: TransactionType::Buy,
+                trade_date: effective_date,
+                settlement_date: Some(effective_date),
+                quantity: target_qty,
+                price_per_unit: if target_qty > Decimal::ZERO {
+                    total_cost / target_qty
+                } else {
+                    Decimal::ZERO
+                },
+                total_cost,
+                fees: Decimal::ZERO,
+                is_day_trade: false,
+                quota_issuance_date: None,
+                notes: Some(format!(
+                    "Rename from {} (quantity override)",
+                    source_asset.ticker
+                )),
+                source: "RENAME".to_string(),
+                created_at: chrono::Utc::now(),
+            }));
         }
     }
 
@@ -442,52 +485,10 @@ fn build_rename_carryover_transaction(
     }))
 }
 
-fn apply_actions_to_carryover(
-    conn: &Connection,
-    asset_id: i64,
-    effective_date: NaiveDate,
-    quantity: &mut Decimal,
-    total_cost: &mut Decimal,
-) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT action_type, ratio_from, ratio_to, ex_date
-         FROM corporate_actions
-         WHERE asset_id = ?1 AND ex_date >= ?2
-         ORDER BY ex_date ASC",
-    )?;
-
-    let actions = stmt
-        .query_map(rusqlite::params![asset_id, effective_date], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-                row.get::<_, NaiveDate>(3)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (action_type_str, ratio_from, ratio_to, _ex_date) in actions {
-        let action_type = action_type_str
-            .parse::<CorporateActionType>()
-            .unwrap_or(CorporateActionType::Split);
-        let ratio_from = Decimal::from(ratio_from);
-        let ratio_to = Decimal::from(ratio_to);
-
-        match action_type {
-            CorporateActionType::CapitalReturn => {
-                let amount_per_share = ratio_from / Decimal::from(100);
-                let reduction = amount_per_share * *quantity;
-                *total_cost = (*total_cost - reduction).max(Decimal::ZERO);
-            }
-            _ => {
-                *quantity = *quantity * ratio_to / ratio_from;
-            }
-        }
-    }
-
-    Ok(())
-}
+// NOTE: apply_actions_to_carryover removed - carryover transaction is created at
+// the rename effective_date, and corporate actions are applied naturally by
+// the main transaction loop's apply_forward_qty_adjustments based on chronological
+// trade_date ordering. Applying actions here caused double-adjustment bugs.
 
 /// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)
 fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
@@ -570,7 +571,7 @@ pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) ->
 
     // Hash corporate actions that apply up to this date
     let mut ca_stmt = conn.prepare(
-        "SELECT id, asset_id, action_type, ex_date, ratio_from, ratio_to
+        "SELECT id, asset_id, action_type, ex_date, quantity_adjustment
          FROM corporate_actions
          WHERE ex_date <= ?1
          ORDER BY ex_date ASC, id ASC",
@@ -583,12 +584,11 @@ pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) ->
         let asset_id: i64 = row.get(1)?;
         let action_type: String = row.get(2)?;
         let ex_date: NaiveDate = row.get(3)?;
-        let ratio_from: i32 = row.get(4)?;
-        let ratio_to: i32 = row.get(5)?;
+        let quantity_adjustment = crate::db::get_decimal_value(row, 4)?;
 
         let line = format!(
-            "CA|{}|{}|{}|{}|{}|{}\n",
-            id, asset_id, action_type, ex_date, ratio_from, ratio_to
+            "CA|{}|{}|{}|{}|{}\n",
+            id, asset_id, action_type, ex_date, quantity_adjustment
         );
         hasher.update(line.as_bytes());
     }

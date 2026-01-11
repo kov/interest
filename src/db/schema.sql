@@ -41,15 +41,15 @@ CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(transaction_typ
 -- Corporate actions (splits, reverse splits, bonuses)
 -- Query-time adjustment: actions are NOT applied to transactions
 -- Adjustments are computed dynamically when calculating positions
+-- quantity_adjustment sign convention: positive = add shares, negative = subtract shares
 CREATE TABLE IF NOT EXISTS corporate_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     asset_id INTEGER NOT NULL,
     action_type TEXT NOT NULL,      -- 'SPLIT', 'REVERSE_SPLIT', 'BONUS', 'CAPITAL_RETURN'
     event_date DATE NOT NULL,        -- Announcement date
     ex_date DATE NOT NULL,           -- Date adjustment takes effect
-    ratio_from INTEGER NOT NULL,     -- e.g., 1 for 1:2 split (kept for backwards compat)
-    ratio_to INTEGER NOT NULL,       -- e.g., 2 for 1:2 split (kept for backwards compat)
-    source TEXT,                     -- 'BRAPI', 'MANUAL', 'B3'
+    quantity_adjustment TEXT NOT NULL, -- Share quantity to add/subtract (stored as Decimal text, sign convention: + = add, - = subtract)
+    source TEXT,                     -- 'BRAPI', 'MANUAL', 'B3', 'MOVIMENTACAO'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (asset_id) REFERENCES assets(id)

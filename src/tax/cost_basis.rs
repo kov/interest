@@ -45,6 +45,14 @@ impl AverageCostMatcher {
         }
     }
 
+    /// Apply a quantity-only adjustment (e.g., split/reverse-split, bonus)
+    /// This changes the total quantity while leaving total cost unchanged.
+    /// Positive values increase quantity (lowering average price),
+    /// negative values decrease quantity (raising average price).
+    pub fn apply_quantity_adjustment(&mut self, adjustment: Decimal) {
+        self.total_quantity += adjustment;
+    }
+
     /// Add a purchase transaction with optional adjusted values
     /// If adjusted_quantity and adjusted_cost are None, uses tx values
     pub fn add_purchase(
@@ -62,6 +70,19 @@ impl AverageCostMatcher {
 
         self.total_quantity += quantity;
         self.total_cost += cost;
+    }
+
+    /// Apply an amortization (capital return) to the running position.
+    /// Quantity stays the same; total_cost is reduced by the returned capital.
+    pub fn apply_amortization(&mut self, amount: Decimal) {
+        if amount <= Decimal::ZERO {
+            return;
+        }
+
+        self.total_cost -= amount;
+        if self.total_cost < Decimal::ZERO {
+            self.total_cost = Decimal::ZERO;
+        }
     }
 
     /// Match a sale using average cost up to that point, with optional adjusted quantity

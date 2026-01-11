@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use headless_chrome::{Browser, LaunchOptions};
+use rust_decimal::Decimal;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -177,30 +178,33 @@ impl InvestingScraper {
                 .and_then(|r| r.as_f64())
                 .context("Missing or invalid ratio field")?;
 
-            // Determine split type based on ratio value
-            let (action_type, ratio_from, ratio_to) = if ratio_value >= 1.0 {
+            // Determine split type and quantity adjustment based on ratio value
+            let (action_type, quantity_adjustment_value) = if ratio_value >= 1.0 {
                 // Forward split (desdobramento): 1 share becomes 'ratio' shares
-                // e.g., ratio 8.0 = 1:8 split (price ÷8, shares ×8)
-                // e.g., ratio 1.05 = 1:1.05 split (price ÷1.05, shares ×1.05)
-                let ratio_int = ratio_value.round() as i32;
-                (CorporateActionType::Split, 1, ratio_int)
+                // e.g., ratio 8.0 = 1:8 split (add 7 shares per original share, or 8X adjustment)
+                // quantity_adjustment will be per-share, but we store as-is and apply at query time
+                // For a 1:8 split of 100 shares: add 700 shares (100 * 8 - 100)
+                // But we don't know the pre-split quantity here, so we'll use 0 as placeholder
+                // This should be recalculated during import with actual position data
+                (CorporateActionType::Split, ratio_value - 1.0)
             } else {
                 // Reverse split (grupamento): 'ratio' shares become 1
-                // e.g., ratio 0.125 = 1:8 reverse split → 8:1 (price ×8, shares ÷8)
-                // e.g., ratio 0.1 = 1:10 reverse split → 10:1 (price ×10, shares ÷10)
-                let inverse = (1.0 / ratio_value).round() as i32;
-                (CorporateActionType::ReverseSplit, inverse, 1)
+                // e.g., ratio 0.125 = 1:8 reverse split → lose 7/8 of shares
+                // For 100 shares at 0.125 ratio: remove 87.5 shares (100 - 100*0.125)
+                (CorporateActionType::ReverseSplit, ratio_value - 1.0)
             };
 
-            // Create corporate action (without asset_id, will be set by caller)
+            // Create corporate action
+            // Note: For web scraping, quantity_adjustment is approximate (per original share)
+            // Will need recalculation during import with actual position data
             let action = CorporateAction {
                 id: None,
                 asset_id: 0, // Placeholder, will be set by caller
-                action_type: action_type.clone(),
+                action_type,
                 event_date: date,
                 ex_date: date, // investing.com doesn't distinguish, use same date
-                ratio_from,
-                ratio_to,
+                quantity_adjustment: Decimal::from_f64_retain(quantity_adjustment_value)
+                    .unwrap_or(Decimal::ZERO),
                 source: "INVESTING.COM".to_string(),
                 notes: Some(format!(
                     "Scraped from investing.com (ratio: {})",
@@ -209,12 +213,11 @@ impl InvestingScraper {
                 created_at: chrono::Utc::now(),
             };
 
-            actions.push(action);
+            actions.push(action.clone());
             info!(
-                "Found split: {} {}:{} on {}",
-                action_type.as_str(),
-                ratio_from,
-                ratio_to,
+                "Found split: {} (ratio: {}) on {}",
+                action.action_type.as_str(),
+                ratio_value,
                 date
             );
         }
