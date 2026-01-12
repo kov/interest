@@ -283,6 +283,7 @@ pub fn extract_cash_flows(
          FROM transactions
          WHERE trade_date >= ?1 AND trade_date <= ?2
            AND transaction_type IN ('BUY', 'SELL')
+           AND (notes IS NULL OR notes NOT LIKE '%Term contract liquidation%')
          ORDER BY trade_date",
     )?;
 
@@ -560,5 +561,64 @@ mod tests {
         assert_eq!(report.end_value, Decimal::from(150));
         assert!(report.total_return > Decimal::ZERO);
         assert!(report.unrealized_gains >= Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_extract_cash_flows_ignores_term_liquidation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../db/schema.sql"))
+            .unwrap();
+
+        let asset_id = crate::db::upsert_asset(&conn, "TESTX", &AssetType::Stock, None).unwrap();
+
+        // Regular buy
+        let buy_tx = crate::db::Transaction {
+            id: None,
+            asset_id,
+            transaction_type: crate::db::TransactionType::Buy,
+            trade_date: NaiveDate::from_ymd_opt(2023, 5, 2).unwrap(),
+            settlement_date: None,
+            quantity: Decimal::from(100),
+            price_per_unit: Decimal::from(10),
+            total_cost: Decimal::from(1000),
+            fees: Decimal::ZERO,
+            is_day_trade: false,
+            quota_issuance_date: None,
+            notes: Some("Imported trade".to_string()),
+            source: "TEST".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        crate::db::insert_transaction(&conn, &buy_tx).unwrap();
+
+        // Term contract liquidation - should be ignored for cash flow aggregation
+        let term_liq = crate::db::Transaction {
+            id: None,
+            asset_id,
+            transaction_type: crate::db::TransactionType::Buy,
+            trade_date: NaiveDate::from_ymd_opt(2023, 5, 2).unwrap(),
+            settlement_date: None,
+            quantity: Decimal::from(50),
+            price_per_unit: Decimal::from(10),
+            total_cost: Decimal::from(500),
+            fees: Decimal::ZERO,
+            is_day_trade: false,
+            quota_issuance_date: None,
+            notes: Some("Term contract liquidation (original ticker: TESTXT → TESTX)".to_string()),
+            source: "TEST".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        crate::db::insert_transaction(&conn, &term_liq).unwrap();
+
+        let flows = extract_cash_flows(
+            &conn,
+            NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(flows.len(), 1); // only the regular buy counted
+
+        let summary = summarize_cash_flows(&flows);
+        assert_eq!(summary.total_contributions, Decimal::from(1000));
+        assert_eq!(summary.total_withdrawals, Decimal::ZERO);
     }
 }
