@@ -33,6 +33,15 @@ pub struct CotahistRecord {
     pub volume: i64,
 }
 
+/// Controls whether a progress update should be displayed on spinner or persisted to terminal
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisplayMode {
+    /// Update only the spinner status (no newline, in-place)
+    Spinner,
+    /// Persist to terminal with newline
+    Persist,
+}
+
 /// Progress information for COTAHIST downloads
 #[derive(Debug, Clone)]
 pub struct DownloadProgress {
@@ -40,6 +49,7 @@ pub struct DownloadProgress {
     pub year: i32,
     pub records_processed: usize,
     pub total_records: Option<usize>,
+    pub display_mode: DisplayMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +63,7 @@ pub enum DownloadStage {
 /// Get the platform-specific cache directory for COTAHIST files
 pub fn get_cotahist_cache_dir() -> Result<PathBuf> {
     let cache_dir =
-        dirs::cache_dir().ok_or_else(|| anyhow!("Could not determine cache directory"))?;
+        dir_spec::cache_home().ok_or_else(|| anyhow!("Could not determine cache directory"))?;
 
     Ok(cache_dir.join("interest").join("cotahist"))
 }
@@ -99,7 +109,7 @@ fn get_cotahist_url(year: i32) -> String {
 pub fn download_cotahist_year(
     year: i32,
     force_redownload: bool,
-    progress_callback: Option<&dyn Fn(DownloadProgress)>,
+    progress_callback: Option<&dyn Fn(&DownloadProgress)>,
 ) -> Result<PathBuf> {
     let cache_dir = get_cotahist_cache_dir()?;
     let zip_path = cache_dir.join(format!("COTAHIST_A{}.ZIP", year));
@@ -109,11 +119,12 @@ pub fn download_cotahist_year(
         tracing::debug!("Using cached COTAHIST for year {}: {:?}", year, zip_path);
 
         if let Some(callback) = progress_callback {
-            callback(DownloadProgress {
+            callback(&DownloadProgress {
                 stage: DownloadStage::Complete,
                 year,
                 records_processed: 0,
                 total_records: None,
+                display_mode: DisplayMode::Persist,
             });
         }
 
@@ -129,11 +140,12 @@ pub fn download_cotahist_year(
 
     // Download file
     if let Some(ref callback) = progress_callback {
-        callback(DownloadProgress {
+        callback(&DownloadProgress {
             stage: DownloadStage::Downloading,
             year,
             records_processed: 0,
             total_records: None,
+            display_mode: DisplayMode::Spinner,
         });
     }
 
@@ -169,11 +181,12 @@ pub fn download_cotahist_year(
     tracing::debug!("Cached COTAHIST to: {:?}", zip_path);
 
     if let Some(callback) = progress_callback {
-        callback(DownloadProgress {
+        callback(&DownloadProgress {
             stage: DownloadStage::Complete,
             year,
             records_processed: 0,
             total_records: None,
+            display_mode: DisplayMode::Persist,
         });
     }
 
@@ -262,7 +275,7 @@ fn parse_cotahist_line(line: &str) -> Result<Option<CotahistRecord>> {
 /// Parse COTAHIST file from disk
 pub fn parse_cotahist_file<P: AsRef<Path>>(
     zip_path: P,
-    progress_callback: Option<&dyn Fn(DownloadProgress)>,
+    progress_callback: Option<&dyn Fn(&DownloadProgress)>,
 ) -> Result<Vec<CotahistRecord>> {
     let zip_path = zip_path.as_ref();
 
@@ -280,11 +293,12 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
         .context("Could not extract year from filename")?;
 
     if let Some(ref callback) = progress_callback {
-        callback(DownloadProgress {
+        callback(&DownloadProgress {
             stage: DownloadStage::Decompressing,
             year,
             records_processed: 0,
             total_records: None,
+            display_mode: DisplayMode::Spinner,
         });
     }
 
@@ -303,11 +317,12 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
         .context("Failed to read COTAHIST file")?;
 
     if let Some(ref callback) = progress_callback {
-        callback(DownloadProgress {
+        callback(&DownloadProgress {
             stage: DownloadStage::Parsing,
             year,
             records_processed: 0,
             total_records: Some(contents.lines().count()),
+            display_mode: DisplayMode::Spinner,
         });
     }
 
@@ -323,22 +338,29 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
         // Report progress every 10000 lines
         if let Some(ref callback) = progress_callback {
             if idx % 10000 == 0 || idx == total_lines - 1 {
-                callback(DownloadProgress {
+                let display_mode = if idx == total_lines - 1 {
+                    DisplayMode::Persist // Final parsing update - persist to terminal
+                } else {
+                    DisplayMode::Spinner // Intermediate updates - spinner only
+                };
+                callback(&DownloadProgress {
                     stage: DownloadStage::Parsing,
                     year,
                     records_processed: idx + 1,
                     total_records: Some(total_lines),
+                    display_mode,
                 });
             }
         }
     }
 
     if let Some(callback) = progress_callback {
-        callback(DownloadProgress {
+        callback(&DownloadProgress {
             stage: DownloadStage::Complete,
             year,
             records_processed: records.len(),
             total_records: Some(total_lines),
+            display_mode: DisplayMode::Persist,
         });
     }
 
@@ -360,7 +382,12 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
 /// Import COTAHIST records into database
 /// Import COTAHIST records to database (optimized with batching)
 /// Only imports records for tickers that exist in the assets table
-pub fn import_records_to_db(conn: &mut Connection, records: &[CotahistRecord]) -> Result<usize> {
+pub fn import_records_to_db(
+    conn: &mut Connection,
+    records: &[CotahistRecord],
+    progress_callback: Option<&dyn Fn(&DownloadProgress)>,
+    year: i32,
+) -> Result<usize> {
     use std::collections::{HashMap, HashSet};
 
     // Pre-fetch all existing assets to avoid repeated lookups
@@ -473,6 +500,17 @@ pub fn import_records_to_db(conn: &mut Connection, records: &[CotahistRecord]) -
     tx.commit()?;
     tracing::info!("Imported {} new price records", inserted);
 
+    // Report import completion with fun emoji
+    if let Some(callback) = progress_callback {
+        callback(&DownloadProgress {
+            stage: DownloadStage::Complete,
+            year,
+            records_processed: inserted,
+            total_records: Some(records.len()),
+            display_mode: DisplayMode::Persist,
+        });
+    }
+
     Ok(inserted)
 }
 
@@ -481,7 +519,7 @@ pub fn import_cotahist_year(
     conn: &mut Connection,
     year: i32,
     force_redownload: bool,
-    progress_callback: Option<&dyn Fn(DownloadProgress)>,
+    progress_callback: Option<&dyn Fn(&DownloadProgress)>,
 ) -> Result<usize> {
     // Download (or use cache)
     let zip_path = download_cotahist_year(year, force_redownload, progress_callback)?;
@@ -490,7 +528,7 @@ pub fn import_cotahist_year(
     let records = parse_cotahist_file(&zip_path, progress_callback)?;
 
     // Import to database
-    let inserted = import_records_to_db(conn, &records)?;
+    let inserted = import_records_to_db(conn, &records, progress_callback, year)?;
 
     tracing::info!("Imported {} new price records for year {}", inserted, year);
 
@@ -505,8 +543,8 @@ pub fn import_cotahist_from_file<P: AsRef<Path>>(
     // Parse records (no progress callback for manual flow)
     let records = parse_cotahist_file(zip_path, None)?;
 
-    // Import to database
-    let inserted = import_records_to_db(conn, &records)?;
+    // Import to database (no progress callback for manual flow)
+    let inserted = import_records_to_db(conn, &records, None, 0)?;
 
     Ok(inserted)
 }

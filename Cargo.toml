@@ -72,7 +72,7 @@ unicode-width = "0.1"
 # Utilities
 itertools = "0.12"
 once_cell = "1.19"
-dirs = "5.0"       # Cross-platform cache/config directories
+dir_spec = "0.5"   # Cross-platform cache/config directories; prefered over dirs for respecting XDG on mac/win
 zip = "2.1"        # ZIP archive extraction for COTAHIST files
 
 # Configuration

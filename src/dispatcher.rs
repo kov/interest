@@ -775,12 +775,19 @@ async fn dispatch_portfolio_show(
                     &assets_with_positions,
                     (earliest_date, today),
                     |msg| {
+                        // Extract display mode from message prefix
+                        let (msg_content, should_persist) = if msg.starts_with("__PERSIST__:") {
+                            (msg.strip_prefix("__PERSIST__:").unwrap_or(msg), true)
+                        } else {
+                            (msg, false)
+                        };
+
                         // Check if this is a ticker result (contains "→")
-                        if let Some(count) = parse_progress_count(msg) {
+                        if let Some(count) = parse_progress_count(msg_content) {
                             completed = count;
                             // Clear spinner line, print ticker result, re-draw spinner
                             print!("\r\x1B[2K"); // Clear current line
-                            println!("  {} {}", "↳".dimmed(), msg); // Print ticker with newline
+                            println!("  {} {}", "↳".dimmed(), msg_content); // Print ticker with newline
                             print!(
                                 "{} Fetching prices {}/{}...",
                                 spinner.tick(),
@@ -788,14 +795,30 @@ async fn dispatch_portfolio_show(
                                 total
                             );
                             stdout().flush().ok();
-                        } else if msg.starts_with("✓") {
-                            // Completion message - clear spinner and print final status
-                            print!("\r\x1B[2K");
-                            println!("{}", msg.green());
+                        } else if should_persist {
+                            // Message should be persisted to terminal with newline
+                            print!("\r\x1B[2K"); // Clear current line
+
+                            // Format messages: completion (✓) in green, errors (❌) in red
+                            if msg_content.starts_with("✓") {
+                                println!("  {} {}", "↳".dimmed(), msg_content.green());
+                            } else if msg_content.starts_with("❌") {
+                                println!("  {} {}", "↳".dimmed(), msg_content.red());
+                            } else {
+                                println!("  {} {}", "↳".dimmed(), msg_content);
+                            }
+
+                            // Re-draw spinner on next line
+                            print!(
+                                "{} Fetching prices {}/{}...",
+                                spinner.tick(),
+                                completed,
+                                total
+                            );
                             stdout().flush().ok();
                         } else {
-                            // Status update - just update spinner text
-                            print!("\r\x1B[2K{} {}", spinner.tick(), msg);
+                            // Spinner-only update (download, decompress, parsing intermediate)
+                            print!("\r\x1B[2K{} {}", spinner.tick(), msg_content);
                             stdout().flush().ok();
                         }
                     },
@@ -2070,8 +2093,8 @@ async fn dispatch_prices(action: crate::commands::PricesAction, _json_output: bo
             println!("📥 Importing B3 COTAHIST for year {}...", year);
 
             // Create progress callback
-            let callback = |progress: b3_cotahist::DownloadProgress| {
-                use b3_cotahist::DownloadStage;
+            let callback = |progress: &b3_cotahist::DownloadProgress| {
+                use b3_cotahist::{DisplayMode, DownloadStage};
 
                 let stage_msg = match progress.stage {
                     DownloadStage::Downloading => {
@@ -2092,18 +2115,21 @@ async fn dispatch_prices(action: crate::commands::PricesAction, _json_output: bo
                                     progress.year, progress.records_processed, total, pct
                                 )
                             } else {
-                                return; // Don't print every line
+                                return; // Don't print intermediate parsing progress
                             }
                         } else {
                             format!("📝 Parsing COTAHIST {}", progress.year)
                         }
                     }
                     DownloadStage::Complete => {
-                        return; // Don't print on complete
+                        return; // Don't print on complete (will be printed after import)
                     }
                 };
 
-                println!("{}", stage_msg);
+                // Respect display_mode: spinner-only updates don't print
+                if progress.display_mode == DisplayMode::Persist {
+                    println!("{}", stage_msg);
+                }
             };
 
             // Import the year

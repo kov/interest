@@ -236,15 +236,128 @@ where
         let mut sorted_years: Vec<i32> = needed_years.into_iter().collect();
         sorted_years.sort();
 
+        // Use a channel to communicate progress from parallel tasks to the main thread
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        // Use JoinSet for parallel processing of multiple years
+        let mut join_set = JoinSet::new();
+
         for year in sorted_years {
-            match b3_cotahist::import_cotahist_year(conn, year, false, None) {
-                Ok(count) => {
-                    tracing::info!("Imported {} price records for {}", count, year);
+            let tx = tx.clone();
+
+            join_set.spawn_blocking(move || {
+                // Create a callback that forwards progress events with display mode info
+                let callback = |progress_event: &b3_cotahist::DownloadProgress| {
+                    use b3_cotahist::{DisplayMode, DownloadStage};
+
+                    let (msg, display_mode) = match progress_event.stage {
+                        DownloadStage::Downloading => (
+                            format!("⬇️  Downloading COTAHIST {}...", progress_event.year),
+                            DisplayMode::Spinner,
+                        ),
+                        DownloadStage::Decompressing => (
+                            format!("📦 Decompressing COTAHIST {}...", progress_event.year),
+                            DisplayMode::Spinner,
+                        ),
+                        DownloadStage::Parsing => {
+                            // Show parsing progress with percentage
+                            let msg_text = if let Some(total) = progress_event.total_records {
+                                let pct = if total > 0 {
+                                    progress_event.records_processed * 100 / total
+                                } else {
+                                    0
+                                };
+                                format!(
+                                    "📝 Parsing COTAHIST {} ({}/{}  {}%)",
+                                    progress_event.year,
+                                    progress_event.records_processed,
+                                    total,
+                                    pct
+                                )
+                            } else {
+                                format!("📝 Parsing COTAHIST {}...", progress_event.year)
+                            };
+                            (msg_text, progress_event.display_mode.clone())
+                        }
+                        DownloadStage::Complete => (
+                            format!(
+                                "✓ Imported {} prices for {}",
+                                progress_event.records_processed, progress_event.year
+                            ),
+                            DisplayMode::Persist,
+                        ),
+                    };
+
+                    // Send progress message through channel
+                    let prefixed_msg = match display_mode {
+                        DisplayMode::Persist => format!("__PERSIST__:{}", msg),
+                        DisplayMode::Spinner => msg,
+                    };
+                    let _ = tx.send(prefixed_msg);
+                };
+
+                // Open a fresh connection for this task
+                let mut conn_task = match crate::db::open_db(None) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to open database for year {}: {}", year, e);
+                        return;
+                    }
+                };
+
+                // Import the year
+                match b3_cotahist::import_cotahist_year(
+                    &mut conn_task,
+                    year,
+                    false,
+                    Some(&callback),
+                ) {
+                    Ok(count) => {
+                        tracing::info!("Imported {} price records for {}", count, year);
+                    }
+                    Err(e) => {
+                        // Show error in progress callback with high-level reason
+                        let reason = if e.to_string().contains("Download failed") {
+                            "download failed"
+                        } else if e.to_string().contains("ZIP") {
+                            "invalid file format"
+                        } else if e.to_string().contains("not be available") {
+                            "year not available"
+                        } else {
+                            "import failed"
+                        };
+                        let _ = tx.send(format!("__PERSIST__:❌ COTAHIST {}: {}", year, reason));
+                        tracing::warn!("Failed to import COTAHIST for {}: {}", year, e);
+                        // Continue - graceful degradation
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to import COTAHIST for {}: {}", year, e);
-                    // Continue - graceful degradation
+            });
+        }
+
+        // Drop the main tx so the receiver knows when all tasks are done
+        drop(tx);
+
+        // Create a task that collects progress messages while join_set completes
+        let progress_future = async {
+            while let Some(msg) = rx.recv().await {
+                progress(&msg);
+            }
+        };
+
+        // Run both concurrently: collect progress messages and wait for tasks
+        tokio::select! {
+            _ = progress_future => {
+                // Progress finished first, wait for remaining tasks
+                while let Some(_result) = join_set.join_next().await {
+                    // Tasks handle errors internally
                 }
+            }
+            _ = async {
+                while let Some(_result) = join_set.join_next().await {
+                    // Tasks handle errors internally
+                }
+            } => {
+                // All tasks finished before progress channel closed
             }
         }
     }
