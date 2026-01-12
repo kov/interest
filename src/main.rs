@@ -1348,7 +1348,7 @@ async fn handle_actions_list(ticker: Option<&str>, json_output: bool) -> Result<
 
     let table = Table::new(rows)
         .with(Style::rounded())
-        .with(Modify::new(Columns::single(0)).with(Alignment::right()))
+        .with(Modify::new(Columns::new(0..1)).with(Alignment::right()))
         .to_string();
     println!("{}", table);
 
