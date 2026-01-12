@@ -95,7 +95,13 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                     &mut conn,
                     &assets,
                     (earliest_date, today),
-                    |msg| {
+                    |event| {
+                        let msg = match event {
+                            crate::ui::progress::ProgressEvent::Line { text, persist: _ } => {
+                                text.as_str()
+                            }
+                        };
+
                         // Check if this is a ticker result (contains "→")
                         if msg.contains("→") {
                             // Parse completion count from message like "TICKER → R$ XX.XX (N/M)"

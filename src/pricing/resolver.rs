@@ -41,6 +41,8 @@ pub async fn ensure_prices_available(
 }
 
 /// Version with progress callback for UI updates
+use crate::ui::progress::ProgressEvent;
+
 pub async fn ensure_prices_available_with_progress<F>(
     conn: &mut Connection,
     assets: &[Asset],
@@ -48,7 +50,7 @@ pub async fn ensure_prices_available_with_progress<F>(
     mut progress: F,
 ) -> Result<()>
 where
-    F: FnMut(&str),
+    F: FnMut(&ProgressEvent),
 {
     ensure_prices_available_internal(conn, assets, date_range, &mut progress).await
 }
@@ -61,7 +63,7 @@ async fn ensure_prices_available_internal<F>(
     progress: &mut F,
 ) -> Result<()>
 where
-    F: FnMut(&str),
+    F: FnMut(&crate::ui::progress::ProgressEvent),
 {
     let (start_date, end_date) = date_range;
     let today = Local::now().date_naive();
@@ -91,12 +93,15 @@ where
         .collect();
 
     if priceable_asset_ids.is_empty() {
-        progress("✓ No price updates needed");
+        progress(&ProgressEvent::from_message("✓ No price updates needed"));
         tracing::debug!("No priceable assets in portfolio, skipping resolution");
         return Ok(());
     }
 
-    progress(&format!("Checking {} assets...", priceable_asset_ids.len()));
+    progress(&ProgressEvent::from_message(&format!(
+        "Checking {} assets...",
+        priceable_asset_ids.len()
+    )));
 
     let placeholders = priceable_asset_ids
         .iter()
@@ -123,7 +128,7 @@ where
 
     let priceable_count = priceable_asset_ids.len() as i64;
     if has_recent_prices == priceable_count {
-        progress("✓ All prices are up to date!");
+        progress(&ProgressEvent::from_message("✓ All prices are up to date!"));
         tracing::debug!(
             "All {} priceable assets have recent prices (since {}), skipping resolution",
             priceable_count,
@@ -154,16 +159,16 @@ where
             .collect();
 
         if !need_update_assets.is_empty() {
-            progress(&format!(
+            progress(&ProgressEvent::from_message(&format!(
                 "Fetching prices for {} assets...",
                 need_update_assets.len()
-            ));
+            )));
             tracing::info!(
                 "Fetching current prices for {} assets from Yahoo/Brapi",
                 need_update_assets.len()
             );
             fetch_current_prices_with_progress(conn, &need_update_assets, progress).await?;
-            progress("✓ Price updates complete!");
+            progress(&ProgressEvent::from_message("✓ Price updates complete!"));
         }
         return Ok(());
     }
@@ -188,16 +193,16 @@ where
             .collect();
 
         if !priceable_assets.is_empty() {
-            progress(&format!(
+            progress(&ProgressEvent::from_message(&format!(
                 "Fetching prices for {} assets...",
                 priceable_assets.len()
-            ));
+            )));
             tracing::info!(
                 "Fetching current prices for {} assets from Yahoo/Brapi",
                 priceable_assets.len()
             );
             fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
-            progress("✓ Price updates complete!");
+            progress(&ProgressEvent::from_message("✓ Price updates complete!"));
         }
         return Ok(());
     }
@@ -340,7 +345,7 @@ where
         // Create a task that collects progress messages while join_set completes
         let progress_future = async {
             while let Some(msg) = rx.recv().await {
-                progress(&msg);
+                progress(&ProgressEvent::from_message(&msg));
             }
         };
 
@@ -371,16 +376,16 @@ where
 
     // Fetch current prices via API (requires async runtime)
     if !priceable_assets.is_empty() {
-        progress(&format!(
+        progress(&ProgressEvent::from_message(&format!(
             "Fetching prices for {} assets...",
             priceable_assets.len()
-        ));
+        )));
         tracing::info!(
             "Fetching current prices for {} assets from Yahoo/Brapi",
             priceable_assets.len()
         );
         fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
-        progress("✓ Price updates complete!");
+        progress(&ProgressEvent::from_message("✓ Price updates complete!"));
     }
 
     Ok(())
@@ -444,7 +449,7 @@ async fn fetch_current_prices_with_progress<F>(
     progress: &mut F,
 ) -> Result<()>
 where
-    F: FnMut(&str),
+    F: FnMut(&crate::ui::progress::ProgressEvent),
 {
     let today = Local::now().date_naive();
     let total = assets.len();
@@ -485,12 +490,12 @@ where
                     completed,
                     total
                 );
-                progress(&msg);
+                progress(&ProgressEvent::from_message(&msg));
                 tracing::debug!("Fetched price for {}: {}", ticker, price);
             }
             Err(e) => {
                 let msg = format!("{} → failed ({}/{})", ticker, completed, total);
-                progress(&msg);
+                progress(&ProgressEvent::from_message(&msg));
                 tracing::warn!("Failed to fetch price for {}: {}", ticker, e);
             }
         }

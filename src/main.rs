@@ -15,15 +15,13 @@ mod utils;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    ActionCommands, Cli, Commands, IncomeCommands, InconsistenciesCommands, PerformanceCommands,
-    PortfolioCommands, PriceCommands, TaxCommands, TransactionCommands,
+    runner, ActionCommands, Cli, Commands, InconsistenciesCommands, PriceCommands, TaxCommands,
+    TransactionCommands,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::io::IsTerminal;
-use std::io::Write as _;
 use std::str::FromStr;
-use tax::swing_trade::TaxCategory;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use utils::format_currency;
@@ -85,203 +83,186 @@ async fn main() -> Result<()> {
         }
     };
 
-    match command {
-        Commands::Import { file, dry_run } => handle_import(&file, dry_run, cli.json).await,
+    match runner::to_internal_command(&command) {
+        Ok(Some(internal)) => dispatcher::dispatch_command(internal, cli.json).await,
+        Ok(None) => {
+            // Fallback: handle commands that require special treatment or were not converted
+            match command {
+                Commands::Import { file, dry_run } => handle_import(&file, dry_run, cli.json).await,
 
-        Commands::ImportIrpf {
-            file,
-            year,
-            dry_run,
-        } => handle_irpf_import(&file, year, dry_run).await,
+                Commands::ImportIrpf {
+                    file,
+                    year,
+                    dry_run,
+                } => handle_irpf_import(&file, year, dry_run).await,
 
-        Commands::Portfolio { action } => match action {
-            PortfolioCommands::Show { asset_type, at } => {
-                let as_of_date = match at.as_ref() {
-                    Some(d) => Some(
-                        commands::parse_flexible_date(d).map_err(|e| anyhow::anyhow!("{}", e))?,
-                    ),
-                    None => None,
-                };
-                dispatcher::dispatch_command(
-                    commands::Command::PortfolioShow {
-                        filter: asset_type.clone(),
-                        as_of_date,
-                    },
-                    cli.json,
-                )
-                .await
-            }
-        },
-
-        Commands::Prices { action } => match action {
-            PriceCommands::Update => handle_price_update().await,
-            PriceCommands::History { ticker, from, to } => {
-                handle_price_history(&ticker, &from, &to).await
-            }
-        },
-
-        Commands::Tax { action } => match action {
-            TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
-            TaxCommands::Report { year, export } => handle_tax_report(year, export, cli.json).await,
-            TaxCommands::Summary { year } => handle_tax_summary(year).await,
-        },
-
-        Commands::Performance { action } => match action {
-            PerformanceCommands::Show { period } => {
-                handle_performance_show(&period, cli.json).await
-            }
-        },
-
-        Commands::Income { action } => match action {
-            IncomeCommands::Show { year } => handle_income_show(year, cli.json).await,
-            IncomeCommands::Detail { year, asset } => {
-                handle_income_detail(year, asset.as_deref(), cli.json).await
-            }
-            IncomeCommands::Summary { year } => handle_income_summary(year, cli.json).await,
-        },
-
-        Commands::Actions { action } => match action {
-            ActionCommands::Add {
-                ticker,
-                action_type,
-                ratio,
-                date,
-                notes,
-            } => handle_action_add(&ticker, &action_type, &ratio, &date, notes.as_deref()).await,
-            ActionCommands::Scrape {
-                ticker,
-                url,
-                name,
-                save,
-            } => handle_action_scrape(&ticker, url.as_deref(), name.as_deref(), save).await,
-            ActionCommands::Update => handle_actions_update().await,
-            ActionCommands::List { ticker } => {
-                handle_actions_list(ticker.as_deref(), cli.json).await
-            }
-            ActionCommands::Apply { ticker } => {
-                handle_action_apply(ticker.as_deref(), cli.json).await
-            }
-            ActionCommands::Delete { id } => handle_action_delete(id).await,
-            ActionCommands::Edit {
-                id,
-                action_type,
-                ratio,
-                date,
-                notes,
-            } => {
-                handle_action_edit(
-                    id,
-                    action_type.as_deref(),
-                    ratio.as_deref(),
-                    date.as_deref(),
-                    notes.as_deref(),
-                )
-                .await
-            }
-        },
-
-        Commands::Inconsistencies { action } => match action {
-            InconsistenciesCommands::List {
-                open,
-                all,
-                status,
-                issue_type,
-                asset,
-            } => {
-                let status = if let Some(status) = status {
-                    Some(status)
-                } else if all {
-                    Some("ALL".to_string())
-                } else if open || !all {
-                    Some("OPEN".to_string())
-                } else {
-                    None
-                };
-
-                dispatcher::dispatch_command(
-                    commands::Command::Inconsistencies {
-                        action: commands::InconsistenciesAction::List {
-                            status,
-                            issue_type,
-                            asset,
-                        },
-                    },
-                    cli.json,
-                )
-                .await
-            }
-            InconsistenciesCommands::Show { id } => {
-                dispatcher::dispatch_command(
-                    commands::Command::Inconsistencies {
-                        action: commands::InconsistenciesAction::Show { id },
-                    },
-                    cli.json,
-                )
-                .await
-            }
-            InconsistenciesCommands::Resolve {
-                id,
-                set,
-                json_payload,
-            } => {
-                let mut pairs = Vec::new();
-                for item in set {
-                    if let Some((k, v)) = item.split_once('=') {
-                        pairs.push((k.to_string(), v.to_string()));
+                Commands::Prices { action } => match action {
+                    PriceCommands::Update => handle_price_update().await,
+                    PriceCommands::History { ticker, from, to } => {
+                        handle_price_history(&ticker, &from, &to).await
                     }
+                },
+
+                Commands::Actions { action } => match action {
+                    ActionCommands::Add {
+                        ticker,
+                        action_type,
+                        ratio,
+                        date,
+                        notes,
+                    } => {
+                        handle_action_add(&ticker, &action_type, &ratio, &date, notes.as_deref())
+                            .await
+                    }
+                    ActionCommands::Scrape {
+                        ticker,
+                        url,
+                        name,
+                        save,
+                    } => handle_action_scrape(&ticker, url.as_deref(), name.as_deref(), save).await,
+                    ActionCommands::Update => handle_actions_update().await,
+                    ActionCommands::List { ticker } => {
+                        handle_actions_list(ticker.as_deref(), cli.json).await
+                    }
+                    ActionCommands::Apply { ticker } => {
+                        handle_action_apply(ticker.as_deref(), cli.json).await
+                    }
+                    ActionCommands::Delete { id } => handle_action_delete(id).await,
+                    ActionCommands::Edit {
+                        id,
+                        action_type,
+                        ratio,
+                        date,
+                        notes,
+                    } => {
+                        handle_action_edit(
+                            id,
+                            action_type.as_deref(),
+                            ratio.as_deref(),
+                            date.as_deref(),
+                            notes.as_deref(),
+                        )
+                        .await
+                    }
+                },
+
+                Commands::Transactions { action } => match action {
+                    TransactionCommands::Add {
+                        ticker,
+                        transaction_type,
+                        quantity,
+                        price,
+                        date,
+                        fees,
+                        notes,
+                    } => {
+                        handle_transaction_add(
+                            &ticker,
+                            &transaction_type,
+                            &quantity,
+                            &price,
+                            &date,
+                            &fees,
+                            notes.as_deref(),
+                        )
+                        .await
+                    }
+                },
+
+                Commands::Inspect { file, full, column } => {
+                    handle_inspect(&file, full, column).await
                 }
 
-                dispatcher::dispatch_command(
-                    commands::Command::Inconsistencies {
-                        action: commands::InconsistenciesAction::Resolve {
-                            id,
-                            set: pairs,
-                            json: json_payload,
-                        },
-                    },
-                    cli.json,
-                )
-                .await
+                Commands::Interactive => interest::ui::launch_tui().await,
+
+                Commands::ProcessTerms => handle_process_terms().await,
+
+                Commands::Tax { action } => match action {
+                    TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
+                    _ => Err(anyhow::anyhow!("Unimplemented tax subcommand")),
+                },
+
+                Commands::Inconsistencies { action } => match action {
+                    InconsistenciesCommands::List {
+                        open,
+                        all,
+                        status,
+                        issue_type,
+                        asset,
+                    } => {
+                        let status = if let Some(status) = status {
+                            Some(status)
+                        } else if all {
+                            Some("ALL".to_string())
+                        } else if open || !all {
+                            Some("OPEN".to_string())
+                        } else {
+                            None
+                        };
+
+                        dispatcher::dispatch_command(
+                            commands::Command::Inconsistencies {
+                                action: commands::InconsistenciesAction::List {
+                                    status,
+                                    issue_type,
+                                    asset,
+                                },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
+
+                    InconsistenciesCommands::Show { id } => {
+                        dispatcher::dispatch_command(
+                            commands::Command::Inconsistencies {
+                                action: commands::InconsistenciesAction::Show { id },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
+
+                    InconsistenciesCommands::Resolve {
+                        id,
+                        set,
+                        json_payload,
+                    } => {
+                        let mut pairs = Vec::new();
+                        for item in set {
+                            if let Some((k, v)) = item.split_once('=') {
+                                pairs.push((k.to_string(), v.to_string()));
+                            }
+                        }
+
+                        dispatcher::dispatch_command(
+                            commands::Command::Inconsistencies {
+                                action: commands::InconsistenciesAction::Resolve {
+                                    id,
+                                    set: pairs,
+                                    json: json_payload,
+                                },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
+
+                    InconsistenciesCommands::Ignore { id, reason } => {
+                        dispatcher::dispatch_command(
+                            commands::Command::Inconsistencies {
+                                action: commands::InconsistenciesAction::Ignore { id, reason },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
+                },
+
+                _ => Err(anyhow::anyhow!("Unimplemented command")),
             }
-            InconsistenciesCommands::Ignore { id, reason } => {
-                dispatcher::dispatch_command(
-                    commands::Command::Inconsistencies {
-                        action: commands::InconsistenciesAction::Ignore { id, reason },
-                    },
-                    cli.json,
-                )
-                .await
-            }
-        },
-
-        Commands::Transactions { action } => match action {
-            TransactionCommands::Add {
-                ticker,
-                transaction_type,
-                quantity,
-                price,
-                date,
-                fees,
-                notes,
-            } => {
-                handle_transaction_add(
-                    &ticker,
-                    &transaction_type,
-                    &quantity,
-                    &price,
-                    &date,
-                    &fees,
-                    notes.as_deref(),
-                )
-                .await
-            }
-        },
-
-        Commands::Inspect { file, full, column } => handle_inspect(&file, full, column).await,
-
-        Commands::Interactive => interest::ui::launch_tui().await,
-
-        Commands::ProcessTerms => handle_process_terms().await,
+        }
+        Err(e) => Err(anyhow::anyhow!("{}", e)),
     }
 }
 
@@ -2238,654 +2219,6 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Handle IRPF annual report generation
-async fn handle_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
-    use colored::Colorize;
-
-    info!("Generating IRPF annual report for {}", year);
-
-    // Initialize database
-    db::init_database(None)?;
-    let conn = db::open_db(None)?;
-
-    // Generate report; suppress progress in JSON mode
-    let report = if json_output {
-        tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
-    } else {
-        let mut printer = TaxProgressPrinter::new(true);
-        tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
-    };
-
-    if report.monthly_summaries.is_empty() {
-        println!(
-            "\n{} No transactions found for year {}\n",
-            "ℹ".blue().bold(),
-            year
-        );
-        return Ok(());
-    }
-
-    if json_output {
-        // Emit concise JSON suitable for tests and scripting
-        #[derive(serde::Serialize)]
-        struct MonthlySummaryJson {
-            month: String,
-            sales: rust_decimal::Decimal,
-            profit: rust_decimal::Decimal,
-            loss: rust_decimal::Decimal,
-            tax_due: rust_decimal::Decimal,
-        }
-
-        let monthly: Vec<MonthlySummaryJson> = report
-            .monthly_summaries
-            .iter()
-            .map(|m| MonthlySummaryJson {
-                month: m.month_name.to_string(),
-                sales: m.total_sales,
-                profit: m.total_profit,
-                loss: m.total_loss,
-                tax_due: m.tax_due,
-            })
-            .collect();
-
-        let payload = serde_json::json!({
-            "year": year,
-            "annual_total_sales": report.annual_total_sales,
-            "annual_total_profit": report.annual_total_profit,
-            "annual_total_loss": report.annual_total_loss,
-            "annual_total_tax": report.annual_total_tax,
-            "monthly_summaries": monthly,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    } else {
-        println!(
-            "\n{} Annual IRPF Tax Report - {}\n",
-            "📊".cyan().bold(),
-            year
-        );
-    }
-
-    // Show prior-year carryforward losses if any
-    if !report.previous_losses_carry_forward.is_empty() {
-        println!("{} Carryover from previous years:", "📦".yellow().bold());
-        for (category, amount) in &report.previous_losses_carry_forward {
-            println!(
-                "  {}: {}",
-                category.display_name(),
-                format_currency(*amount)
-            );
-        }
-        println!();
-    }
-
-    // Helper function to check if a category is a stock category
-    fn is_stock_category(category: &TaxCategory) -> bool {
-        matches!(
-            category,
-            TaxCategory::StockSwingTrade | TaxCategory::StockDayTrade
-        )
-    }
-
-    fn is_fii_category(category: &TaxCategory) -> bool {
-        matches!(
-            category,
-            TaxCategory::FiiSwingTrade
-                | TaxCategory::FiiDayTrade
-                | TaxCategory::FiagroSwingTrade
-                | TaxCategory::FiagroDayTrade
-        )
-    }
-
-    use tabled::{
-        settings::{object::Columns, Alignment, Modify, Style},
-        Table, Tabled,
-    };
-
-    // Helper struct for table display with colored profit/loss and offset
-    #[derive(Tabled, Clone)]
-    struct TaxTableRow {
-        #[tabled(rename = "Month")]
-        month: String,
-        #[tabled(rename = "Category")]
-        category: String,
-        #[tabled(rename = "Sales")]
-        sales: String,
-        #[tabled(rename = "Profit/Loss")]
-        profit_loss: String,
-        #[tabled(rename = "Exempt")]
-        exempt: String,
-        #[tabled(rename = "Offset")]
-        offset: String,
-        #[tabled(rename = "Tax")]
-        tax: String,
-    }
-
-    // Helper to color profit/loss values
-    fn color_profit_loss(value: Decimal, formatted: &str) -> String {
-        if value > Decimal::ZERO {
-            formatted.green().to_string()
-        } else if value < Decimal::ZERO {
-            formatted.red().to_string()
-        } else {
-            "—".to_string()
-        }
-    }
-
-    // Helper to color offset values
-    fn color_offset(value: Decimal, formatted: &str) -> String {
-        if value > Decimal::ZERO {
-            formatted.cyan().to_string()
-        } else {
-            "—".to_string()
-        }
-    }
-
-    // STOCKS SECTION
-    println!("{}", "📈 Stocks (Ações)".bold());
-
-    let mut stock_total_sales = Decimal::ZERO;
-    let mut stock_total_profit = Decimal::ZERO;
-    let mut stock_total_loss = Decimal::ZERO;
-    let mut stock_total_offset = Decimal::ZERO;
-    let mut stock_total_tax = Decimal::ZERO;
-
-    let mut stock_rows: Vec<TaxTableRow> = Vec::new();
-    let mut last_month: Option<&str> = None;
-
-    for summary in &report.monthly_summaries {
-        let month_stock_categories: Vec<_> = summary
-            .by_category
-            .iter()
-            .filter(|(cat, _)| is_stock_category(cat))
-            .collect();
-
-        if !month_stock_categories.is_empty() {
-            // Add a separator before a new month (except first)
-            if last_month.is_some() && !stock_rows.is_empty() {
-                stock_rows.push(TaxTableRow {
-                    month: String::new(),
-                    category: String::new(),
-                    sales: String::new(),
-                    profit_loss: String::new(),
-                    exempt: String::new(),
-                    offset: String::new(),
-                    tax: String::new(),
-                });
-            }
-            last_month = Some(summary.month_name);
-
-            let mut is_first_in_month = true;
-
-            for (category, cat_summary) in month_stock_categories {
-                let month_str = if is_first_in_month {
-                    summary.month_name.to_string()
-                } else {
-                    String::new()
-                };
-                is_first_in_month = false;
-
-                stock_total_sales += cat_summary.sales;
-                stock_total_profit += if cat_summary.profit_loss > Decimal::ZERO {
-                    cat_summary.profit_loss
-                } else {
-                    Decimal::ZERO
-                };
-                stock_total_loss += if cat_summary.profit_loss < Decimal::ZERO {
-                    cat_summary.profit_loss.abs()
-                } else {
-                    Decimal::ZERO
-                };
-                stock_total_offset += cat_summary.loss_offset_applied;
-                stock_total_tax += cat_summary.tax_due;
-
-                let sales_str = format_currency(cat_summary.sales);
-                let profit_raw = format_currency(cat_summary.profit_loss);
-                let profit_str = color_profit_loss(cat_summary.profit_loss, &profit_raw);
-
-                // Exempt: ✓ or ✗
-                let exempt_str = if cat_summary.exemption_applied > Decimal::ZERO {
-                    "✓".green().to_string()
-                } else {
-                    "✗".red().to_string()
-                };
-
-                // Offset: show only applied loss offset
-                let offset_value = cat_summary.loss_offset_applied;
-
-                let offset_raw = if offset_value == Decimal::ZERO {
-                    "—".to_string()
-                } else {
-                    format_currency(offset_value)
-                };
-                let offset_str = color_offset(offset_value, &offset_raw);
-
-                let tax_str = if cat_summary.tax_due > Decimal::ZERO {
-                    format_currency(cat_summary.tax_due)
-                } else {
-                    "—".to_string()
-                };
-
-                stock_rows.push(TaxTableRow {
-                    month: month_str,
-                    category: category.display_name().to_string(),
-                    sales: sales_str,
-                    profit_loss: profit_str,
-                    exempt: exempt_str,
-                    offset: offset_str,
-                    tax: tax_str,
-                });
-            }
-        }
-    }
-
-    if !stock_rows.is_empty() {
-        // Add total row
-        stock_rows.push(TaxTableRow {
-            month: "TOTAL".to_string(),
-            category: String::new(),
-            sales: format_currency(stock_total_sales),
-            profit_loss: format_currency(stock_total_profit),
-            exempt: String::new(),
-            offset: if stock_total_offset > Decimal::ZERO {
-                format_currency(stock_total_offset).cyan().to_string()
-            } else {
-                "—".to_string()
-            },
-            tax: format_currency(stock_total_tax),
-        });
-
-        let table = Table::new(&stock_rows)
-            .with(Style::rounded())
-            .with(Modify::new(Columns::new(2..)).with(Alignment::right()))
-            .to_string();
-        println!("{}\n", table);
-    }
-
-    // FII/FIAGRO SECTION
-    println!("{}", "💰 FIIs and FIAGROs".bold());
-
-    let mut fii_total_sales = Decimal::ZERO;
-    let mut fii_total_profit = Decimal::ZERO;
-    let mut fii_total_loss = Decimal::ZERO;
-    let mut fii_total_offset = Decimal::ZERO;
-    let mut fii_total_tax = Decimal::ZERO;
-
-    let mut fii_rows: Vec<TaxTableRow> = Vec::new();
-    let mut last_month_fii: Option<&str> = None;
-
-    for summary in &report.monthly_summaries {
-        let month_fii_categories: Vec<_> = summary
-            .by_category
-            .iter()
-            .filter(|(cat, _)| is_fii_category(cat))
-            .collect();
-
-        if !month_fii_categories.is_empty() {
-            // Add a separator before a new month (except first)
-            if last_month_fii.is_some() && !fii_rows.is_empty() {
-                fii_rows.push(TaxTableRow {
-                    month: String::new(),
-                    category: String::new(),
-                    sales: String::new(),
-                    profit_loss: String::new(),
-                    exempt: String::new(),
-                    offset: String::new(),
-                    tax: String::new(),
-                });
-            }
-            last_month_fii = Some(summary.month_name);
-
-            let mut is_first_in_month = true;
-
-            for (category, cat_summary) in month_fii_categories {
-                let month_str = if is_first_in_month {
-                    summary.month_name.to_string()
-                } else {
-                    String::new()
-                };
-                is_first_in_month = false;
-
-                fii_total_sales += cat_summary.sales;
-                fii_total_profit += if cat_summary.profit_loss > Decimal::ZERO {
-                    cat_summary.profit_loss
-                } else {
-                    Decimal::ZERO
-                };
-                fii_total_loss += if cat_summary.profit_loss < Decimal::ZERO {
-                    cat_summary.profit_loss.abs()
-                } else {
-                    Decimal::ZERO
-                };
-                fii_total_offset += cat_summary.loss_offset_applied;
-                fii_total_tax += cat_summary.tax_due;
-
-                let sales_str = format_currency(cat_summary.sales);
-                let profit_raw = format_currency(cat_summary.profit_loss);
-                let profit_str = color_profit_loss(cat_summary.profit_loss, &profit_raw);
-
-                // Exempt: ✓ or ✗
-                let exempt_str = if cat_summary.exemption_applied > Decimal::ZERO {
-                    "✓".green().to_string()
-                } else {
-                    "✗".red().to_string()
-                };
-
-                // Offset: show only applied loss offset
-                let offset_value = cat_summary.loss_offset_applied;
-
-                let offset_raw = if offset_value == Decimal::ZERO {
-                    "—".to_string()
-                } else {
-                    format_currency(offset_value)
-                };
-                let offset_str = color_offset(offset_value, &offset_raw);
-
-                let tax_str = if cat_summary.tax_due > Decimal::ZERO {
-                    format_currency(cat_summary.tax_due)
-                } else {
-                    "—".to_string()
-                };
-
-                fii_rows.push(TaxTableRow {
-                    month: month_str,
-                    category: category.display_name().to_string(),
-                    sales: sales_str,
-                    profit_loss: profit_str,
-                    exempt: exempt_str,
-                    offset: offset_str,
-                    tax: tax_str,
-                });
-            }
-        }
-    }
-
-    if !fii_rows.is_empty() {
-        // Add total row
-        fii_rows.push(TaxTableRow {
-            month: "TOTAL".to_string(),
-            category: String::new(),
-            sales: format_currency(fii_total_sales),
-            profit_loss: format_currency(fii_total_profit),
-            exempt: String::new(),
-            offset: if fii_total_offset > Decimal::ZERO {
-                format_currency(fii_total_offset).cyan().to_string()
-            } else {
-                "—".to_string()
-            },
-            tax: format_currency(fii_total_tax),
-        });
-
-        let table = Table::new(&fii_rows)
-            .with(Style::rounded())
-            .with(Modify::new(Columns::new(2..)).with(Alignment::right()))
-            .to_string();
-        println!("{}\n", table);
-    }
-
-    // Annual totals
-    println!("\n{} Annual Summary:", "📋".cyan().bold());
-    println!(
-        "  Total Sales:  {}",
-        format_currency(report.annual_total_sales).cyan()
-    );
-    println!(
-        "  Total Profit: {}",
-        format_currency(report.annual_total_profit).green()
-    );
-    println!(
-        "  Total Loss:   {}",
-        format_currency(report.annual_total_loss).red()
-    );
-    let total_loss_offset: Decimal = report
-        .monthly_summaries
-        .iter()
-        .map(|s| s.total_loss_offset_applied)
-        .sum();
-    if total_loss_offset > Decimal::ZERO {
-        println!(
-            "  Total Loss Offset: {}",
-            format_currency(total_loss_offset).yellow()
-        );
-    }
-    println!(
-        "  {} {}\n",
-        "Total Tax:".bold(),
-        format_currency(report.annual_total_tax).yellow().bold()
-    );
-
-    // Losses to carry forward
-    if !report.losses_to_carry_forward.is_empty() {
-        println!("{} Losses to Carry Forward:", "📋".yellow().bold());
-        for (category, loss) in &report.losses_to_carry_forward {
-            println!(
-                "  {}: {}",
-                category.display_name(),
-                format_currency(*loss).yellow()
-            );
-        }
-        println!();
-    }
-
-    if export_csv {
-        let csv_content = tax::irpf::export_to_csv(&report);
-        let csv_path = format!("irpf_report_{}.csv", year);
-        std::fs::write(&csv_path, csv_content)?;
-
-        println!("{} Report exported to: {}\n", "✓".green().bold(), csv_path);
-    }
-
-    Ok(())
-}
-
-/// Handle tax summary display
-async fn handle_tax_summary(year: i32) -> Result<()> {
-    use colored::Colorize;
-    use tabled::{
-        settings::{object::Columns, Alignment, Modify, Style},
-        Table, Tabled,
-    };
-
-    info!("Generating tax summary for {}", year);
-
-    // Initialize database
-    db::init_database(None)?;
-    let conn = db::open_db(None)?;
-
-    // Generate report with in-place spinner progress (terse)
-    let mut printer = TaxProgressPrinter::new(true);
-    let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
-
-    if report.monthly_summaries.is_empty() {
-        println!(
-            "\n{} No transactions found for year {}\n",
-            "ℹ".blue().bold(),
-            year
-        );
-        return Ok(());
-    }
-
-    println!("\n{} Tax Summary - {}\n", "📊".cyan().bold(), year);
-
-    // Display monthly table
-    #[derive(Tabled)]
-    struct MonthRow {
-        #[tabled(rename = "Month")]
-        month: String,
-        #[tabled(rename = "Sales")]
-        sales: String,
-        #[tabled(rename = "Profit")]
-        profit: String,
-        #[tabled(rename = "Loss")]
-        loss: String,
-        #[tabled(rename = "Tax Due")]
-        tax: String,
-    }
-
-    let rows: Vec<MonthRow> = report
-        .monthly_summaries
-        .iter()
-        .map(|s| MonthRow {
-            month: s.month_name.to_string(),
-            sales: format_currency(s.total_sales),
-            profit: format_currency(s.total_profit),
-            loss: format_currency(s.total_loss),
-            tax: format_currency(s.tax_due),
-        })
-        .collect();
-
-    let table = Table::new(rows)
-        .with(Style::rounded())
-        .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
-        .to_string();
-    println!("{}", table);
-
-    // Annual summary
-    println!("\n{} Annual Total", "📈".cyan().bold());
-    println!(
-        "  Sales:  {}",
-        format_currency(report.annual_total_sales).cyan()
-    );
-    println!(
-        "  Profit: {}",
-        format_currency(report.annual_total_profit).green()
-    );
-    println!(
-        "  Loss:   {}",
-        format_currency(report.annual_total_loss).red()
-    );
-    println!(
-        "  {} {}\n",
-        "Tax:".bold(),
-        format_currency(report.annual_total_tax).yellow().bold()
-    );
-
-    Ok(())
-}
-
-struct TaxProgressPrinter {
-    spinner: interest::ui::crossterm_engine::Spinner,
-    in_place: bool,
-    in_progress: bool,
-    from_year: Option<i32>,
-    target_year: Option<i32>,
-    total_years: usize,
-    completed_years: usize,
-}
-
-impl TaxProgressPrinter {
-    fn new(in_place: bool) -> Self {
-        Self {
-            spinner: interest::ui::crossterm_engine::Spinner::new(),
-            in_place,
-            in_progress: false,
-            from_year: None,
-            target_year: None,
-            total_years: 0,
-            completed_years: 0,
-        }
-    }
-
-    fn render_line(&mut self, text: &str) {
-        use std::io::{stdout, Write};
-        if self.in_place {
-            print!("\r\x1b[2K{} {}", self.spinner.tick(), text);
-            let _ = stdout().flush();
-        } else {
-            println!("{} {}", self.spinner.tick(), text);
-        }
-    }
-
-    fn finish_line(&mut self) {
-        use std::io::{stdout, Write};
-        if self.in_place {
-            println!();
-            let _ = stdout().flush();
-        }
-    }
-
-    fn on_event(&mut self, event: tax::ReportProgress) {
-        match event {
-            tax::ReportProgress::Start { target_year, .. } => {
-                self.target_year = Some(target_year);
-            }
-            tax::ReportProgress::RecomputeStart { from_year } => {
-                self.from_year = Some(from_year);
-                self.in_progress = true;
-                self.completed_years = 0;
-                self.total_years = self
-                    .target_year
-                    .map(|t| (t - from_year + 1).max(1) as usize)
-                    .unwrap_or(1);
-                self.render_line(&format!(
-                    "↻ Recomputing snapshots {}/{} (starting {})",
-                    self.completed_years, self.total_years, from_year
-                ));
-            }
-            tax::ReportProgress::RecomputedYear { year } => {
-                if self.in_progress {
-                    self.completed_years = (self.completed_years + 1).min(self.total_years);
-                    let from = self.from_year.unwrap_or(year);
-                    if Some(year) == self.target_year {
-                        // Finalize with a clean success line
-                        if self.in_place {
-                            print!("\r\x1b[2K");
-                        }
-                        println!("✓ Snapshots updated {}→{}", from, year);
-                        let _ = std::io::stdout().flush();
-                        self.in_progress = false;
-                    } else {
-                        self.render_line(&format!(
-                            "↻ Recomputing snapshots {}/{} (year {})",
-                            self.completed_years, self.total_years, year
-                        ));
-                    }
-                }
-            }
-            tax::ReportProgress::TargetCacheHit { year } => {
-                self.render_line(&format!("✓ Cache hit for {}; using cached carry", year));
-                self.finish_line();
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Handle performance show command
-async fn handle_performance_show(period: &str, json_output: bool) -> Result<()> {
-    use interest::dispatcher::performance;
-    performance::dispatch_performance_show(period, json_output).await
-}
-
-/// Handle income show command (summary by asset)
-async fn handle_income_show(year: Option<i32>, json_output: bool) -> Result<()> {
-    dispatcher::dispatch_command(crate::commands::Command::IncomeShow { year }, json_output).await
-}
-
-/// Handle income detail command (detailed events)
-async fn handle_income_detail(
-    year: Option<i32>,
-    asset: Option<&str>,
-    json_output: bool,
-) -> Result<()> {
-    dispatcher::dispatch_command(
-        crate::commands::Command::IncomeDetail {
-            year,
-            asset: asset.map(|s| s.to_string()),
-        },
-        json_output,
-    )
-    .await
-}
-
-async fn handle_income_summary(year: Option<i32>, json_output: bool) -> Result<()> {
-    dispatcher::dispatch_command(
-        crate::commands::Command::IncomeSummary { year },
-        json_output,
-    )
-    .await
 }
 
 /// Handle manual transaction add command

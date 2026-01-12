@@ -774,12 +774,12 @@ async fn dispatch_portfolio_show(
                     &mut conn,
                     &assets_with_positions,
                     (earliest_date, today),
-                    |msg| {
-                        // Extract display mode from message prefix
-                        let (msg_content, should_persist) = if msg.starts_with("__PERSIST__:") {
-                            (msg.strip_prefix("__PERSIST__:").unwrap_or(msg), true)
-                        } else {
-                            (msg, false)
+                    |event| {
+                        // Map typed event to legacy display values
+                        let (msg_content, should_persist) = match event {
+                            crate::ui::progress::ProgressEvent::Line { text, persist } => {
+                                (text.as_str(), *persist)
+                            }
                         };
 
                         // Check if this is a ticker result (contains "→")

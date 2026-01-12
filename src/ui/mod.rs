@@ -6,6 +6,7 @@
 pub mod crossterm_engine;
 pub mod event_loop;
 pub mod overlays;
+pub mod progress;
 pub mod readline;
 
 use crate::commands::parse_command;
