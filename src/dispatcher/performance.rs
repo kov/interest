@@ -311,6 +311,17 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     Ok(())
 }
 
+pub async fn dispatch_performance(
+    action: crate::commands::PerformanceAction,
+    json_output: bool,
+) -> Result<()> {
+    match action {
+        crate::commands::PerformanceAction::Show { period } => {
+            dispatch_performance_show(&period, json_output).await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,28 +10,16 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
 pub enum Command {
-    /// Import transactions from file: `import <path> [--dry-run]`
-    Import { path: String, dry_run: bool },
-    /// Show portfolio: `portfolio show [--at <date>] [--filter stock|fii|...]`
-    PortfolioShow {
-        filter: Option<String>,
-        as_of_date: Option<String>,
-    },
-    /// Show performance: `performance show <MTD|QTD|YTD|1Y|ALL|from:to>`
-    PerformanceShow { period: String },
-    /// Show tax report: `tax report <year> [--export]`
-    TaxReport { year: i32, export_csv: bool },
-    /// Show tax summary: `tax summary <year>`
-    TaxSummary { year: i32 },
-    /// Show income summary by asset: `income show [year]`
-    IncomeShow { year: Option<i32> },
-    /// Show income detail: `income detail [year] [--asset <ticker>]`
-    IncomeDetail {
-        year: Option<i32>,
-        asset: Option<String>,
-    },
-    /// Show income summary: `income summary [year]` - monthly if year given, yearly otherwise
-    IncomeSummary { year: Option<i32> },
+    /// Import commands and sub-actions (e.g. `import <path> [--dry-run]`)
+    Import { action: ImportAction },
+    /// Portfolio commands and sub-actions (e.g. `portfolio show`)
+    Portfolio { action: PortfolioAction },
+    /// Performance commands and sub-actions (e.g. `performance show`)
+    Performance { action: PerformanceAction },
+    /// Tax commands and sub-actions (e.g. `tax report`)
+    Tax { action: TaxAction },
+    /// Income commands and sub-actions (e.g. `income show`)
+    Income { action: IncomeAction },
     /// Price management: `prices import-b3 <year> [--nocache]` or `prices clear-cache [year]`
     Prices { action: PricesAction },
     /// Inconsistencies management
@@ -40,6 +28,53 @@ pub enum Command {
     Help,
     /// Exit/quit
     Exit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum PortfolioAction {
+    /// Show portfolio: `portfolio show [--at <date>] [--filter stock|fii|...]`
+    Show {
+        filter: Option<String>,
+        as_of_date: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum PerformanceAction {
+    /// Show performance: `performance show <MTD|QTD|YTD|1Y|ALL|from:to>`
+    Show { period: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum TaxAction {
+    /// Generate annual report: `tax report <year> [--export]`
+    Report { year: i32, export_csv: bool },
+    /// Show tax summary: `tax summary <year>`
+    Summary { year: i32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum IncomeAction {
+    /// Show income summary by asset: `income show [year]`
+    Show { year: Option<i32> },
+    /// Show income detail: `income detail [year] [--asset <ticker>]`
+    Detail {
+        year: Option<i32>,
+        asset: Option<String>,
+    },
+    /// Show income summary: `income summary [year]`
+    Summary { year: Option<i32> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum ImportAction {
+    /// Import a file with auto-detection: `import <path> [--dry-run]`
+    File { path: String, dry_run: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,15 +199,15 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
 
             let dry_run = parts.any(|p| p == "--dry-run");
 
-            Ok(Command::Import { path, dry_run })
+            Ok(Command::Import {
+                action: ImportAction::File { path, dry_run },
+            })
         }
         "portfolio" => {
             let action = parts
                 .next()
                 .ok_or_else(|| CommandParseError {
-                    message:
-                        "portfolio requires action (show). Usage: portfolio show [-a|--asset-type <type>]"
-                            .to_string(),
+                    message: "portfolio requires action (show). Usage: portfolio show [-a|--asset-type <type>]".to_string(),
                 })?
                 .to_lowercase();
 
@@ -199,7 +234,9 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         }
                     }
 
-                    Ok(Command::PortfolioShow { filter, as_of_date })
+                    Ok(Command::Portfolio {
+                        action: PortfolioAction::Show { filter, as_of_date },
+                    })
                 }
                 _ => Err(CommandParseError {
                     message: format!("Unknown portfolio action: {}. Use: portfolio show", action),
@@ -225,7 +262,9 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         })?
                         .to_string();
 
-                    Ok(Command::PerformanceShow { period })
+                    Ok(Command::Performance {
+                        action: PerformanceAction::Show { period },
+                    })
                 }
                 _ => Err(CommandParseError {
                     message: format!(
@@ -262,8 +301,12 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
             let export_csv = parts.any(|p| p.eq_ignore_ascii_case("--export"));
 
             match action.as_str() {
-                "report" => Ok(Command::TaxReport { year, export_csv }),
-                "summary" => Ok(Command::TaxSummary { year }),
+                "report" => Ok(Command::Tax {
+                    action: TaxAction::Report { year, export_csv },
+                }),
+                "summary" => Ok(Command::Tax {
+                    action: TaxAction::Summary { year },
+                }),
                 _ => Err(CommandParseError {
                     message: format!("Unknown tax action: {}. Use: report or summary", action),
                 }),
@@ -282,7 +325,9 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 "show" => {
                     // income show [year] - summary by asset
                     let year = parts.next().and_then(|y| y.parse::<i32>().ok());
-                    Ok(Command::IncomeShow { year })
+                    Ok(Command::Income {
+                        action: IncomeAction::Show { year },
+                    })
                 }
                 "detail" => {
                     // income detail [year] [--asset <ticker>] - detailed view
@@ -308,12 +353,16 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         i += 1;
                     }
 
-                    Ok(Command::IncomeDetail { year, asset })
+                    Ok(Command::Income {
+                        action: IncomeAction::Detail { year, asset },
+                    })
                 }
                 "summary" => {
                     // income summary [year] - monthly breakdown if year, yearly summary otherwise
                     let year = parts.next().and_then(|y| y.parse::<i32>().ok());
-                    Ok(Command::IncomeSummary { year })
+                    Ok(Command::Income {
+                        action: IncomeAction::Summary { year },
+                    })
                 }
                 _ => Err(CommandParseError {
                     message: format!(
@@ -584,8 +633,10 @@ mod tests {
         assert_eq!(
             cmd,
             Command::Import {
-                path: "file.xlsx".to_string(),
-                dry_run: false
+                action: ImportAction::File {
+                    path: "file.xlsx".to_string(),
+                    dry_run: false
+                }
             }
         );
     }
@@ -596,8 +647,10 @@ mod tests {
         assert_eq!(
             cmd,
             Command::Import {
-                path: "file.xlsx".to_string(),
-                dry_run: false
+                action: ImportAction::File {
+                    path: "file.xlsx".to_string(),
+                    dry_run: false
+                }
             }
         );
     }
@@ -608,8 +661,10 @@ mod tests {
         assert_eq!(
             cmd,
             Command::Import {
-                path: "file.xlsx".to_string(),
-                dry_run: true
+                action: ImportAction::File {
+                    path: "file.xlsx".to_string(),
+                    dry_run: true
+                }
             }
         );
     }
@@ -619,9 +674,11 @@ mod tests {
         let cmd = parse_command("portfolio show").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: None,
-                as_of_date: None
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: None,
+                    as_of_date: None
+                }
             }
         );
     }
@@ -631,9 +688,11 @@ mod tests {
         let cmd = parse_command("portfolio show --asset-type stock").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: Some("stock".to_string()),
-                as_of_date: None
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: Some("stock".to_string()),
+                    as_of_date: None
+                }
             }
         );
     }
@@ -643,9 +702,11 @@ mod tests {
         let cmd = parse_command("portfolio show -a fii").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: Some("fii".to_string()),
-                as_of_date: None
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: Some("fii".to_string()),
+                    as_of_date: None
+                }
             }
         );
     }
@@ -655,9 +716,11 @@ mod tests {
         let cmd = parse_command("portfolio show --at 2024-06-15").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: None,
-                as_of_date: Some("2024-06-15".to_string())
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: None,
+                    as_of_date: Some("2024-06-15".to_string())
+                }
             }
         );
     }
@@ -667,10 +730,12 @@ mod tests {
         let cmd = parse_command("portfolio show --at 2024-06").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: None,
-                as_of_date: Some("2024-06-30".to_string()) // Last day of June
-            }
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: None,
+                    as_of_date: Some("2024-06-30".to_string())
+                }
+            } // Last day of June
         );
     }
 
@@ -679,10 +744,12 @@ mod tests {
         let cmd = parse_command("portfolio show --at 2024").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: None,
-                as_of_date: Some("2024-12-31".to_string()) // December 31
-            }
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: None,
+                    as_of_date: Some("2024-12-31".to_string())
+                }
+            } // December 31
         );
     }
 
@@ -691,9 +758,11 @@ mod tests {
         let cmd = parse_command("portfolio show -a fii --at 2024-06-15").unwrap();
         assert_eq!(
             cmd,
-            Command::PortfolioShow {
-                filter: Some("fii".to_string()),
-                as_of_date: Some("2024-06-15".to_string())
+            Command::Portfolio {
+                action: PortfolioAction::Show {
+                    filter: Some("fii".to_string()),
+                    as_of_date: Some("2024-06-15".to_string())
+                }
             }
         );
     }
@@ -703,9 +772,11 @@ mod tests {
         let cmd = parse_command("tax report 2024").unwrap();
         assert_eq!(
             cmd,
-            Command::TaxReport {
-                year: 2024,
-                export_csv: false
+            Command::Tax {
+                action: TaxAction::Report {
+                    year: 2024,
+                    export_csv: false
+                }
             }
         );
     }
@@ -715,9 +786,11 @@ mod tests {
         let cmd = parse_command("tax report 2024 --export").unwrap();
         assert_eq!(
             cmd,
-            Command::TaxReport {
-                year: 2024,
-                export_csv: true
+            Command::Tax {
+                action: TaxAction::Report {
+                    year: 2024,
+                    export_csv: true
+                }
             }
         );
     }
@@ -725,19 +798,34 @@ mod tests {
     #[test]
     fn test_parse_tax_summary() {
         let cmd = parse_command("tax summary 2023").unwrap();
-        assert_eq!(cmd, Command::TaxSummary { year: 2023 });
+        assert_eq!(
+            cmd,
+            Command::Tax {
+                action: TaxAction::Summary { year: 2023 }
+            }
+        );
     }
 
     #[test]
     fn test_parse_income_show() {
         let cmd = parse_command("income show").unwrap();
-        assert_eq!(cmd, Command::IncomeShow { year: None });
+        assert_eq!(
+            cmd,
+            Command::Income {
+                action: IncomeAction::Show { year: None }
+            }
+        );
     }
 
     #[test]
     fn test_parse_income_show_with_year() {
         let cmd = parse_command("income show 2024").unwrap();
-        assert_eq!(cmd, Command::IncomeShow { year: Some(2024) });
+        assert_eq!(
+            cmd,
+            Command::Income {
+                action: IncomeAction::Show { year: Some(2024) }
+            }
+        );
     }
 
     #[test]
@@ -745,9 +833,11 @@ mod tests {
         let cmd = parse_command("income detail").unwrap();
         assert_eq!(
             cmd,
-            Command::IncomeDetail {
-                year: None,
-                asset: None
+            Command::Income {
+                action: IncomeAction::Detail {
+                    year: None,
+                    asset: None
+                }
             }
         );
     }
@@ -757,9 +847,11 @@ mod tests {
         let cmd = parse_command("income detail --asset XPLG11").unwrap();
         assert_eq!(
             cmd,
-            Command::IncomeDetail {
-                year: None,
-                asset: Some("XPLG11".to_string())
+            Command::Income {
+                action: IncomeAction::Detail {
+                    year: None,
+                    asset: Some("XPLG11".to_string())
+                }
             }
         );
     }
@@ -769,9 +861,11 @@ mod tests {
         let cmd = parse_command("income detail 2024 --asset mxrf11").unwrap();
         assert_eq!(
             cmd,
-            Command::IncomeDetail {
-                year: Some(2024),
-                asset: Some("MXRF11".to_string())
+            Command::Income {
+                action: IncomeAction::Detail {
+                    year: Some(2024),
+                    asset: Some("MXRF11".to_string())
+                }
             }
         );
     }
@@ -779,13 +873,23 @@ mod tests {
     #[test]
     fn test_parse_income_summary() {
         let cmd = parse_command("income summary 2025").unwrap();
-        assert_eq!(cmd, Command::IncomeSummary { year: Some(2025) });
+        assert_eq!(
+            cmd,
+            Command::Income {
+                action: IncomeAction::Summary { year: Some(2025) }
+            }
+        );
     }
 
     #[test]
     fn test_parse_income_summary_without_year() {
         let cmd = parse_command("income summary").unwrap();
-        assert_eq!(cmd, Command::IncomeSummary { year: None });
+        assert_eq!(
+            cmd,
+            Command::Income {
+                action: IncomeAction::Summary { year: None }
+            }
+        );
     }
 
     #[test]
@@ -801,8 +905,10 @@ mod tests {
         let cmd = parse_command("performance show MTD").unwrap();
         assert_eq!(
             cmd,
-            Command::PerformanceShow {
-                period: "MTD".to_string()
+            Command::Performance {
+                action: PerformanceAction::Show {
+                    period: "MTD".to_string()
+                }
             }
         );
     }
@@ -812,8 +918,10 @@ mod tests {
         let cmd = parse_command("performance show YTD").unwrap();
         assert_eq!(
             cmd,
-            Command::PerformanceShow {
-                period: "YTD".to_string()
+            Command::Performance {
+                action: PerformanceAction::Show {
+                    period: "YTD".to_string()
+                }
             }
         );
     }

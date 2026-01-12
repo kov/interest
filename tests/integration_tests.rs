@@ -11,6 +11,7 @@
 
 use anyhow::Result;
 use assert_cmd::{cargo, prelude::*};
+use chrono::Datelike;
 use interest::corporate_actions::{
     adjust_price_and_cost_for_actions, adjust_quantity_for_actions, get_applicable_actions,
 };
@@ -27,6 +28,7 @@ use rusqlite::Connection;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::Value;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -2230,6 +2232,119 @@ fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
         Decimal::from_str("228.5714285714285714285714286")?
     );
     assert_eq!(may_sales, dec!(1200));
+
+    Ok(())
+}
+
+#[test]
+fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // 1) Import sample data to populate portfolio (uses INTEREST_SKIP_PRICE_FETCH=1 by default)
+    let _import = run_import_json(&home, "tests/data/01_basic_purchase_sale.xlsx");
+
+    // 2) Determine a year to create a fake COTAHIST for (use earliest transaction year)
+    let db_path = get_db_path(&home);
+    let conn = open_db(Some(db_path.clone()))?;
+    let earliest_date: String = conn
+        .query_row("SELECT MIN(trade_date) FROM transactions", [], |r| r.get(0))
+        .expect("failed to read earliest date");
+    let year: i32 = chrono::NaiveDate::parse_from_str(&earliest_date, "%Y-%m-%d")?.year();
+
+    // 3) pick a ticker present in DB
+    let ticker: String = conn
+        .query_row("SELECT ticker FROM assets LIMIT 1", [], |r| r.get(0))
+        .expect("failed to pick ticker");
+
+    // 4) Build a minimal COTAHIST text content with a single valid data record for that ticker
+    // Use fixed-width fields expected by parser (245 chars per line)
+    fn make_line(date: &str, ticker: &str, price_cents: i64, volume: i64) -> String {
+        let mut buf = vec![b' '; 245];
+        // record type
+        buf[0..2].copy_from_slice(b"01");
+        // date YYYYMMDD at 2..10
+        buf[2..10].copy_from_slice(date.as_bytes());
+        // ticker at 12..24 (12 chars)
+        let mut t = ticker.as_bytes().to_vec();
+        t.resize(12, b' ');
+        buf[12..24].copy_from_slice(&t);
+        // prices: place same price at PREABE(56), PREULT(108), etc. as 13-char zero-padded
+        let price_field = format!("{:013}", price_cents);
+        buf[56..69].copy_from_slice(price_field.as_bytes());
+        buf[69..82].copy_from_slice(price_field.as_bytes());
+        buf[82..95].copy_from_slice(price_field.as_bytes());
+        buf[108..121].copy_from_slice(price_field.as_bytes());
+        // volume at 170..188 (18 chars)
+        let vol_field = format!("{:018}", volume);
+        buf[170..188].copy_from_slice(vol_field.as_bytes());
+        String::from_utf8(buf).unwrap()
+    }
+
+    let date = format!("{}0101", year); // Jan 1st of year
+    let line = make_line(&date, &ticker, 1000, 1); // price 10.00 (1000 cents)
+    let contents = format!("{}\n", line);
+
+    // 5) Create a fake ZIP in XDG_CACHE_HOME so download_cotahist_year will use cached archive
+    let cache_root = TempDir::new()?; // will set XDG_CACHE_HOME to this
+    let cache_dir = cache_root.path().join("interest").join("cotahist");
+    std::fs::create_dir_all(&cache_dir)?;
+    let zip_path = cache_dir.join(format!("COTAHIST_A{}.ZIP", year));
+
+    // Create zip with one entry (COTAHIST txt)
+    {
+        let f = std::fs::File::create(&zip_path)?;
+        let mut zip = zip::ZipWriter::new(f);
+
+        let entry_name = format!("COTAHIST_A{}.TXT", year);
+        let options: zip::write::FileOptions<'_, zip::write::ExtendedFileOptions> =
+            zip::write::FileOptions::default();
+        zip.start_file(entry_name, options)?;
+        zip.write_all(contents.as_bytes())?;
+        zip.finish()?;
+    }
+
+    // 6) Run portfolio show with XDG_CACHE_HOME pointing to our cache and HOME to our temp home
+    let mut cmd = Command::new(cargo::cargo_bin!("interest"));
+    cmd.env("HOME", home.path());
+    cmd.env("XDG_CACHE_HOME", cache_root.path());
+    cmd.arg("--no-color");
+    cmd.arg("portfolio");
+    cmd.arg("show");
+
+    let out = cmd.output().expect("failed to run portfolio show");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // 7) Assert the *fixed* behavior (what we expect after applying the fix):
+    // the printed portfolio row for our ticker should include a currency price
+    // (Price column) and not display "N/A". This will FAIL in the current
+    // buggy state and PASS after you reapply your fix.
+
+    let row = stdout
+        .lines()
+        .find(|l| {
+            let parts: Vec<_> = l.split('│').map(|s| s.trim()).collect();
+            // parts[1] is Ticker column (first after the left border)
+            parts.get(1).map(|s| *s == ticker).unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("Ticker row not found in stdout:\n{}", stdout));
+
+    let cols: Vec<_> = row.split('│').map(|s| s.trim()).collect();
+
+    // Price column is at index 5 (0 empty, 1 ticker, 2 qty, 3 avg cost, 4 total cost, 5 price)
+    let price_col = cols.get(5).copied().unwrap_or("");
+
+    assert!(
+        price_col.contains("R$") || price_col.contains("R$ "),
+        "Expected currency in Price column, found: '{}'\nFull output:\n{}",
+        price_col,
+        stdout
+    );
+    assert!(
+        !price_col.contains("N/A"),
+        "Did not expect N/A in Price column: {}",
+        price_col
+    );
 
     Ok(())
 }

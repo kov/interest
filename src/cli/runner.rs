@@ -18,58 +18,74 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                     Some(d) => Some(cmd::parse_flexible_date(d)?),
                     None => None,
                 };
-                Ok(Some(Command::PortfolioShow {
-                    filter: asset_type.clone(),
-                    as_of_date,
+                Ok(Some(Command::Portfolio {
+                    action: cmd::PortfolioAction::Show {
+                        filter: asset_type.clone(),
+                        as_of_date,
+                    },
                 }))
             }
         },
 
         Commands::Performance { action } => match action {
-            crate::cli::PerformanceCommands::Show { period } => {
-                Ok(Some(Command::PerformanceShow {
+            crate::cli::PerformanceCommands::Show { period } => Ok(Some(Command::Performance {
+                action: cmd::PerformanceAction::Show {
                     period: period.clone(),
-                }))
-            }
+                },
+            })),
         },
 
         Commands::Tax { action } => match action {
-            crate::cli::TaxCommands::Report { year, export } => Ok(Some(Command::TaxReport {
-                year: *year,
-                export_csv: *export,
+            crate::cli::TaxCommands::Report { year, export } => Ok(Some(Command::Tax {
+                action: cmd::TaxAction::Report {
+                    year: *year,
+                    export_csv: *export,
+                },
             })),
-            crate::cli::TaxCommands::Summary { year } => {
-                Ok(Some(Command::TaxSummary { year: *year }))
-            }
+            crate::cli::TaxCommands::Summary { year } => Ok(Some(Command::Tax {
+                action: cmd::TaxAction::Summary { year: *year },
+            })),
             crate::cli::TaxCommands::Calculate { .. } => Ok(None),
         },
 
         Commands::Income { action } => match action {
-            crate::cli::IncomeCommands::Show { year } => {
-                Ok(Some(Command::IncomeShow { year: *year }))
-            }
-            crate::cli::IncomeCommands::Detail { year, asset } => Ok(Some(Command::IncomeDetail {
-                year: *year,
-                asset: asset.clone(),
+            crate::cli::IncomeCommands::Show { year } => Ok(Some(Command::Income {
+                action: cmd::IncomeAction::Show { year: *year },
             })),
-            crate::cli::IncomeCommands::Summary { year } => {
-                Ok(Some(Command::IncomeSummary { year: *year }))
-            }
+            crate::cli::IncomeCommands::Detail { year, asset } => Ok(Some(Command::Income {
+                action: cmd::IncomeAction::Detail {
+                    year: *year,
+                    asset: asset.clone(),
+                },
+            })),
+            crate::cli::IncomeCommands::Summary { year } => Ok(Some(Command::Income {
+                action: cmd::IncomeAction::Summary { year: *year },
+            })),
         },
 
         Commands::Actions { .. } => Ok(None),
         Commands::Inconsistencies { action } => match action {
             crate::cli::InconsistenciesCommands::List {
-                open: _,
-                all: _,
+                open,
+                all,
                 status,
                 issue_type,
                 asset,
             } => {
+                let status = if let Some(status) = status.clone() {
+                    Some(status)
+                } else if *all {
+                    Some("ALL".to_string())
+                } else if *open {
+                    Some("OPEN".to_string())
+                } else {
+                    Some("OPEN".to_string())
+                };
+
                 // Map to internal InconsistenciesAction::List
                 Ok(Some(Command::Inconsistencies {
                     action: cmd::InconsistenciesAction::List {
-                        status: status.clone(),
+                        status,
                         issue_type: issue_type.clone(),
                         asset: asset.clone(),
                     },
@@ -146,10 +162,12 @@ mod tests {
 
         let converted = to_internal_command(&cmd).expect("conversion failed");
         match converted {
-            Some(Command::PortfolioShow { filter, as_of_date }) => {
-                assert_eq!(filter, Some("STOCK".to_string()));
-                assert_eq!(as_of_date, Some("2025-05-31".to_string()));
-            }
+            Some(Command::Portfolio { action }) => match action {
+                crate::commands::PortfolioAction::Show { filter, as_of_date } => {
+                    assert_eq!(filter, Some("STOCK".to_string()));
+                    assert_eq!(as_of_date, Some("2025-05-31".to_string()));
+                }
+            },
             other => panic!("unexpected converted result: {:?}", other),
         }
     }
