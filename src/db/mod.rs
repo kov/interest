@@ -88,6 +88,13 @@ pub fn upsert_asset(
     Ok(conn.last_insert_rowid())
 }
 
+/// Check whether a ticker exists in `assets`
+pub fn asset_exists(conn: &Connection, ticker: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT id FROM assets WHERE ticker = ?1")?;
+    let existing: Option<i64> = stmt.query_row([ticker], |row| row.get(0)).optional()?;
+    Ok(existing.is_some())
+}
+
 /// Insert transaction
 pub fn insert_transaction(conn: &Connection, tx: &Transaction) -> Result<i64> {
     conn.execute(
@@ -1034,5 +1041,25 @@ mod tests {
             .unwrap();
 
         assert!(table_count > 0);
+    }
+
+    #[test]
+    fn test_asset_exists() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let db_path = tmp.path().join("test.db");
+        init_database(Some(db_path.clone()))?;
+        let conn = Connection::open(&db_path)?;
+
+        // Initially absent
+        assert!(!asset_exists(&conn, "NOSUCH")?);
+
+        // Create asset
+        let id = upsert_asset(&conn, "EXIST1", &AssetType::Stock, None)?;
+        assert!(id > 0);
+
+        // Now exists
+        assert!(asset_exists(&conn, "EXIST1")?);
+
+        Ok(())
     }
 }

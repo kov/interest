@@ -20,6 +20,34 @@ pub use movimentacao_excel::MovimentacaoEntry;
 pub use movimentacao_import::import_movimentacao_entries;
 pub use ofertas_publicas_excel::OfertaPublicaEntry;
 
+use chrono::NaiveDate;
+use serde::Serialize;
+
+/// Unified import statistics shared across import formats
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportStats {
+    // CEI / Ofertas 'generic' imported count
+    pub imported: usize,
+    pub skipped_old: usize,
+
+    // Movimentacao-specific counts
+    pub imported_trades: usize,
+    pub skipped_trades: usize,
+    pub skipped_trades_old: usize,
+    pub imported_actions: usize,
+    pub skipped_actions: usize,
+    pub skipped_actions_old: usize,
+    pub auto_applied_actions: usize,
+    pub imported_income: usize,
+    pub skipped_income: usize,
+    pub skipped_income_old: usize,
+
+    pub errors: usize,
+
+    pub earliest: Option<NaiveDate>,
+    pub latest: Option<NaiveDate>,
+}
+
 /// Result of importing a file with auto-detection
 #[derive(Debug)]
 pub enum ImportResult {

@@ -1,13 +1,6 @@
+use crate::{db, reports};
 use anyhow::Result;
 use colored::Colorize;
-use rusqlite::OptionalExtension;
-use tabled::Tabled;
-use tabled::{
-    settings::{object::Columns, Alignment, Modify, Style},
-    Table,
-};
-
-use crate::{db, reports};
 
 pub async fn dispatch_import(
     action: crate::commands::ImportAction,
@@ -22,11 +15,7 @@ pub async fn dispatch_import(
             let import_result = match importers::import_file_auto(&path) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Error reading import file {}: {}",
-                        path,
-                        e
-                    ));
+                    return Err(anyhow::anyhow!("Error reading import file {}: {}", path, e));
                 }
             };
 
@@ -40,41 +29,12 @@ pub async fn dispatch_import(
                         );
                     }
 
-                    #[derive(Tabled)]
-                    struct TransactionPreview {
-                        #[tabled(rename = "Date")]
-                        date: String,
-                        #[tabled(rename = "Ticker")]
-                        ticker: String,
-                        #[tabled(rename = "Type")]
-                        tx_type: String,
-                        #[tabled(rename = "Quantity")]
-                        quantity: String,
-                        #[tabled(rename = "Price")]
-                        price: String,
-                        #[tabled(rename = "Total")]
-                        total: String,
-                    }
-
-                    let preview: Vec<TransactionPreview> = raw_transactions
-                        .iter()
-                        .take(10)
-                        .map(|tx| TransactionPreview {
-                            date: tx.trade_date.format("%d/%m/%Y").to_string(),
-                            ticker: tx.ticker.clone(),
-                            tx_type: tx.transaction_type.clone(),
-                            quantity: tx.quantity.to_string(),
-                            price: crate::utils::format_currency(tx.price),
-                            total: crate::utils::format_currency(tx.total),
-                        })
-                        .collect();
-
-                    if !preview.is_empty() && !json_output {
-                        let table = Table::new(preview)
-                            .with(Style::rounded())
-                            .with(Modify::new(Columns::new(3..)).with(Alignment::right()))
-                            .to_string();
-                        println!("{}", table);
+                    if !json_output {
+                        if let Some(table) =
+                            crate::dispatcher::imports_helpers::preview_cei_table(&raw_transactions)
+                        {
+                            println!("{}", table);
+                        }
                     }
 
                     if dry_run {
@@ -87,112 +47,20 @@ pub async fn dispatch_import(
                     db::init_database(None)?;
                     let conn = db::open_db(None)?;
 
-                    let mut imported = 0;
-                    let mut skipped_old = 0;
-                    let mut errors = 0;
-                    let mut max_imported_date: Option<chrono::NaiveDate> = None;
-                    let mut earliest_imported_date: Option<chrono::NaiveDate> = None;
-
-                    let last_import_date = db::get_last_import_date(&conn, "CEI", "trades")?;
-
-                    let asset_exists = |ticker: &str| -> Result<bool> {
-                        let exists: Option<i64> = conn
-                            .query_row("SELECT id FROM assets WHERE ticker = ?1", [ticker], |row| {
-                                row.get(0)
-                            })
-                            .optional()?;
-                        Ok(exists.is_some())
-                    };
-
-                    for raw_tx in &raw_transactions {
-                        if let Some(last_date) = last_import_date {
-                            if raw_tx.trade_date <= last_date {
-                                skipped_old += 1;
-                                continue;
-                            }
-                        }
-
-                        let (normalized_ticker, notes_override) =
-                            importers::cei_excel::resolve_option_exercise_ticker(
-                                raw_tx,
-                                asset_exists,
-                            )?;
-                        let asset_type = db::AssetType::detect_from_ticker(&normalized_ticker)
-                            .unwrap_or(db::AssetType::Stock);
-
-                        // Upsert asset
-                        let asset_id =
-                            match db::upsert_asset(&conn, &normalized_ticker, &asset_type, None) {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    eprintln!("Error upserting asset {}: {}", normalized_ticker, e);
-                                    errors += 1;
-                                    continue;
-                                }
-                            };
-
-                        let mut transaction = match raw_tx.to_transaction(asset_id) {
-                            Ok(tx) => tx,
-                            Err(e) => {
-                                eprintln!(
-                                    "Error converting transaction for {}: {}",
-                                    raw_tx.ticker, e
-                                );
-                                errors += 1;
-                                continue;
-                            }
-                        };
-                        if let Some(notes) = notes_override {
-                            transaction.notes = Some(notes);
-                        }
-
-                        match db::insert_transaction(&conn, &transaction) {
-                            Ok(_) => {
-                                imported += 1;
-                                max_imported_date = Some(match max_imported_date {
-                                    Some(current) if current >= transaction.trade_date => current,
-                                    _ => transaction.trade_date,
-                                });
-                                earliest_imported_date = Some(match earliest_imported_date {
-                                    Some(current) if current <= transaction.trade_date => current,
-                                    _ => transaction.trade_date,
-                                });
-                            }
-                            Err(e) => {
-                                eprintln!("Error inserting transaction: {}", e);
-                                errors += 1;
-                            }
-                        }
-                    }
-
-                    if let Some(last_date) = max_imported_date {
-                        db::set_last_import_date(&conn, "CEI", "trades", last_date)?;
-                    }
-
-                    if imported > 0 {
-                        if let Some(date) = earliest_imported_date {
-                            reports::invalidate_snapshots_after(&conn, date)?;
-                            if !json_output {
-                                println!(
-                                    "  {} Snapshots on/after {} invalidated",
-                                    "⚠".yellow().bold(),
-                                    date
-                                );
-                            }
-                        }
-                    }
+                    let stats =
+                        crate::dispatcher::imports_helpers::import_cei(&conn, &raw_transactions)?;
 
                     if !json_output {
                         println!("\n{} Import complete!", "✓".green().bold());
-                        println!("  Imported: {}", imported.to_string().green());
-                        if skipped_old > 0 {
+                        println!("  Imported: {}", stats.imported.to_string().green());
+                        if stats.skipped_old > 0 {
                             println!(
                                 "  Skipped (before last import date): {}",
-                                skipped_old.to_string().yellow()
+                                stats.skipped_old.to_string().yellow()
                             );
                         }
-                        if errors > 0 {
-                            println!("  Errors: {}", errors.to_string().red());
+                        if stats.errors > 0 {
+                            println!("  Errors: {}", stats.errors.to_string().red());
                         }
                     }
 
@@ -242,44 +110,14 @@ pub async fn dispatch_import(
                     // Show preview of trades
                     if !json_output && !trades.is_empty() {
                         println!("{} Sample trades:", "💰".cyan().bold());
-
-                        #[derive(Tabled)]
-                        struct TradePreview {
-                            #[tabled(rename = "Date")]
-                            date: String,
-                            #[tabled(rename = "Type")]
-                            movement_type: String,
-                            #[tabled(rename = "Ticker")]
-                            ticker: String,
-                            #[tabled(rename = "Qty")]
-                            quantity: String,
-                            #[tabled(rename = "Price")]
-                            price: String,
+                        let cloned_trades: Vec<_> = trades.iter().map(|e| (*e).clone()).collect();
+                        if let Some(table) =
+                            crate::dispatcher::imports_helpers::preview_movimentacao_trades(
+                                &cloned_trades,
+                            )
+                        {
+                            println!("{}\n", table);
                         }
-
-                        let preview: Vec<TradePreview> = trades
-                            .iter()
-                            .take(5)
-                            .map(|e| TradePreview {
-                                date: e.date.format("%d/%m/%Y").to_string(),
-                                movement_type: e.movement_type.clone(),
-                                ticker: e.ticker.clone().unwrap_or_else(|| "?".to_string()),
-                                quantity: e
-                                    .quantity
-                                    .map(|q| q.to_string())
-                                    .unwrap_or_else(|| "-".to_string()),
-                                price: e
-                                    .unit_price
-                                    .map(crate::utils::format_currency)
-                                    .unwrap_or_else(|| "-".to_string()),
-                            })
-                            .collect();
-
-                        let table = Table::new(preview)
-                            .with(Style::rounded())
-                            .with(Modify::new(Columns::new(3..)).with(Alignment::right()))
-                            .to_string();
-                        println!("{}\n", table);
                     }
 
                     // Show preview of corporate actions
@@ -342,13 +180,18 @@ pub async fn dispatch_import(
                         );
                     }
                     let stats = importers::import_movimentacao_entries(&conn, entries, true)?;
+                    if let Some(date) = stats.earliest {
+                        reports::invalidate_snapshots_after(&conn, date)?;
+                    }
 
                     if json_output {
+                        // Use the unified ImportStats returned by the importer
                         println!(
                             "{}",
-                            serde_json::to_string_pretty(
-                                &serde_json::json!({"success": true, "data": stats})
-                            )?
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "success": true,
+                                "summary": stats
+                            }))?
                         );
                         return Ok(());
                     }
@@ -424,38 +267,12 @@ pub async fn dispatch_import(
                         );
                     }
 
-                    #[derive(Tabled)]
-                    struct OfertaPreview {
-                        #[tabled(rename = "Date")]
-                        date: String,
-                        #[tabled(rename = "Ticker")]
-                        ticker: String,
-                        #[tabled(rename = "Qty")]
-                        quantity: String,
-                        #[tabled(rename = "Price")]
-                        price: String,
-                        #[tabled(rename = "Offer")]
-                        offer: String,
-                    }
-
-                    let preview: Vec<OfertaPreview> = entries
-                        .iter()
-                        .take(5)
-                        .map(|e| OfertaPreview {
-                            date: e.date.format("%d/%m/%Y").to_string(),
-                            ticker: e.ticker.clone(),
-                            quantity: e.quantity.to_string(),
-                            price: crate::utils::format_currency(e.unit_price),
-                            offer: e.offer.clone(),
-                        })
-                        .collect();
-
-                    if !preview.is_empty() && !json_output {
-                        let table = Table::new(preview)
-                            .with(Style::rounded())
-                            .with(Modify::new(Columns::new(2..4)).with(Alignment::right()))
-                            .to_string();
-                        println!("{}", table);
+                    if !json_output {
+                        if let Some(table) =
+                            crate::dispatcher::imports_helpers::preview_ofertas_table(&entries)
+                        {
+                            println!("{}", table);
+                        }
                     }
 
                     if dry_run {
@@ -470,76 +287,24 @@ pub async fn dispatch_import(
                     db::init_database(None)?;
                     let conn = db::open_db(None)?;
 
-                    let mut imported = 0;
-                    let mut skipped_old = 0;
-                    let mut errors = 0;
-                    let mut max_date: Option<chrono::NaiveDate> = None;
-
-                    let last_import_date =
-                        db::get_last_import_date(&conn, "OFERTAS_PUBLICAS", "allocations")?;
-
-                    println!("{} Importing offer allocations...", "⏳".cyan().bold());
-
-                    for entry in entries {
-                        let asset_type = db::AssetType::detect_from_ticker(&entry.ticker)
-                            .unwrap_or(db::AssetType::Stock);
-
-                        let asset_id =
-                            match db::upsert_asset(&conn, &entry.ticker, &asset_type, None) {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    eprintln!("Error upserting asset {}: {}", entry.ticker, e);
-                                    errors += 1;
-                                    continue;
-                                }
-                            };
-
-                        if let Some(last_date) = last_import_date {
-                            if entry.date <= last_date {
-                                skipped_old += 1;
-                                continue;
-                            }
-                        }
-
-                        let transaction = match entry.to_transaction(asset_id) {
-                            Ok(tx) => tx,
-                            Err(e) => {
-                                eprintln!("Error converting offer to transaction: {}", e);
-                                errors += 1;
-                                continue;
-                            }
-                        };
-
-                        match db::insert_transaction(&conn, &transaction) {
-                            Ok(_) => {
-                                imported += 1;
-                                max_date = Some(match max_date {
-                                    Some(current) if current >= transaction.trade_date => current,
-                                    _ => transaction.trade_date,
-                                });
-                            }
-                            Err(e) => {
-                                eprintln!("Error inserting offer allocation transaction: {}", e);
-                                errors += 1;
-                            }
-                        }
+                    if !json_output {
+                        println!("{} Importing offer allocations...", "⏳".cyan().bold());
                     }
 
-                    if let Some(d) = max_date {
-                        db::set_last_import_date(&conn, "OFERTAS_PUBLICAS", "allocations", d)?;
-                    }
+                    let stats =
+                        crate::dispatcher::imports_helpers::import_ofertas(&conn, &entries)?;
 
                     if !json_output {
                         println!("\n{} Import complete!", "✓".green().bold());
-                        println!("  Imported: {}", imported.to_string().green());
-                        if skipped_old > 0 {
+                        println!("  Imported: {}", stats.imported.to_string().green());
+                        if stats.skipped_old > 0 {
                             println!(
                                 "  Skipped (before last import date): {}",
-                                skipped_old.to_string().yellow()
+                                stats.skipped_old.to_string().yellow()
                             );
                         }
-                        if errors > 0 {
-                            println!("  Errors: {}", errors.to_string().red());
+                        if stats.errors > 0 {
+                            println!("  Errors: {}", stats.errors.to_string().red());
                         }
                     }
 

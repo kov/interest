@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
-use serde::Serialize;
+
 use std::collections::HashMap;
 use tracing::{info, warn};
 
@@ -10,27 +10,11 @@ use crate::db;
 use crate::importers::MovimentacaoEntry;
 use serde_json::json;
 
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct ImportStats {
-    pub imported_trades: usize,
-    pub skipped_trades: usize,
-    pub skipped_trades_old: usize,
-    pub imported_actions: usize,
-    pub skipped_actions: usize,
-    pub skipped_actions_old: usize,
-    #[allow(dead_code)]
-    pub auto_applied_actions: usize,
-    pub imported_income: usize,
-    pub skipped_income: usize,
-    pub skipped_income_old: usize,
-    pub errors: usize,
-}
-
 pub fn import_movimentacao_entries(
     conn: &Connection,
     entries: Vec<MovimentacaoEntry>,
     track_state: bool,
-) -> Result<ImportStats> {
+) -> Result<crate::importers::ImportStats> {
     let receipt_index = build_subscription_receipts_index(&entries);
     let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
     let mut actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
@@ -41,6 +25,7 @@ pub fn import_movimentacao_entries(
     let mut skipped_trades_old = 0;
     let mut errors = 0;
     let mut max_trade_date: Option<chrono::NaiveDate> = None;
+    let mut earliest_trade_date: Option<chrono::NaiveDate> = None;
 
     let last_trade_date = if track_state {
         db::get_last_import_date(conn, "MOVIMENTACAO", "trades")?
@@ -88,6 +73,10 @@ pub fn import_movimentacao_entries(
                     Some(current) if current >= transaction.trade_date => current,
                     _ => transaction.trade_date,
                 });
+                earliest_trade_date = Some(match earliest_trade_date {
+                    Some(current) if current <= transaction.trade_date => current,
+                    _ => transaction.trade_date,
+                });
             }
             Err(e) => {
                 warn!("Error inserting transaction: {}", e);
@@ -107,6 +96,7 @@ pub fn import_movimentacao_entries(
     let mut skipped_actions_old = 0;
     let mut auto_applied_actions = 0;
     let mut max_action_date: Option<chrono::NaiveDate> = None;
+    let mut earliest_action_date: Option<chrono::NaiveDate> = None;
 
     let last_action_date = if track_state {
         db::get_last_import_date(conn, "MOVIMENTACAO", "corporate_actions")?
@@ -186,6 +176,10 @@ pub fn import_movimentacao_entries(
                             Some(current) if current >= entry.date => current,
                             _ => entry.date,
                         });
+                        earliest_action_date = Some(match earliest_action_date {
+                            Some(current) if current <= entry.date => current,
+                            _ => entry.date,
+                        });
                     }
                     Err(e) => {
                         warn!("Error inserting Bonificação em Ativos transaction: {}", e);
@@ -250,6 +244,10 @@ pub fn import_movimentacao_entries(
             imported_actions += 1;
             max_action_date = Some(match max_action_date {
                 Some(current) if current >= action.event_date => current,
+                _ => action.event_date,
+            });
+            earliest_action_date = Some(match earliest_action_date {
+                Some(current) if current <= action.event_date => current,
                 _ => action.event_date,
             });
 
@@ -422,6 +420,7 @@ pub fn import_movimentacao_entries(
     let mut skipped_income = 0;
     let mut skipped_income_old = 0;
     let mut max_income_date: Option<chrono::NaiveDate> = None;
+    let mut earliest_income_date: Option<chrono::NaiveDate> = None;
 
     let last_income_date = if track_state {
         db::get_last_import_date(conn, "MOVIMENTACAO", "income")?
@@ -491,6 +490,10 @@ pub fn import_movimentacao_entries(
                     Some(current) if current >= income_event.event_date => current,
                     _ => income_event.event_date,
                 });
+                earliest_income_date = Some(match earliest_income_date {
+                    Some(current) if current <= income_event.event_date => current,
+                    _ => income_event.event_date,
+                });
             }
             Err(e) => {
                 warn!("Error inserting income event: {}", e);
@@ -505,7 +508,23 @@ pub fn import_movimentacao_entries(
         }
     }
 
-    Ok(ImportStats {
+    // Determine overall min/max dates across sections
+    let earliest = [
+        earliest_trade_date,
+        earliest_action_date,
+        earliest_income_date,
+    ]
+    .iter()
+    .filter_map(|d| *d)
+    .min();
+    let latest = [max_trade_date, max_action_date, max_income_date]
+        .iter()
+        .filter_map(|d| *d)
+        .max();
+
+    Ok(crate::importers::ImportStats {
+        imported: 0, // Movimentacao uses specialized counters below
+        skipped_old: 0,
         imported_trades,
         skipped_trades,
         skipped_trades_old,
@@ -517,6 +536,8 @@ pub fn import_movimentacao_entries(
         skipped_income,
         skipped_income_old,
         errors,
+        earliest,
+        latest,
     })
 }
 
