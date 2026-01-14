@@ -266,7 +266,12 @@ where
                         ),
                         DownloadStage::Parsing => {
                             // Show parsing progress with percentage
-                            let msg_text = if let Some(total) = progress_event.total_records {
+                            let msg_text = if progress_event.display_mode == DisplayMode::Persist {
+                                format!(
+                                    "✓ Parsed {} prices from COTAHIST {}",
+                                    progress_event.records_processed, progress_event.year
+                                )
+                            } else if let Some(total) = progress_event.total_records {
                                 let pct = if total > 0 {
                                     progress_event.records_processed * 100 / total
                                 } else {
@@ -397,6 +402,7 @@ where
 fn is_priceable_asset(asset: &Asset) -> bool {
     match asset.asset_type {
         AssetType::Stock
+        | AssetType::Bdr
         | AssetType::Etf
         | AssetType::Fii
         | AssetType::Fiagro
@@ -437,7 +443,13 @@ fn is_priceable_asset(asset: &Asset) -> bool {
 
             true
         }
-        AssetType::Bond | AssetType::GovBond => false,
+        AssetType::Bond
+        | AssetType::GovBond
+        | AssetType::Fidc
+        | AssetType::Fip
+        | AssetType::Option
+        | AssetType::TermContract
+        | AssetType::Unknown => false,
     }
 }
 

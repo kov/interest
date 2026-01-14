@@ -1,12 +1,11 @@
 //! Performance command dispatcher implementation
 
-use crate::ui::crossterm_engine::Spinner;
+use crate::ui::progress::ProgressPrinter;
 use crate::utils::{format_currency, format_currency_aligned};
 use crate::{db, reports};
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use colored::Colorize;
-use std::io::{stdout, Write};
 use tracing;
 
 /// Parse a period string (MTD, QTD, YTD, 1Y, ALL, YYYY, or from:to)
@@ -84,23 +83,23 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 
             if !json_output && !skip_price_fetch {
                 let total = assets.len();
-                let spinner = Spinner::new();
+                let printer = ProgressPrinter::new(json_output);
                 let mut completed = 0usize;
 
                 // Show initial spinner
-                print!("{} Fetching prices 0/{}...", spinner.tick(), total);
-                stdout().flush().ok();
+                printer.update(&format!("Fetching prices 0/{}...", total));
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
                     &assets,
                     (earliest_date, today),
                     |event| {
-                        let msg = match event {
-                            crate::ui::progress::ProgressEvent::Line { text, persist: _ } => {
-                                text.as_str()
+                        let (raw_text, should_persist) = match event {
+                            crate::ui::progress::ProgressEvent::Line { text, persist } => {
+                                (text.clone(), *persist)
                             }
                         };
+                        let msg = raw_text.as_str();
 
                         // Check if this is a ticker result (contains "→")
                         if msg.contains("→") {
@@ -115,32 +114,27 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                                 }
                             }
 
-                            // Clear spinner line, print ticker result, re-draw spinner
-                            print!("\r\x1B[2K"); // Clear current line
-                            println!("  {} {}", "↳".dimmed(), msg); // Print ticker with newline
-                            print!(
-                                "{} Fetching prices {}/{}...",
-                                spinner.tick(),
-                                completed,
-                                total
-                            );
-                            stdout().flush().ok();
+                            // Print ticker result, re-draw spinner message
+                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
+                                text: msg.to_string(),
+                                persist: true,
+                            });
+                            printer.update(&format!("Fetching prices {}/{}...", completed, total));
                         } else if msg.starts_with("✓") {
-                            // Completion message - clear spinner and print final status
-                            print!("\r\x1B[2K");
-                            println!("{}", msg.green());
-                            stdout().flush().ok();
+                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
+                                text: msg.to_string(),
+                                persist: true,
+                            });
                         } else {
-                            // Status update - just update spinner text
-                            print!("\r\x1B[2K{} {}", spinner.tick(), msg);
-                            stdout().flush().ok();
+                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
+                                text: raw_text,
+                                persist: should_persist,
+                            });
                         }
                     },
                 )
                 .await
                 .or_else(|e: anyhow::Error| {
-                    print!("\r\x1B[2K"); // Clear spinner on error
-                    stdout().flush().ok();
                     tracing::warn!("Price resolution failed: {}", e);
                     // Continue anyway - performance calculation will use available prices
                     Ok::<(), anyhow::Error>(())

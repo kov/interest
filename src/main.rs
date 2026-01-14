@@ -9,6 +9,7 @@ mod reports;
 mod scraping;
 mod tax;
 mod term_contracts;
+mod tickers;
 mod ui;
 mod utils;
 
@@ -62,7 +63,9 @@ async fn main() -> Result<()> {
     let disable_color = cli.no_color || !stdout_is_tty || cli.json;
 
     // Initialize logging - always write to stderr to keep stdout clean
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn"))
+        .add_directive("headless_chrome=error".parse().unwrap());
 
     tracing_subscriber::fmt()
         .with_ansi(!disable_color)
@@ -579,8 +582,7 @@ async fn handle_import(file_path: &str, dry_run: bool, json_output: bool) -> Res
             println!("{} Importing offer allocations...", "⏳".cyan().bold());
 
             for entry in entries {
-                let asset_type = db::AssetType::detect_from_ticker(&entry.ticker)
-                    .unwrap_or(db::AssetType::Stock);
+                let asset_type = db::AssetType::Unknown;
 
                 let asset_id = match db::upsert_asset(&conn, &entry.ticker, &asset_type, None) {
                     Ok(id) => id,
@@ -799,8 +801,7 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
 
         for position in positions {
             // Detect asset type from ticker
-            let asset_type =
-                db::AssetType::detect_from_ticker(&position.ticker).unwrap_or(db::AssetType::Stock);
+            let asset_type = db::AssetType::Unknown;
 
             // Upsert asset
             let asset_id = match db::upsert_asset(&conn, &position.ticker, &asset_type, None) {
@@ -831,7 +832,7 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
                 )?;
                 replaced += 1;
                 println!(
-                    "  {} Replaced {} existing IRPF position(s) for {}",
+                    "{} Replaced {} existing IRPF position(s) for {}",
                     "↻".yellow(),
                     existing_count,
                     position.ticker.cyan()
@@ -856,7 +857,7 @@ async fn handle_irpf_import(file_path: &str, year: i32, dry_run: bool) -> Result
             match db::insert_transaction(&conn, &transaction) {
                 Ok(_) => {
                     println!(
-                        "  {} Added opening position: {} {} @ {}",
+                        "{} Added opening position: {} {} @ {}",
                         "✓".green(),
                         position.quantity,
                         position.ticker.cyan(),
@@ -1396,7 +1397,7 @@ async fn handle_action_add(
     let conn = db::open_db(None)?;
 
     // Get or create asset
-    let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
+    let asset_type = db::AssetType::Unknown;
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
 
     // Create corporate action
@@ -1458,7 +1459,7 @@ async fn handle_action_scrape(
     let conn = db::open_db(None)?;
 
     // Get or create asset
-    let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
+    let asset_type = db::AssetType::Unknown;
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
 
     // Determine URL
@@ -2135,7 +2136,7 @@ async fn handle_transaction_add(
     let conn = db::open_db(None)?;
 
     // Detect asset type from ticker
-    let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
+    let asset_type = db::AssetType::Unknown;
 
     // Upsert asset
     let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;

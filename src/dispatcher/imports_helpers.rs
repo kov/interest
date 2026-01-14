@@ -80,8 +80,7 @@ pub(crate) fn import_cei(
 
         let (normalized_ticker, notes_override) =
             importers::cei_excel::resolve_option_exercise_ticker(raw_tx, asset_exists_closure)?;
-        let asset_type =
-            db::AssetType::detect_from_ticker(&normalized_ticker).unwrap_or(db::AssetType::Stock);
+        let asset_type = db::AssetType::Unknown;
 
         // Upsert asset
         let asset_id = match db::upsert_asset(conn, &normalized_ticker, &asset_type, None) {
@@ -256,8 +255,7 @@ pub(crate) fn import_ofertas(
     let last_import_date = db::get_last_import_date(conn, "OFERTAS_PUBLICAS", "allocations")?;
 
     for entry in entries {
-        let asset_type =
-            db::AssetType::detect_from_ticker(&entry.ticker).unwrap_or(db::AssetType::Stock);
+        let asset_type = db::AssetType::Unknown;
 
         let asset_id = match db::upsert_asset(conn, &entry.ticker, &asset_type, None) {
             Ok(id) => id,

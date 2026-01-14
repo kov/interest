@@ -68,7 +68,7 @@ pub fn init_database(db_path: Option<PathBuf>) -> Result<()> {
 pub fn upsert_asset(
     conn: &Connection,
     ticker: &str,
-    asset_type: &AssetType,
+    _asset_type: &AssetType,
     name: Option<&str>,
 ) -> Result<i64> {
     // Try to find existing asset
@@ -79,10 +79,19 @@ pub fn upsert_asset(
         return Ok(id);
     }
 
+    let resolved_type = match crate::tickers::resolve_asset_type_with_name(ticker, name) {
+        Ok(Some(asset_type)) => asset_type,
+        Ok(None) => AssetType::Unknown,
+        Err(err) => {
+            tracing::warn!("Failed to resolve asset type for {}: {}", ticker, err);
+            AssetType::Unknown
+        }
+    };
+
     // Insert new asset
     conn.execute(
         "INSERT INTO assets (ticker, asset_type, name) VALUES (?1, ?2, ?3)",
-        params![ticker, asset_type.as_str(), name],
+        params![ticker, resolved_type.as_str(), name],
     )?;
 
     Ok(conn.last_insert_rowid())
@@ -667,7 +676,7 @@ pub fn list_corporate_actions(
                 asset_type: row
                     .get::<_, String>(11)?
                     .parse::<AssetType>()
-                    .unwrap_or(AssetType::Stock),
+                    .unwrap_or(AssetType::Unknown),
                 name: row.get(12)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
@@ -794,7 +803,7 @@ pub fn get_income_events_with_assets(
                 asset_type: row
                     .get::<_, String>(14)?
                     .parse::<AssetType>()
-                    .unwrap_or(AssetType::Stock),
+                    .unwrap_or(AssetType::Unknown),
                 name: row.get(15)?,
                 created_at: row.get(16)?,
                 updated_at: row.get(17)?,
@@ -873,7 +882,7 @@ pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
                 asset_type: row
                     .get::<_, String>(2)?
                     .parse::<AssetType>()
-                    .unwrap_or(AssetType::Stock),
+                    .unwrap_or(AssetType::Unknown),
                 name: row.get(3)?,
                 created_at: row.get(4)?,
                 updated_at: row.get(5)?,
@@ -882,6 +891,45 @@ pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(assets)
+}
+
+/// Get assets with a specific asset type
+pub fn list_assets_by_type(conn: &Connection, asset_type: AssetType) -> Result<Vec<Asset>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ticker, asset_type, name, created_at, updated_at FROM assets WHERE asset_type = ? ORDER BY ticker",
+    )?;
+
+    let assets = stmt
+        .query_map([asset_type.as_str()], |row| {
+            Ok(Asset {
+                id: Some(row.get(0)?),
+                ticker: row.get(1)?,
+                asset_type: row
+                    .get::<_, String>(2)?
+                    .parse::<AssetType>()
+                    .unwrap_or(AssetType::Unknown),
+                name: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(assets)
+}
+
+/// Update asset type for a ticker
+pub fn update_asset_type(conn: &Connection, ticker: &str, asset_type: &AssetType) -> Result<()> {
+    let updated = conn.execute(
+        "UPDATE assets SET asset_type = ?1, updated_at = CURRENT_TIMESTAMP WHERE ticker = ?2",
+        params![asset_type.as_str(), ticker.to_uppercase()],
+    )?;
+
+    if updated == 0 {
+        return Err(anyhow::anyhow!("Ticker {} not found in assets", ticker));
+    }
+
+    Ok(())
 }
 
 /// Get dates where prices are missing for an asset within a date range

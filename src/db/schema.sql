@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS assets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL UNIQUE,  -- e.g., 'PETR4', 'MXRF11', 'AGRO3'
-    asset_type TEXT NOT NULL,     -- 'STOCK', 'FII', 'FIAGRO', 'FI_INFRA', 'BOND', 'GOV_BOND'
+    asset_type TEXT NOT NULL,     -- 'STOCK', 'BDR', 'ETF', 'FII', 'FIAGRO', 'FI_INFRA', 'FIDC', 'FIP', 'BOND', 'GOV_BOND', 'OPTION', 'TERM', 'UNKNOWN'
     name TEXT,                     -- Full name of the asset
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS tax_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     year INTEGER NOT NULL,
     month INTEGER NOT NULL,              -- 1-12
-    asset_type TEXT NOT NULL,            -- 'STOCK', 'FII', etc.
+    asset_type TEXT NOT NULL,            -- 'STOCK', 'BDR', 'ETF', 'FII', 'FIAGRO', 'FI_INFRA', 'FIDC', 'FIP', 'BOND', 'GOV_BOND', 'OPTION', 'TERM', 'UNKNOWN'
     event_type TEXT NOT NULL,            -- 'SWING_TRADE', 'DAY_TRADE'
     total_sales DECIMAL(15,4) NOT NULL,  -- Total sales volume
     total_profit DECIMAL(15,4) NOT NULL, -- Total profits

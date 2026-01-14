@@ -66,7 +66,7 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
         Commands::Actions { .. } => Ok(None),
         Commands::Inconsistencies { action } => match action {
             crate::cli::InconsistenciesCommands::List {
-                open,
+                open: _,
                 all,
                 status,
                 issue_type,
@@ -76,8 +76,6 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                     Some(status)
                 } else if *all {
                     Some("ALL".to_string())
-                } else if *open {
-                    Some("OPEN".to_string())
                 } else {
                     Some("OPEN".to_string())
                 };
@@ -126,6 +124,31 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                     action: cmd::InconsistenciesAction::Ignore {
                         id: *id,
                         reason: reason.clone(),
+                    },
+                }))
+            }
+        },
+        Commands::Tickers { action } => match action {
+            crate::cli::TickersCommands::Refresh { force } => Ok(Some(Command::Tickers {
+                action: cmd::TickersAction::Refresh { force: *force },
+            })),
+            crate::cli::TickersCommands::Status => Ok(Some(Command::Tickers {
+                action: cmd::TickersAction::Status,
+            })),
+            crate::cli::TickersCommands::ListUnknown => Ok(Some(Command::Tickers {
+                action: cmd::TickersAction::ListUnknown,
+            })),
+            crate::cli::TickersCommands::Resolve {
+                ticker,
+                asset_type,
+            } => {
+                if ticker.is_some() && asset_type.is_none() {
+                    anyhow::bail!("tickers resolve requires --type when a ticker is provided");
+                }
+                Ok(Some(Command::Tickers {
+                    action: cmd::TickersAction::Resolve {
+                        ticker: ticker.clone(),
+                        asset_type: asset_type.clone(),
                     },
                 }))
             }

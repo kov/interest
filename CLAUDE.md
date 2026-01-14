@@ -487,261 +487,38 @@ db::insert_corporate_action_adjustment(&conn, action_id, tx_id,
 
 ## Testing Strategy
 
+**→ For comprehensive test documentation, see [`tests/README.md`](tests/README.md)**
+
+The `tests/README.md` file contains complete documentation on:
+
+- **Test Infrastructure**: Test harness architecture, fixtures, isolation strategies
+- **Binary-Driven Integration Tests**: Patterns for testing the real CLI
+- **Test Patterns & Best Practices**: Decimal comparisons, table parsing, JSON assertions
+- **Debugging with Asciinema**: Terminal cast recordings for UI/progress debugging
+- **Test Data Files**: Fixture generation and maintenance
+
+**Quick reference**:
+
 ### Unit Tests
 
-Located in `#[cfg(test)] mod tests` within each module.
+Located in `#[cfg(test)] mod tests` within each module:
 
-- `importers/irpf_pdf.rs`: Decimal parsing, ticker extraction, line parsing
-- `tax/`: Tax calculation edge cases
-- `corporate_actions/`: Split ratio calculations
+```bash
+cargo test --lib                    # Run all unit tests
+cargo test tax::                    # Run specific module
+```
 
 ### Integration Tests
 
 Located in `tests/`:
 
-- `integration_tests.rs`: Corporate action application, duplicate detection
-- `tax_integration_tests.rs`: Full tax scenarios (exemptions, loss carryforward, multiple categories)
-
-**Pattern**: Use `tempfile::NamedTempFile` for isolated database per test.
-
-### Test Data Generation
-
-`tests/generate_test_files.rs` creates Excel/CSV files for import testing.
-
-Run: `cargo test --test generate_test_files -- --nocapture`
-
-### Integration Test Playbook (Binary-Driven)
-
-This project favors binary-driven integration tests that exercise the real CLI. Use the interest binary for validation and prefer JSON output for machine-robust assertions.
-
-Principles:
-
-- Use an isolated HOME directory (`TempDir`) so the binary writes to `.interest/data.db` under the test temp folder.
-- Keep imports deterministic: import trades via helper(s), import corporate actions via the binary or JSON helpers; do NOT mutate transactions for corporate actions—adjustments occur at query time.
-- Disable live price fetching for deterministic outputs by setting `INTEREST_SKIP_PRICE_FETCH=1` when calling the binary.
-- Prefer `--json` for programmatic checks; when parsing tables, match complete rows and columns (not substring contains).
-- Assert quantities, average cost, and total cost precisely using `rust_decimal::Decimal` comparisons rather than string equality to avoid scale differences.
-- Cross-validate portfolio, performance, and tax outputs so they agree on end-state values.
-
-Recommended Flow (modeled after `test_06_multiple_splits`):
-
-- Setup
-
-  - Create `TempDir` and initialize DB using the project helper (`init_database(Some(db_path))`).
-  - Import movements into the DB using `import_movimentacao(&conn, file)`; then import corporate actions (via binary or helper) and assert they exist; verify raw transactions remain unadjusted in DB.
-
-- Portfolio Assertions (CLI table)
-
-  - Call: `interest portfolio show --at YYYY-MM-DD` at key dates.
-  - Parse the table output: find the ticker row beginning with `│ <TICKER>`; split by `│`, trim, and assert all columns: Quantity, Avg Cost, Total Cost, Price, Value, P&L, Return %.
-  - For deterministic runs, set `INTEREST_SKIP_PRICE_FETCH=1` so Price/Value/P&L are `N/A` and cost-driven calculations are stable.
-
-- Performance Assertions (CLI JSON)
-
-  - Call: `interest --json performance show <PERIOD>` (e.g., `2025`).
-  - Parse JSON fields: `start_value`, `end_value`, `total_return`, `realized_gains`, `unrealized_gains`.
-  - For deterministic tests, set `INTEREST_SKIP_PRICE_FETCH=1` and expect values driven by cost snapshots; confirm period end value matches the final portfolio total for the scenario.
-
-- Tax Assertions (CLI JSON)
-
-  - Call: `interest --json tax report <YEAR>`.
-  - Parse JSON fields: `annual_total_sales`, `annual_total_profit`, `annual_total_loss`, `annual_total_tax`, and monthly summaries as needed.
-  - Compare numeric values using `rust_decimal::Decimal::from_str(...)` to avoid string-scale mismatches (e.g., `90.000` vs `90.00`). Validate that computed profit/loss aligns with average cost basis for sales.
-
-### Asciinema debugging (terminal cast recordings) 🔍
-
-Purpose
-
-- Use terminal cast recordings to capture deterministic, timestamped stdout output for reproducing and diagnosing UI/progress regressions (e.g., "the user doesn't see X" or "the UI gets stuck on Y"). Casts make it possible to analyze what the program emitted and when, independent of the interactive terminal.
-
-Install & record
-
-- Install (macOS): `brew install asciinema`
-- Recommended recording patterns:
-  - Single command: `asciinema rec runs/my-case.cast --command "<ENV_VARS> && <your command>"`
-    - Example: `asciinema rec runs/import.cast --command "INSTRUMENT_ASCIINEMA=1 ./.git/reimport.sh"`
-  - Manual: `asciinema rec runs/my-case.cast` → run the action interactively → press Ctrl-D to stop.
-- Record in the same environment (TERM, locale, env vars) you intend to debug; include colors/ANSI so spinner glyphs and formatting are preserved unless you intentionally strip them.
-- For deterministic runs, set environment flags that make the run reproducible (e.g., `INTEREST_SKIP_PRICE_FETCH=1`) and add instrumentation flags (if available) to print diagnostics or summaries.
-
-What to capture & why it matters
-
-- Two kinds of terminal output matter:
-  1. Persistent messages (written with newline) — easy to find; good for final status lines and instrumentation summaries.
-  2. Transient spinner/overwrites (written with `\r`) — used for progress spinners and in-place updates; these are the items that often make the UI look "stuck" when they stop changing.
-- Capture both kinds; when analyzing, treat `\r`/overwrite events as legitimate progress tokens rather than noise.
-
-Parsing & tokenization (high level)
-
-1. Load the cast (v3 JSON array of events): each event is typically `[time_offset, event_type, data]`.
-2. Filter `event_type == 'o'` (stdout) events, and optionally `event_type == 'e'` for stderr if relevant.
-3. Preprocess each `data` value:
-   - Optionally strip OSC/CSI/ANSI escapes for timeline analysis. Example regexes:
-     - CSI/SGR: `\x1b\[[0-9;?]*[A-Za-z]`
-     - OSC: `\x1b\].*?(?:\x07|\x1b\\)`
-   - Preserve `\r` and `\n` markers; split on these markers but keep `\r` tokens since they represent overwrite updates.
-4. Tokenize into canonical token types (examples):
-   - SPINNER: contains spinner glyphs or in-place updates
-   - PROGRESS: progress messages like "Parsing X (n/m p%)"
-   - PERSISTENT: newline-terminated status or instrumentation summaries (consider using a unique prefix for easy detection)
-   - RESULT/TICKER: detailed lines (e.g., per-ticker results)
-   - ERROR / SUCCESS: messages prefixed with `❌` or `✓`
-5. Produce a timeline: ordered `(timestamp_ms, token_type, short_text)` entries.
-
-Diagnostics & metrics to compute
-
-- Token count and distribution (how many spinner vs progress vs persistent messages)
-- Maximum gap between consecutive tokens (max_gap) — useful to detect "stuck" periods
-- Gaps above threshold (list them with surrounding tokens)
-- Concatenated events: single `data` field containing multiple logical tokens (indicates buffered writes)
-- Time from last progress token to next persistent summary (useful for detecting delayed finalization)
-
-Heuristics & thresholds
-
-- Default conservative threshold: **800 ms** for max-gap checks (this catches multi-second freezes while tolerating small scheduling jitter). Add ±100–200 ms slack for CI variability.
-- For spinner liveliness: if SPINNER tokens repeat without any PROGRESS or PERSISTENT token for longer than threshold, the UI may appear stuck — investigate the code emitting progress updates or the heartbeat that drives spinner ticks.
-
-Investigation checklist (when user reports missing or stuck UI)
-
-1. Reproduce deterministically:
-   - Run the same command with any deterministic env vars and with instrumentation enabled (if available).
-   - Record a cast (prefer `--command` style) so the recording is deterministic and repeatable.
-2. Parse the cast and search for the expected tokens (the thing the user says they don't see):
-   - If tokens are **absent**: the issue is upstream (the program never emitted them). Add instrumentation or more granular progress callbacks at logical steps.
-   - If tokens are **present** but only as a final PERSISTENT summary: the program emitted them late; consider emitting intermediate persist messages or forwarding intermediate progress to the UI.
-   - If tokens are **present** but there are long gaps between them: inspect the two tokens around the gap to see what work was being done; long CPU/IO operations, buffered writes, or long blocking sections are typical causes.
-   - If many logical tokens are concatenated into a single `data` event: this usually means writes were buffered and flushed in a burst; consider writing each logical token separately or adding flushes after important updates.
-3. If spinner glyphs update (SPINNER tokens) but the progress text doesn't change, check for filtering in the UI layer (the dispatcher/renderer may suppress non-persistent updates).
-4. If messages are emitted but not seen in the TUI, check stdout flush behavior — ensure `stdout().flush()` is called after in-place updates.
-5. Add small instrumented prints (or lightweight persistent summaries) guarded by an env var to confirm whether work reached certain checkpoints. These are very helpful because they leave permanent traces in the recording for later analysis.
-
-Tools & implementation notes
-
-- Languages: Python quick-scripts are convenient for ad-hoc checks; Rust helpers (using `serde_json` and `regex`) are preferred for CI tests.
-- Regexes for cleaning ANSI/OSC shown above; make stripping optional so tests can assert formatting when necessary.
-- Normalize spinner glyphs to a common `SPINNER` token to avoid glyph-set differences across terminals.
-
-Using casts in CI
-
-- Keep golden cast fixtures in `tests/data/` and add unit tests that parse them. Typical assertions:
-  - Presence of at least one PROGRESS token for the operation under test.
-  - `max_gap` ≤ threshold (800 ms default)
-  - No single-event sequences that contain many concatenated progress messages (or assert a maximum concatenated token count)
-- Prefer conservative thresholds so CI does not flake; if CI shows intermittent failures, increase slack or investigate bottlenecks that cause large scheduling jitter.
-
-Common pitfalls to watch for
-
-- Buffered writes that produce concatenated messages (fix by flushing more frequently for important updates)
-- Blocking work in the same thread/task that prevents progress events from being emitted
-- Overly aggressive UI filtering that drops non-persistent but informative progress messages
-- Terminal differences (glyphs and SGR codes) that affect token recognition
-
-If you need a starter parser or test harness, we have example scripts and Rust helpers under `scripts/` and `src/` to load and analyze casts; reuse them and extend for the checks you need.
-
-- Example (high-level Python pseudo-code):
-
-```python
-import json, re
-CSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
-SPINNER_CHARS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-/\\|'
-
-with open('runs/import-b3.cast') as fh:
-    events = json.load(fh)
-
-tokens = []
-for t, typ, data in events:
-    if typ != 'o':
-        continue
-    s = OSC_RE.sub('', data)
-    s = CSI_RE.sub('', s)
-    # Split on carriage returns and newlines, but keep \r updates as tokens.
-    parts = re.split(r'(\r|\n)', s)
-    for p in parts:
-        if not p.strip():
-            continue
-        # detect spinner glyphs or known keywords
-        if any(ch in p for ch in SPINNER_CHARS):
-            tokens.append((t, 'SPINNER', p.strip()))
-        elif 'Parsing COTAHIST' in p or 'Fetching prices' in p or 'Imported' in p:
-            tokens.append((t, 'PROGRESS', p.strip()))
-
-# compute deltas and check gaps
-for i in range(1, len(tokens)):
-    delta = tokens[i][0] - tokens[i-1][0]
-    if delta > 0.8:
-        print('Long gap', delta, tokens[i-1], tokens[i])
+```bash
+cargo test --test integration_tests           # All integration tests
+cargo test --test tax_integration_tests       # Tax scenarios
+cargo test --test generate_test_files         # Generate fixtures (use --ignored)
 ```
 
-- Using casts in tests & CI 🔁
-  - Add Rust helpers under `tests/support/asciicast.rs` to parse and normalize tokens into a `Vec<Token>`.
-  - Add unit tests that parse `working.cast` and `broken.cast` fixtures and assert:
-    - `working` has no gaps > 800 ms
-    - `broken` has at least one gap > 800 ms and/or concatenated-token events
-  - Add an integration test that runs a deterministic small synthetic import (or uses a small test zip), records a cast, parses it, and asserts the `max_gap` is below threshold.
-  - Keep golden normalized timelines in `tests/data/` for easy regression diffs.
-
-For more background and the investigative notes from our COTAHIST debugging session, see `designs/ASCIINEMA.md` which contains analysis examples and a proposed test plan.
-
-- Robustness Tips
-  - Always assert database transactions remain unchanged post-import (corporate actions are applied forward-only at query time).
-  - Validate column count and exact content for portfolio rows; avoid loose `contains()` checks.
-  - When comparing money/quantity, use `Decimal` equality; do not use `f64`.
-  - Prefer env-controlled determinism: `INTEREST_SKIP_PRICE_FETCH=1` for tests that do not require market prices.
-
-Example Skeleton:
-
-```rust
-#[test]
-fn my_integration_test() -> anyhow::Result<()> {
-        let home = tempfile::TempDir::new()?;
-
-        // Setup DB and import trades
-        let db_path = tests::helpers::get_db_path(&home);
-        std::fs::create_dir_all(db_path.parent().unwrap())?;
-        interest::db::init_database(Some(db_path.clone()))?;
-        let conn = rusqlite::Connection::open(&db_path)?;
-        tests::helpers::import_movimentacao(&conn, "tests/data/my_case.xlsx")?;
-
-        // Portfolio check (table)
-        let out = tests::helpers::base_cmd(&home)
-                .env("INTEREST_SKIP_PRICE_FETCH", "1")
-                .arg("portfolio").arg("show").arg("--at").arg("2025-05-21")
-                .output()?;
-        assert!(out.status.success());
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let row = stdout.lines().find(|l| l.starts_with("│ TICKR"))
-                .expect("Ticker row not found");
-        let cols: Vec<_> = row.split('│').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        assert_eq!(cols[1], "50.00"); // Quantity
-        assert_eq!(cols[2], "R$ 2,55"); // Avg Cost
-
-        // Performance check (JSON)
-        let perf_out = tests::helpers::base_cmd(&home)
-                .env("INTEREST_SKIP_PRICE_FETCH", "1")
-                .arg("--json").arg("performance").arg("show").arg("2025")
-                .output()?;
-        assert!(perf_out.status.success());
-        let perf_json: serde_json::Value = serde_json::from_slice(&perf_out.stdout)?;
-        assert_eq!(perf_json["end_value"].as_str().unwrap(), "127.5");
-
-        // Tax check (JSON)
-        let tax_out = tests::helpers::base_cmd(&home)
-                .arg("--json").arg("tax").arg("report").arg("2025")
-                .output()?;
-        assert!(tax_out.status.success());
-        let tax_json: serde_json::Value = serde_json::from_slice(&tax_out.stdout)?;
-        use std::str::FromStr as _;
-        let total_sales = rust_decimal::Decimal::from_str(tax_json["annual_total_sales"].as_str().unwrap())?;
-        let total_profit = rust_decimal::Decimal::from_str(tax_json["annual_total_profit"].as_str().unwrap())?;
-        assert!(total_sales > rust_decimal::Decimal::ZERO);
-        assert!(total_profit >= rust_decimal::Decimal::ZERO);
-
-        Ok(())
-}
-```
-
-Following this playbook ensures your tests validate the true CLI behavior end-to-end and remain stable across formatting changes.
+**Pattern**: Use isolated `TempDir` with fixtures (see `tests/README.md` for details).
 
 ### Corporate Actions: Split Handling (Brazil-specific)
 

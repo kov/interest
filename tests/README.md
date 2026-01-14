@@ -1,252 +1,549 @@
-# Interest Tracker - Test Suite
+# Interest Tracker - Test Suite Documentation
 
-This directory contains comprehensive integration tests for the Interest Tracker's core functionality.
+This document covers the test harness, infrastructure, patterns, and best practices for testing Interest Tracker. For guidance on adding tests and understanding the codebase architecture, see `CLAUDE.md`.
 
-## Overview
+## Table of Contents
 
-The test suite validates:
-- ✅ XLS/Excel file import (Movimentação format)
-- ✅ Average cost basis calculations
-- ✅ Stock splits and reverse splits
-- ✅ Corporate action adjustments
-- ✅ Adjustment deduplication (no double-counting)
-- ✅ Portfolio position calculations
-- ✅ Term contract lifecycle (fully implemented)
-- ✅ Capital returns / amortization (fully implemented)
-- ✅ Day trade detection
-- ✅ Multi-asset portfolio calculations
+- [Test Philosophy](#test-philosophy)
+- [Test Infrastructure](#test-infrastructure)
+- [Binary-Driven Integration Tests](#binary-driven-integration-tests)
+- [Test Patterns & Best Practices](#test-patterns--best-practices)
+- [Debugging with Asciinema](#debugging-with-asciinema)
+- [Running Tests](#running-tests)
+- [Test Data Files](#test-data-files)
 
-## Test Files
+## Test Philosophy
 
-### Test Data Generation
+Interest Tracker uses a **binary-driven integration testing** approach:
 
-Test XLS files are generated programmatically using Rust:
+- **Test the real CLI**, not just library functions
+- **Deterministic**: Tests use isolated temp directories and fixtures, no network calls
+- **Fast**: Parallel execution, minimal setup, automatic cleanup
+- **Robust**: Parse exact table columns and JSON fields, use `Decimal` for money comparisons
+- **Cross-validated**: Portfolio, performance, and tax outputs should agree
 
-```bash
-# Generate all test data files
-cargo test --test generate_test_files -- --ignored
+This approach catches integration issues that unit tests miss while remaining fast and reliable.
+
+## Test Infrastructure
+
+### Test Harness Architecture
+
+All integration tests use a standardized harness in `tests/integration_tests.rs`:
+
+```rust
+/// Create a base CLI command with proper environment setup
+fn base_cmd(home: &TempDir) -> Command {
+    let mut cmd = Command::new(cargo::cargo_bin!("interest"));
+    cmd.env("HOME", home.path());
+
+    // Set up isolated cache with B3 tickers fixture
+    let cache_dir = home.path().join(".cache");
+    setup_test_tickers_cache(&cache_dir);
+    cmd.env("XDG_CACHE_HOME", &cache_dir);
+
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1");
+    cmd.arg("--no-color");
+    cmd
+}
 ```
 
-This creates test XLS files in `tests/data/`:
+**Key features:**
 
-1. **01_basic_purchase_sale.xlsx** - Basic buy/sell with average cost basis
-   - Buy 100 PETR4 @ R$25.00
-   - Buy 50 PETR4 @ R$30.00
-   - Sell 80 PETR4 @ R$35.00
-   - Tests: average cost matching and profit calculation
+1. **Isolated HOME**: Each test gets a temp directory → writes to `.interest/data.db` under test temp folder
+2. **Fixture cache**: B3 tickers CSV copied to test cache → deterministic asset type resolution
+3. **No network**: `INTEREST_SKIP_PRICE_FETCH=1` disables live price fetching
+4. **No colors**: `--no-color` ensures clean table parsing
+5. **Platform-agnostic**: `XDG_CACHE_HOME` standardizes cache location across macOS/Linux
 
-2. **02_term_contract_lifecycle.xlsx** - Term contracts (purchase, expiry, sale)
-   - Buy 200 ANIM3T (term) @ R$10.00
-   - Liquidation: 200 ANIM3T → ANIM3
-   - Sell 100 ANIM3 @ R$12.00
-   - Tests: Cost basis transfer, profit = R$200
+### B3 Tickers Cache Fixture
 
-3. **03_term_contract_sold.xlsx** - Term contract sold before expiry
-   - Buy 150 SHUL4T @ R$8.00
-   - Sell 150 SHUL4T @ R$9.00 (before liquidation)
-   - Tests: Term contracts traded like regular stocks
+**Problem**: Asset type detection requires B3's consolidated instruments CSV. Network access in tests is unreliable and slow.
 
-4. **04_stock_split.xlsx** - Stock split (desdobro) 1:2
-   - Buy 100 VALE3 @ R$80.00
-   - Split 1:2 → 200 @ R$40.00
-   - Buy 50 VALE3 @ R$42.00
-   - Sell 150 VALE3 @ R$45.00
-   - Tests: Quantity/price adjustments, cost unchanged
+**Solution**: Pre-generated fixture with minimal test tickers.
 
-5. **05_reverse_split.xlsx** - Reverse split (grupamento) 10:1
-   - Buy 1000 MGLU3 @ R$2.00
-   - Reverse split 10:1 → 100 @ R$20.00
-   - Sell 50 MGLU3 @ R$22.00
-   - Tests: Consolidation math, profit = R$100
+**Location**: `tests/fixtures/b3_cache/`
 
-6. **06_multiple_splits.xlsx** - Multiple splits on same asset
-   - Buy 50 ITSA4 @ R$10.00
-   - Split 1:2 → 100 @ R$5.00
-   - Buy 25 ITSA4 @ R$5.50
-   - Split 1:2 → 200 + 50 shares
-   - Sell 200 ITSA4 @ R$3.00
-   - Tests: Cumulative adjustments
+- `tickers.csv` - CSV with columns: `TckrSymb`, `SctyCtgyNm`, `CFICd`, `CrpnNm`
+- `tickers.meta.json` - Metadata with future timestamp (never stale)
 
-7. **07_capital_return.xlsx** - FII capital return (amortização)
-   - Buy 100 MXRF11 @ R$10.00
-   - Capital return R$1.00/share → cost basis R$9.00/share
-   - Buy 50 MXRF11 @ R$10.50
-   - Sell 120 MXRF11 @ R$11.00
-   - Tests: Cost basis reduction
+**How it works**:
 
-8. **08_complex_scenario.xlsx** - Multi-event scenario
-   - Multiple purchases, split, sales, term contract liquidation
-   - Tests: Integration of all features
+```rust
+fn setup_test_tickers_cache(cache_root: &Path) {
+    let tickers_dir = cache_root.join("interest").join("tickers");
+    std::fs::create_dir_all(&tickers_dir).expect("failed to create tickers cache dir");
+    std::fs::copy(
+        "tests/fixtures/b3_cache/tickers.csv",
+        tickers_dir.join("tickers.csv"),
+    ).expect("failed to copy tickers.csv fixture");
+    std::fs::copy(
+        "tests/fixtures/b3_cache/tickers.meta.json",
+        tickers_dir.join("tickers.meta.json"),
+    ).expect("failed to copy tickers.meta.json fixture");
+}
+```
 
-9. **09_fi_infra.xlsx** - FI-Infra fund
-   - Buy/sell infrastructure fund
-   - Tests: Different asset types
+The future `fetched_at` date (`2099-01-01T00:00:00Z`) ensures cache is never considered stale.
 
-10. **10_duplicate_trades.xlsx** - Duplicate trades
-   - Two identical buys on the same date/qty/price
-   - Tests: Import allows duplicates, no dedup by date/qty
+**Fixture tickers** (as of 2026-01):
 
-11. **11_bonus_auto_apply.xlsx** - Bonus auto-apply
-   - Buy 100 ITSA4
-   - Bonus 20% (Bonificação em Ativos)
-   - Tests: Auto-apply corporate actions on import
+| Ticker | Type | Name |
+|--------|------|------|
+| PETR4, VALE3, ITSA4, MGLU3, BBAS3, ANIM3, DUPL3, KPCA3, SHUL4, AMBP3 | SHARES | Stocks |
+| A1MD34 | BDR | Brazilian Depositary Receipt |
+| MXRF11, BRCR11 | FUNDS (FII keywords) | Real Estate Funds |
+| RZTR11 | FUNDS (FI-INFRA keywords) | Infrastructure Fund |
 
-12. **12_desdobro_inference.xlsx** - Desdobro absolute adjustment
-   - Buy 80 A1MD34, Desdobro credit of 560 shares
-   - Tests: Infer 1:8 split and auto-apply adjustment
+**Adding new tickers**: When test data files include new tickers, add entries to `tests/fixtures/b3_cache/tickers.csv` with appropriate `SctyCtgyNm` and `CrpnNm` values. See `designs/TESTHARNESS.md` for details.
 
-14. **14_atualizacao_inference.xlsx** - Atualização absolute adjustment
-   - Buy 378 BRCR11, Atualização credit of 22 shares
-   - Tests: Infer 378:400 bonus-style adjustment and auto-apply
+### Cache Directory Structure
+
+With test harness setup:
+
+```
+$XDG_CACHE_HOME/ (points to temp dir)
+└── interest/
+    ├── tickers/
+    │   ├── tickers.csv        (copied from fixture)
+    │   └── tickers.meta.json  (copied from fixture)
+    └── cotahist/              (if test needs COTAHIST)
+        └── COTAHIST_A2025.ZIP (created by test)
+```
+
+### Tests With Custom Caches
+
+Tests that create custom `XDG_CACHE_HOME` (e.g., COTAHIST test) must also set up tickers cache:
+
+```rust
+#[test]
+fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Import uses base_cmd() which sets up tickers cache
+    let _import = run_import_json(&home, "tests/data/01_basic_purchase_sale.xlsx");
+
+    // Create custom cache for COTAHIST
+    let cache_root = TempDir::new()?;
+
+    // Must also have tickers cache here since we override XDG_CACHE_HOME
+    setup_test_tickers_cache(cache_root.path());
+
+    // Now create COTAHIST cache...
+    let cotahist_dir = cache_root.path().join("interest").join("cotahist");
+    // ... set up ZIP ...
+
+    let mut cmd = Command::new(cargo::cargo_bin!("interest"));
+    cmd.env("HOME", home.path());
+    cmd.env("XDG_CACHE_HOME", cache_root.path());  // Has both caches
+    // ...
+}
+```
+
+## Binary-Driven Integration Tests
+
+### Principles
+
+1. **Use isolated HOME directory** (`TempDir`) so binary writes to `.interest/data.db` under test temp folder
+2. **Keep imports deterministic**: Import via fixtures, no live data
+3. **Disable live price fetching**: Set `INTEREST_SKIP_PRICE_FETCH=1`
+4. **Prefer `--json` for assertions**: More robust than table parsing
+5. **Assert precisely**: Use `rust_decimal::Decimal` comparisons, not string equality
+6. **Cross-validate**: Portfolio, performance, and tax outputs should agree
+
+### Recommended Test Flow
+
+Modeled after `test_06_multiple_splits`:
+
+#### 1. Setup
+
+```rust
+let home = TempDir::new()?;
+
+// Initialize DB
+let db_path = get_db_path(&home);
+std::fs::create_dir_all(db_path.parent().unwrap())?;
+interest::db::init_database(Some(db_path.clone()))?;
+let conn = rusqlite::Connection::open(&db_path)?;
+
+// Import movements
+import_movimentacao(&conn, "tests/data/my_case.xlsx")?;
+
+// Import corporate actions (if needed)
+// Verify raw transactions remain unadjusted in DB
+```
+
+#### 2. Portfolio Assertions (CLI Table)
+
+```rust
+let out = base_cmd(&home)
+    .env("INTEREST_SKIP_PRICE_FETCH", "1")
+    .arg("portfolio").arg("show").arg("--at").arg("2025-05-21")
+    .output()?;
+assert!(out.status.success());
+
+let stdout = String::from_utf8_lossy(&out.stdout);
+let row = stdout.lines().find(|l| l.starts_with("│ TICKR"))
+    .expect("Ticker row not found");
+let cols: Vec<_> = row.split('│')
+    .map(|s| s.trim())
+    .filter(|s| !s.is_empty())
+    .collect();
+
+// Assert all columns: Ticker, Quantity, Avg Cost, Total Cost, Price, Value, P&L, Return %
+assert_eq!(cols[1], "50.00");      // Quantity
+assert_eq!(cols[2], "R$ 2,55");    // Avg Cost
+assert_eq!(cols[3], "R$ 127,50");  // Total Cost
+// With INTEREST_SKIP_PRICE_FETCH=1, Price/Value/P&L are "N/A"
+```
+
+**Important**: Parse complete rows with exact column positions. Don't use loose `contains()` checks.
+
+#### 3. Performance Assertions (CLI JSON)
+
+```rust
+let perf_out = base_cmd(&home)
+    .env("INTEREST_SKIP_PRICE_FETCH", "1")
+    .arg("--json").arg("performance").arg("show").arg("2025")
+    .output()?;
+assert!(perf_out.status.success());
+
+let perf_json: serde_json::Value = serde_json::from_slice(&perf_out.stdout)?;
+assert_eq!(perf_json["end_value"].as_str().unwrap(), "127.5");
+assert_eq!(perf_json["total_return"].as_str().unwrap(), "0");  // No prices
+```
+
+#### 4. Tax Assertions (CLI JSON)
+
+```rust
+let tax_out = base_cmd(&home)
+    .arg("--json").arg("tax").arg("report").arg("2025")
+    .output()?;
+assert!(tax_out.status.success());
+
+let tax_json: serde_json::Value = serde_json::from_slice(&tax_out.stdout)?;
+
+// Use Decimal for precise comparisons
+use rust_decimal::Decimal;
+use std::str::FromStr;
+
+let total_sales = Decimal::from_str(
+    tax_json["annual_total_sales"].as_str().unwrap()
+)?;
+let total_profit = Decimal::from_str(
+    tax_json["annual_total_profit"].as_str().unwrap()
+)?;
+
+assert!(total_sales > Decimal::ZERO);
+assert_eq!(total_profit, dec!(200));  // Exact expected profit
+```
+
+### Robustness Tips
+
+- **Always assert DB transactions remain unchanged** post-import (corporate actions applied at query time)
+- **Validate column count and exact content** for portfolio rows; avoid loose `contains()`
+- **Use `Decimal` equality** when comparing money/quantity; never use `f64`
+- **Prefer env-controlled determinism**: `INTEREST_SKIP_PRICE_FETCH=1` for stable outputs
+
+## Test Patterns & Best Practices
+
+### Pattern: Test Skeleton
+
+```rust
+#[test]
+fn test_my_feature() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup DB and import trades
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    interest::db::init_database(Some(db_path.clone()))?;
+    let conn = rusqlite::Connection::open(&db_path)?;
+    import_movimentacao(&conn, "tests/data/my_case.xlsx")?;
+
+    // Portfolio check
+    let out = base_cmd(&home)
+        .arg("portfolio").arg("show")
+        .output()?;
+    assert!(out.status.success());
+    // ... assertions ...
+
+    Ok(())
+}
+```
+
+### Pattern: Decimal Comparisons
+
+```rust
+// GOOD: Precise Decimal comparison
+let actual = Decimal::from_str(json["value"].as_str().unwrap())?;
+let expected = dec!(127.50);
+assert_eq!(actual, expected);
+
+// BAD: String comparison (fails on scale differences)
+assert_eq!(json["value"].as_str().unwrap(), "127.50"); // Fails if "127.5"
+
+// BAD: f64 comparison (precision errors)
+let actual_f64 = 0.1 + 0.2;  // Actually 0.30000000000000004
+```
+
+### Pattern: Table Parsing
+
+```rust
+// Find the ticker row
+let row = stdout.lines()
+    .find(|l| {
+        let parts: Vec<_> = l.split('│').map(|s| s.trim()).collect();
+        parts.get(1).map(|s| *s == "PETR4").unwrap_or(false)
+    })
+    .expect("Ticker row not found");
+
+// Parse all columns
+let cols: Vec<_> = row.split('│')
+    .map(|s| s.trim())
+    .filter(|s| !s.is_empty())
+    .collect();
+
+// Assert by column index (not by substring)
+assert_eq!(cols[0], "");         // Empty border
+assert_eq!(cols[1], "PETR4");    // Ticker
+assert_eq!(cols[2], "70.00");    // Quantity
+assert_eq!(cols[3], "R$ 26,66"); // Avg Cost
+```
+
+### Pattern: JSON Output
+
+```rust
+// Always use --json before the command
+let out = base_cmd(&home)
+    .arg("--json")           // BEFORE command
+    .arg("portfolio")
+    .arg("show")
+    .output()?;
+
+let json: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+```
+
+### Critical Invariants to Test
+
+1. **Decimal precision**: All money/quantity use `Decimal`, never `f64`
+2. **Total cost preservation**: After corporate actions, `quantity × price` equals original total
+3. **Idempotent actions**: Re-applying corporate actions doesn't change results
+4. **No negative positions**: Selling more than owned should error
+5. **Query-time adjustments**: Database transactions remain unadjusted; adjustments applied on read
+
+## Debugging with Asciinema
+
+### Purpose
+
+Use terminal cast recordings to capture deterministic, timestamped stdout output for diagnosing UI/progress regressions (e.g., "user doesn't see X" or "UI gets stuck on Y").
+
+### Install & Record
+
+**Install** (macOS):
+```bash
+brew install asciinema
+```
+
+**Recommended patterns**:
+
+```bash
+# Single command
+asciinema rec runs/my-case.cast --command "INTEREST_SKIP_PRICE_FETCH=1 cargo run -- import tests/data/01_basic_purchase_sale.xlsx"
+
+# Interactive session
+asciinema rec runs/my-case.cast
+# ... run commands interactively ...
+# Press Ctrl-D to stop
+```
+
+**For determinism**:
+- Set environment flags: `INTEREST_SKIP_PRICE_FETCH=1`
+- Record in same environment (TERM, locale)
+- Include colors/ANSI for accurate reproduction
+
+### What to Capture
+
+Two kinds of terminal output:
+
+1. **Persistent messages** (with newline) - final status, instrumentation summaries
+2. **Transient spinner/overwrites** (`\r`) - progress spinners, in-place updates
+
+Treat both as legitimate progress tokens when analyzing.
+
+### Parsing Casts
+
+High-level workflow:
+
+1. Load cast (JSON array of `[time_offset, event_type, data]`)
+2. Filter `event_type == 'o'` (stdout)
+3. Optionally strip ANSI escapes:
+   - CSI/SGR: `\x1b\[[0-9;?]*[A-Za-z]`
+   - OSC: `\x1b\].*?(?:\x07|\x1b\\)`
+4. Tokenize into types: SPINNER, PROGRESS, PERSISTENT, RESULT, ERROR, SUCCESS
+5. Compute timeline: `(timestamp_ms, token_type, text)`
+
+**Metrics**:
+- Token distribution (spinner vs progress vs persistent)
+- Max gap between tokens (should be < 800ms)
+- Concatenated events (indicates buffered writes)
+
+**Thresholds**:
+- **800ms** max gap (catches freezes while tolerating jitter)
+- Add ±100–200ms slack for CI variability
+
+### Investigation Checklist
+
+When user reports missing/stuck UI:
+
+1. **Reproduce**: Record deterministic cast with `INTEREST_SKIP_PRICE_FETCH=1`
+2. **Parse & search** for expected tokens:
+   - **Absent** → program never emitted them (add instrumentation)
+   - **Present but late** → emitted only as final summary (add intermediate updates)
+   - **Present with gaps** → long CPU/IO work (profile & optimize)
+   - **Concatenated** → buffered writes (add flushes)
+3. **Check filtering**: Spinner updates but text doesn't change? UI layer may filter
+4. **Check flushing**: Messages emitted but not seen? Add `stdout().flush()`
+5. **Add instrumentation**: Lightweight prints guarded by env var for checkpoints
+
+### Example Parser (Python)
+
+```python
+import json, re
+
+CSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
+SPINNER_CHARS = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-/\\|'
+
+with open('runs/import.cast') as f:
+    events = json.load(f)
+
+tokens = []
+for t, typ, data in events:
+    if typ != 'o':
+        continue
+    s = OSC_RE.sub('', CSI_RE.sub('', data))
+
+    parts = re.split(r'(\r|\n)', s)
+    for p in parts:
+        if not p.strip():
+            continue
+        if any(ch in p for ch in SPINNER_CHARS):
+            tokens.append((t, 'SPINNER', p.strip()))
+        elif 'Parsing' in p or 'Fetching' in p or 'Imported' in p:
+            tokens.append((t, 'PROGRESS', p.strip()))
+
+# Compute gaps
+for i in range(1, len(tokens)):
+    delta = tokens[i][0] - tokens[i-1][0]
+    if delta > 0.8:
+        print(f'Long gap: {delta}s between {tokens[i-1][2]} and {tokens[i][2]}')
+```
+
+### Common Pitfalls
+
+- **Buffered writes** → concatenated messages (flush more frequently)
+- **Blocking work** → prevents progress events (offload to threads)
+- **Overly aggressive filtering** → drops informative updates
+- **Terminal differences** → glyph/SGR code mismatches
+
+See `designs/ASCIINEMA.md` for detailed analysis and test plan.
 
 ## Running Tests
 
-### Run All Integration Tests
+### Unit Tests
+
+Located in `#[cfg(test)] mod tests` within each module:
 
 ```bash
+# Run all unit tests
+cargo test --lib
+
+# Run specific module tests
+cargo test tax::
+cargo test importers::irpf_pdf::
+```
+
+### Integration Tests
+
+Located in `tests/`:
+
+```bash
+# Run all integration tests
 cargo test --test integration_tests
-```
 
-### Run Specific Test
+# Run specific test
+cargo test --test integration_tests test_portfolio_filters_by_asset_type_fii
 
-```bash
-cargo test --test integration_tests test_04_stock_split
-```
+# Run tax integration tests
+cargo test --test tax_integration_tests
 
-### Run with Output
-
-```bash
+# Run with output (nocapture)
 cargo test --test integration_tests -- --nocapture
 ```
 
-## Test Results
+### Test Categories
 
-Current status (as of latest run):
+- `integration_tests.rs` - CLI commands, portfolio, corporate actions, filtering
+- `tax_integration_tests.rs` - Tax scenarios (exemptions, loss carryforward, categories)
+- `generate_test_files.rs` - Generate Excel fixtures (run with `--ignored`)
 
+### Performance
+
+Test suite runs fast due to:
+- Isolated temp databases (no shared state)
+- No network calls (fixtures + `INTEREST_SKIP_PRICE_FETCH`)
+- Parallel execution
+- Automatic cleanup
+
+Typical runtime: **< 5 seconds** for full integration suite.
+
+## Test Data Files
+
+### Location
+
+`tests/data/*.xlsx` - Excel files in B3 Movimentação format
+
+### Generation
+
+Test data is generated programmatically:
+
+```bash
+# Generate all test XLS files
+cargo test --test generate_test_files -- --ignored --nocapture
 ```
-running 12 tests
-test test_01_basic_purchase_and_sale ............. ok
-test test_02_term_contract_lifecycle ............. ok
-test test_03_term_contract_sold_before_expiry .... ok
-test test_04_stock_split ......................... ok
-test test_05_reverse_split ....................... ok
-test test_06_multiple_splits ..................... ok
-test test_07_capital_return ...................... ok
-test test_08_complex_scenario .................... ok
-test test_10_day_trade_detection ................. ok
-test test_11_multi_asset_portfolio ............... ok
-test test_no_duplicate_adjustments ............... ok
-test test_position_totals_match .................. ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored
-```
+This creates fixtures in `tests/data/` with known scenarios for testing.
 
-## Test Coverage
+### Key Test Files
 
-### ✅ Fully Tested Features
+- **01_basic_purchase_sale.xlsx** - Basic buy/sell, average cost basis
+- **04_stock_split.xlsx** - Stock split 1:2 (desdobro)
+- **05_reverse_split.xlsx** - Reverse split 10:1 (grupamento)
+- **06_multiple_splits.xlsx** - Multiple splits on same asset
+- **07_capital_return.xlsx** - FII capital return (amortização)
+- **08_complex_scenario.xlsx** - Multi-event integration test
+- **11_bonus_auto_apply.xlsx** - Bonus shares (bonificação)
+- **12_desdobro_inference.xlsx** - Absolute adjustment inference
 
-- **Basic Transactions**: Buy/sell with accurate average cost basis
-- **Stock Splits**: Both regular (1:2) and reverse (10:1) splits
-- **Multiple Splits**: Cumulative adjustments across multiple split events
-- **Adjustment Deduplication**: Ensures splits aren't applied twice
-- **Portfolio Calculations**: Accurate position totals
-- **XLS Import**: Movimentação file format parsing
-- **Term Contracts**: Full lifecycle including purchase, liquidation, and cost basis transfer
-- **Capital Returns**: Amortization with cost basis reduction
-- **Day Trade Detection**: Proper flagging of same-day buy/sell
-- **Multi-Asset Portfolio**: Position calculations across different asset types
+See individual test descriptions in `generate_test_files.rs` for details.
 
-### 📋 TODO (Future Enhancements)
+### Adding New Test Data
 
-1. Add tests for:
-   - FII/FI-Infra specific tax rules
-   - Income events (dividends, JCP)
-   - Tax calculations (swing trade, day trade)
-   - IRPF reporting
-   - Price history tracking
-
-## Test Architecture
-
-### Helper Functions
-
-- `create_test_db()`: Creates temporary SQLite database
-- `import_movimentacao()`: Imports XLS file into database
-- `get_transactions()`: Fetches transactions with proper decimal handling
-- `get_decimal_value()`: Handles INTEGER/REAL/TEXT decimal reading
-- `calculate_position()`: Computes total shares and cost
-
-### Test Pattern
-
-Each test follows this structure:
-
-1. Create temporary database
-2. Import test XLS file
-3. Verify transactions imported correctly
-4. Apply corporate actions (if applicable)
-5. Calculate cost basis using average cost
-6. Assert expected outcomes (quantities, costs, profits)
-
-## Implementation Highlights
-
-### Recent Improvements
-
-1. **Fixed Decimal Reading** (`src/term_contracts.rs`)
-   - Added `get_decimal_value()` helper to properly read decimal values from SQLite
-   - Handles INTEGER, REAL, and TEXT types correctly
-   - Fixed term contract liquidation processing
-
-2. **Capital Return Support** (`src/corporate_actions/mod.rs`, `src/db/models.rs`)
-   - Added `CorporateActionType::CapitalReturn` enum variant
-   - Implemented cost basis reduction logic
-   - Quantity remains unchanged, cost reduced by amount per share
-   - Fully tested with test_07
-
-3. **Comprehensive Test Suite**
-   - 12 integration tests covering all core features
-   - Test data generated programmatically in Rust
-   - All tests passing with ~0.44s execution time
+1. Add entry to `generate_test_files.rs`
+2. Generate: `cargo test --test generate_test_files -- --ignored`
+3. Add tickers to `tests/fixtures/b3_cache/tickers.csv` if new
+4. Write integration test in `integration_tests.rs`
+5. Verify: `cargo test --test integration_tests test_my_new_feature`
 
 ## Contributing
 
-When adding new features:
+When adding tests:
 
-1. Create test XLS file in `generate_test_files.rs`
-2. Add corresponding integration test in `integration_tests.rs`
-3. Verify test passes: `cargo test --test integration_tests`
-4. Update this README with new test description
+1. **Follow binary-driven pattern** - test via CLI, not just library functions
+2. **Use test harness** - `base_cmd()` provides isolation and fixtures
+3. **Assert precisely** - use `Decimal` for money, exact column positions for tables
+4. **Test cross-validation** - portfolio, performance, tax should agree
+5. **Keep tests fast** - use fixtures, disable network, isolated databases
+6. **Document new patterns** - update this README if introducing new test infrastructure
 
-## Performance
-
-Test suite runs in ~0.4 seconds:
-
-```
-test result: ok. 12 passed; 0 failed; 0 ignored; finished in 0.44s
-```
-
-All tests use temporary databases that are automatically cleaned up after completion.
-
-## Test Descriptions
-
-### Core Functionality Tests
-
-- **test_01_basic_purchase_and_sale**: Verifies average cost basis with multiple purchase lots
-- **test_02_term_contract_lifecycle**: Tests term contract purchase, liquidation, and cost transfer
-- **test_03_term_contract_sold_before_expiry**: Validates term contracts traded before expiry
-
-### Corporate Action Tests
-
-- **test_04_stock_split**: Tests 1:2 split with quantity/price adjustments
-- **test_05_reverse_split**: Tests 10:1 reverse split (consolidation)
-- **test_06_multiple_splits**: Validates cumulative split adjustments
-- **test_07_capital_return**: Tests FII amortization with cost basis reduction
-- **test_no_duplicate_adjustments**: Ensures adjustments aren't applied twice
-
-### Complex Scenario Tests
-
-- **test_08_complex_scenario**: Integration test with splits, term contracts, and multiple sales
-- **test_10_day_trade_detection**: Validates same-day buy/sell flagging
-- **test_11_multi_asset_portfolio**: Tests multi-asset position calculations
-
-### Utility Tests
-
-- **test_position_totals_match**: Verifies portfolio position accuracy
+For architectural guidance and implementation details, see `CLAUDE.md`.

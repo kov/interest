@@ -271,12 +271,18 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
 fn asset_type_name(asset_type: &AssetType) -> &'static str {
     match asset_type {
         AssetType::Stock => "Stocks",
+        AssetType::Bdr => "BDRs",
         AssetType::Etf => "ETFs",
         AssetType::Fii => "Real Estate Funds",
         AssetType::Fiagro => "Agribusiness Funds",
         AssetType::FiInfra => "Infrastructure Funds",
+        AssetType::Fidc => "FIDCs",
+        AssetType::Fip => "FIPs",
         AssetType::Bond => "Corporate Bonds",
         AssetType::GovBond => "Government Bonds",
+        AssetType::Option => "Options",
+        AssetType::TermContract => "Term Contracts",
+        AssetType::Unknown => "Unknown",
     }
 }
 
@@ -628,11 +634,17 @@ mod tests {
     #[test]
     fn test_asset_type_name_mapping() {
         assert_eq!(asset_type_name(&AssetType::Stock), "Stocks");
+        assert_eq!(asset_type_name(&AssetType::Bdr), "BDRs");
         assert_eq!(asset_type_name(&AssetType::Etf), "ETFs");
         assert_eq!(asset_type_name(&AssetType::Fii), "Real Estate Funds");
         assert_eq!(asset_type_name(&AssetType::Fiagro), "Agribusiness Funds");
         assert_eq!(asset_type_name(&AssetType::FiInfra), "Infrastructure Funds");
+        assert_eq!(asset_type_name(&AssetType::Fidc), "FIDCs");
+        assert_eq!(asset_type_name(&AssetType::Fip), "FIPs");
         assert_eq!(asset_type_name(&AssetType::Bond), "Corporate Bonds");
         assert_eq!(asset_type_name(&AssetType::GovBond), "Government Bonds");
+        assert_eq!(asset_type_name(&AssetType::Option), "Options");
+        assert_eq!(asset_type_name(&AssetType::TermContract), "Term Contracts");
+        assert_eq!(asset_type_name(&AssetType::Unknown), "Unknown");
     }
 }

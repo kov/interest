@@ -43,10 +43,32 @@ fn get_db_path(home: &TempDir) -> PathBuf {
     PathBuf::from(home.path()).join(".interest").join("data.db")
 }
 
+/// Copy B3 tickers fixture to a cache directory
+fn setup_test_tickers_cache(cache_root: &std::path::Path) {
+    let tickers_dir = cache_root.join("interest").join("tickers");
+    std::fs::create_dir_all(&tickers_dir).expect("failed to create tickers cache dir");
+    std::fs::copy(
+        "tests/fixtures/b3_cache/tickers.csv",
+        tickers_dir.join("tickers.csv"),
+    )
+    .expect("failed to copy tickers.csv fixture");
+    std::fs::copy(
+        "tests/fixtures/b3_cache/tickers.meta.json",
+        tickers_dir.join("tickers.meta.json"),
+    )
+    .expect("failed to copy tickers.meta.json fixture");
+}
+
 /// Create a base CLI command with proper environment setup
 fn base_cmd(home: &TempDir) -> Command {
     let mut cmd = Command::new(cargo::cargo_bin!("interest"));
     cmd.env("HOME", home.path());
+
+    // Set up isolated cache with B3 tickers fixture
+    let cache_dir = home.path().join(".cache");
+    setup_test_tickers_cache(&cache_dir);
+    cmd.env("XDG_CACHE_HOME", &cache_dir);
+
     cmd.env("INTEREST_SKIP_PRICE_FETCH", "1");
     cmd.arg("--no-color");
     cmd
@@ -2286,6 +2308,10 @@ fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> 
 
     // 5) Create a fake ZIP in XDG_CACHE_HOME so download_cotahist_year will use cached archive
     let cache_root = TempDir::new()?; // will set XDG_CACHE_HOME to this
+
+    // Must also have tickers cache here since we override XDG_CACHE_HOME
+    setup_test_tickers_cache(cache_root.path());
+
     let cache_dir = cache_root.path().join("interest").join("cotahist");
     std::fs::create_dir_all(&cache_dir)?;
     let zip_path = cache_dir.join(format!("COTAHIST_A{}.ZIP", year));

@@ -13,6 +13,12 @@ pub enum AssetType {
     FiInfra, // Infrastructure investment funds
     Bond,    // Corporate bonds
     GovBond, // Government bonds (Tesouro Direto)
+    Bdr,     // Brazilian Depositary Receipts
+    Fidc,    // Credit rights investment funds
+    Fip,     // Private equity funds
+    Option,  // Options on equities
+    TermContract, // Term contracts (e.g., ANIM3T)
+    Unknown, // Unresolved/unknown type
 }
 
 impl AssetType {
@@ -25,52 +31,15 @@ impl AssetType {
             AssetType::FiInfra => "FI_INFRA",
             AssetType::Bond => "BOND",
             AssetType::GovBond => "GOV_BOND",
+            AssetType::Bdr => "BDR",
+            AssetType::Fidc => "FIDC",
+            AssetType::Fip => "FIP",
+            AssetType::Option => "OPTION",
+            AssetType::TermContract => "TERM",
+            AssetType::Unknown => "UNKNOWN",
         }
     }
 
-    /// Detect asset type from ticker pattern
-    /// Stocks end in 3-6, FIIs end in 11, FIAGROs/FI-INFRAs typically have specific patterns
-    pub fn detect_from_ticker(ticker: &str) -> Option<Self> {
-        if ticker.len() < 5 {
-            return None;
-        }
-
-        let upper = ticker.to_uppercase();
-        if matches!(
-            upper.as_str(),
-            "CRMG15" | "ELET23" | "LIGHD7" | "LAMEA6" | "UNEG11"
-        ) {
-            return Some(AssetType::Bond);
-        }
-        if matches!(
-            upper.as_str(),
-            "CDII11" | "JURO11" | "BODB11" | "BDIF11" | "IFRA11" | "XPID11" | "KDIF11"
-        ) {
-            return Some(AssetType::FiInfra);
-        }
-        if matches!(upper.as_str(), "CRAA11" | "FGAA11") {
-            return Some(AssetType::Fiagro);
-        }
-        if matches!(upper.as_str(), "DIVD11" | "NDIV11" | "UTLL11" | "TIRB11") {
-            return Some(AssetType::Etf);
-        }
-
-        // Extract the numeric suffix
-        let suffix = &ticker[ticker.len() - 2..];
-
-        match suffix {
-            "11" => Some(AssetType::Fii),                  // Most FIIs end in 11
-            "32" | "33" | "34" => Some(AssetType::Fiagro), // Common FIAGRO patterns
-            _ if ticker.ends_with('3')
-                || ticker.ends_with('4')
-                || ticker.ends_with('5')
-                || ticker.ends_with('6') =>
-            {
-                Some(AssetType::Stock)
-            }
-            _ => None, // Unknown pattern, will need manual classification
-        }
-    }
 }
 
 impl FromStr for AssetType {
@@ -85,6 +54,12 @@ impl FromStr for AssetType {
             "FI_INFRA" => Ok(AssetType::FiInfra),
             "BOND" => Ok(AssetType::Bond),
             "GOV_BOND" => Ok(AssetType::GovBond),
+            "BDR" => Ok(AssetType::Bdr),
+            "FIDC" => Ok(AssetType::Fidc),
+            "FIP" => Ok(AssetType::Fip),
+            "OPTION" => Ok(AssetType::Option),
+            "TERM" => Ok(AssetType::TermContract),
+            "UNKNOWN" => Ok(AssetType::Unknown),
             _ => Err(()),
         }
     }
@@ -423,6 +398,12 @@ mod tests {
         assert_eq!(AssetType::FiInfra.as_str(), "FI_INFRA");
         assert_eq!(AssetType::Bond.as_str(), "BOND");
         assert_eq!(AssetType::GovBond.as_str(), "GOV_BOND");
+        assert_eq!(AssetType::Bdr.as_str(), "BDR");
+        assert_eq!(AssetType::Fidc.as_str(), "FIDC");
+        assert_eq!(AssetType::Fip.as_str(), "FIP");
+        assert_eq!(AssetType::Option.as_str(), "OPTION");
+        assert_eq!(AssetType::TermContract.as_str(), "TERM");
+        assert_eq!(AssetType::Unknown.as_str(), "UNKNOWN");
 
         assert_eq!("STOCK".parse::<AssetType>().ok(), Some(AssetType::Stock));
         assert_eq!("ETF".parse::<AssetType>().ok(), Some(AssetType::Etf));
@@ -438,135 +419,21 @@ mod tests {
             "GOV_BOND".parse::<AssetType>().ok(),
             Some(AssetType::GovBond)
         );
+        assert_eq!("BDR".parse::<AssetType>().ok(), Some(AssetType::Bdr));
+        assert_eq!("FIDC".parse::<AssetType>().ok(), Some(AssetType::Fidc));
+        assert_eq!("FIP".parse::<AssetType>().ok(), Some(AssetType::Fip));
+        assert_eq!("OPTION".parse::<AssetType>().ok(), Some(AssetType::Option));
+        assert_eq!(
+            "TERM".parse::<AssetType>().ok(),
+            Some(AssetType::TermContract)
+        );
+        assert_eq!(
+            "UNKNOWN".parse::<AssetType>().ok(),
+            Some(AssetType::Unknown)
+        );
         assert_eq!("INVALID".parse::<AssetType>().ok(), None);
     }
 
-    #[test]
-    fn test_asset_type_detect_from_ticker() {
-        // Stock patterns
-        assert_eq!(
-            AssetType::detect_from_ticker("PETR4"),
-            Some(AssetType::Stock)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("VALE3"),
-            Some(AssetType::Stock)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("ITSA4"),
-            Some(AssetType::Stock)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("BBDC3"),
-            Some(AssetType::Stock)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("MGLU3"),
-            Some(AssetType::Stock)
-        );
-
-        // FII patterns (ending in 11)
-        assert_eq!(
-            AssetType::detect_from_ticker("MXRF11"),
-            Some(AssetType::Fii)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("HGLG11"),
-            Some(AssetType::Fii)
-        );
-
-        // FIAGRO patterns
-        assert_eq!(
-            AssetType::detect_from_ticker("TEST32"),
-            Some(AssetType::Fiagro)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("TEST33"),
-            Some(AssetType::Fiagro)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("TEST34"),
-            Some(AssetType::Fiagro)
-        );
-
-        // Bond overrides
-        assert_eq!(
-            AssetType::detect_from_ticker("CRMG15"),
-            Some(AssetType::Bond)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("ELET23"),
-            Some(AssetType::Bond)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("LIGHD7"),
-            Some(AssetType::Bond)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("LAMEA6"),
-            Some(AssetType::Bond)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("UNEG11"),
-            Some(AssetType::Bond)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("CDII11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("JURO11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("BODB11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("BDIF11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("IFRA11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("XPID11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("KDIF11"),
-            Some(AssetType::FiInfra)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("CRAA11"),
-            Some(AssetType::Fiagro)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("FGAA11"),
-            Some(AssetType::Fiagro)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("DIVD11"),
-            Some(AssetType::Etf)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("NDIV11"),
-            Some(AssetType::Etf)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("UTLL11"),
-            Some(AssetType::Etf)
-        );
-        assert_eq!(
-            AssetType::detect_from_ticker("TIRB11"),
-            Some(AssetType::Etf)
-        );
-
-        // Unknown patterns
-        assert_eq!(AssetType::detect_from_ticker("SHORT"), None);
-        assert_eq!(AssetType::detect_from_ticker("TEST99"), None);
-    }
 
     #[test]
     fn test_transaction_type_conversions() {

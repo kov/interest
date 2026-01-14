@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 pub async fn dispatch_prices(
     action: crate::commands::PricesAction,
-    _json_output: bool,
+    json_output: bool,
 ) -> Result<()> {
     use crate::commands::PricesAction;
     use crate::db;
@@ -18,7 +18,8 @@ pub async fn dispatch_prices(
             db::init_database(None)?;
             let mut conn = db::open_db(None)?;
 
-            println!("📥 Importing B3 COTAHIST for year {}...", year);
+            let printer = crate::ui::progress::ProgressPrinter::new(json_output);
+            printer.persist(&format!("📥 Importing B3 COTAHIST for year {}...", year));
 
             // Create progress callback
             let callback = |progress: &b3_cotahist::DownloadProgress| {
@@ -55,12 +56,17 @@ pub async fn dispatch_prices(
                     _ => "".to_string(),
                 };
 
-                match progress.display_mode {
-                    // Persist updates as newline
-                    DisplayMode::Persist => println!("__PERSIST__:{}", stage_msg),
-                    // Show spinner-style in-place updates
-                    DisplayMode::Spinner => print!("\r{}", stage_msg),
-                }
+                let event = match progress.display_mode {
+                    DisplayMode::Persist => crate::ui::progress::ProgressEvent::Line {
+                        text: stage_msg,
+                        persist: true,
+                    },
+                    DisplayMode::Spinner => crate::ui::progress::ProgressEvent::Line {
+                        text: stage_msg,
+                        persist: false,
+                    },
+                };
+                printer.handle_event(event);
             };
 
             let cb_ref: &dyn Fn(&b3_cotahist::DownloadProgress) = &callback;
@@ -72,17 +78,19 @@ pub async fn dispatch_prices(
                 let imported =
                     b3_cotahist::import_records_to_db(&mut conn, &records, Some(cb_ref), year)?;
                 let assets: HashSet<String> = records.into_iter().map(|r| r.ticker).collect();
-                println!(
-                    "\n{} Imported COTAHIST {}: {} assets, {} prices",
-                    "✓".green(),
-                    year,
-                    assets.len(),
-                    imported
+                printer.finish(
+                    true,
+                    &format!(
+                        "Imported COTAHIST {}: {} assets, {} prices",
+                        year,
+                        assets.len(),
+                        imported
+                    ),
                 );
                 Ok(())
             })() {
                 Ok(_) => {}
-                Err(e) => println!("\n{} Import failed for {}: {}", "❌".red(), year, e),
+                Err(e) => printer.finish(false, &format!("Import failed for {}: {}", year, e)),
             }
 
             Ok(())

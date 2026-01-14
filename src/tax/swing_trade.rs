@@ -23,8 +23,14 @@ pub enum TaxCategory {
 impl TaxCategory {
     pub fn from_asset_and_trade_type(asset_type: &AssetType, is_day_trade: bool) -> Self {
         match (asset_type, is_day_trade) {
-            (AssetType::Stock, false) => TaxCategory::StockSwingTrade,
-            (AssetType::Stock, true) => TaxCategory::StockDayTrade,
+            (AssetType::Stock, false)
+            | (AssetType::Bdr, false)
+            | (AssetType::Option, false)
+            | (AssetType::TermContract, false) => TaxCategory::StockSwingTrade,
+            (AssetType::Stock, true)
+            | (AssetType::Bdr, true)
+            | (AssetType::Option, true)
+            | (AssetType::TermContract, true) => TaxCategory::StockDayTrade,
             (AssetType::Etf, false) => TaxCategory::StockSwingTrade,
             (AssetType::Etf, true) => TaxCategory::StockDayTrade,
             (AssetType::Fii, false) => TaxCategory::FiiSwingTrade,

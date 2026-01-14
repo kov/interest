@@ -15,6 +15,7 @@ pub mod reports;
 pub mod scraping;
 pub mod tax;
 pub mod term_contracts;
+pub mod tickers;
 pub mod ui;
 pub mod utils;
 

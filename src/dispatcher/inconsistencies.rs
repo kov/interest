@@ -503,8 +503,7 @@ fn apply_inconsistency_resolution(
             let asset_id = if let Some(asset_id) = issue.asset_id {
                 asset_id
             } else if let Some(ticker) = issue.ticker.as_ref() {
-                let asset_type =
-                    db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
+                let asset_type = db::AssetType::Unknown;
                 db::upsert_asset(conn, ticker, &asset_type, None)?
             } else {
                 return Err(anyhow::anyhow!("asset is required"));
@@ -567,8 +566,7 @@ fn apply_inconsistency_resolution(
             let asset_id = if let Some(asset_id) = issue.asset_id {
                 asset_id
             } else if let Some(ticker) = issue.ticker.as_ref() {
-                let asset_type =
-                    db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
+                let asset_type = db::AssetType::Unknown;
                 db::upsert_asset(conn, ticker, &asset_type, None)?
             } else {
                 return Err(anyhow::anyhow!("asset is required"));

@@ -663,7 +663,7 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
     let rows = stmt
         .query_map([date], |row| {
             let asset_type: AssetType =
-                row.get::<_, String>(8)?.parse().unwrap_or(AssetType::Stock);
+                row.get::<_, String>(8)?.parse().unwrap_or(AssetType::Unknown);
 
             Ok((
                 Asset {

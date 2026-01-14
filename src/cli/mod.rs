@@ -92,6 +92,12 @@ pub enum Commands {
         action: InconsistenciesCommands,
     },
 
+    /// Ticker metadata management
+    Tickers {
+        #[command(subcommand)]
+        action: TickersCommands,
+    },
+
     /// Process term contract liquidations
     ProcessTerms,
 
@@ -350,6 +356,32 @@ pub enum InconsistenciesCommands {
         /// Optional ignore reason
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TickersCommands {
+    /// Refresh B3 tickers cache
+    Refresh {
+        /// Force refresh even if cache is fresh
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show cache status
+    Status,
+
+    /// List tickers with UNKNOWN asset type
+    ListUnknown,
+
+    /// Resolve a ticker's asset type (interactive if no ticker provided)
+    Resolve {
+        /// Ticker symbol (optional - if not provided, resolves all unknown tickers one by one)
+        ticker: Option<String>,
+
+        /// Asset type to set (required when a ticker is provided)
+        #[arg(long = "type")]
+        asset_type: Option<String>,
     },
 }
 

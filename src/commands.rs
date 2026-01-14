@@ -24,6 +24,8 @@ pub enum Command {
     Prices { action: PricesAction },
     /// Inconsistencies management
     Inconsistencies { action: InconsistenciesAction },
+    /// Ticker metadata management
+    Tickers { action: TickersAction },
     /// Show help
     Help,
     /// Exit/quit
@@ -108,6 +110,22 @@ pub enum InconsistenciesAction {
     },
     /// Ignore an inconsistency
     Ignore { id: i64, reason: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum TickersAction {
+    /// Refresh B3 tickers cache
+    Refresh { force: bool },
+    /// Show cache status
+    Status,
+    /// List unknown tickers
+    ListUnknown,
+    /// Resolve one ticker or all unknowns (interactive if no ticker provided)
+    Resolve {
+        ticker: Option<String>,
+        asset_type: Option<String>,
+    },
 }
 
 /// Error type for command parsing
@@ -564,6 +582,68 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 _ => Err(CommandParseError {
                     message: format!(
                         "Unknown inconsistencies action: {}. Use: list, show, resolve, ignore",
+                        action
+                    ),
+                }),
+            }
+        }
+        "tickers" | "ticker" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "tickers requires action (refresh, status, list-unknown, resolve)"
+                        .to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "refresh" => {
+                    let force = parts.any(|p| p == "--force");
+                    Ok(Command::Tickers {
+                        action: TickersAction::Refresh { force },
+                    })
+                }
+                "status" => Ok(Command::Tickers {
+                    action: TickersAction::Status,
+                }),
+                "list-unknown" => Ok(Command::Tickers {
+                    action: TickersAction::ListUnknown,
+                }),
+                "resolve" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut i = 0;
+                    let ticker = if !collected.is_empty() && !collected[0].starts_with('-') {
+                        let t = collected[0].to_string();
+                        i = 1;
+                        Some(t)
+                    } else {
+                        None
+                    };
+
+                    let mut asset_type = None;
+                    while i < collected.len() {
+                        if collected[i] == "--type" && i + 1 < collected.len() {
+                            asset_type = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    if ticker.is_some() && asset_type.is_none() {
+                        return Err(CommandParseError {
+                            message: "tickers resolve requires --type when a ticker is provided"
+                                .to_string(),
+                        });
+                    }
+
+                    Ok(Command::Tickers {
+                        action: TickersAction::Resolve { ticker, asset_type },
+                    })
+                }
+                _ => Err(CommandParseError {
+                    message: format!(
+                        "Unknown tickers action: {}. Use: refresh, status, list-unknown, resolve",
                         action
                     ),
                 }),

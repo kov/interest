@@ -1,9 +1,8 @@
 use anyhow::Result;
 use colored::Colorize;
-use std::io::{stdout, Write};
 
 use crate::reports::portfolio::calculate_allocation;
-use crate::ui::crossterm_engine::Spinner;
+use crate::ui::progress::ProgressPrinter;
 use crate::utils::format_currency;
 use crate::{cli, db, reports};
 
@@ -102,12 +101,11 @@ pub async fn dispatch_portfolio_show(
 
             if !assets_with_positions.is_empty() {
                 let total = assets_with_positions.len();
-                let spinner = Spinner::new();
+                let printer = ProgressPrinter::new(json_output);
                 let mut completed = 0usize;
 
                 // Show initial spinner
-                print!("{} Fetching prices 0/{}...", spinner.tick(), total);
-                stdout().flush().ok();
+                printer.update(&format!("Fetching prices 0/{}...", total));
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
@@ -115,54 +113,38 @@ pub async fn dispatch_portfolio_show(
                     (earliest_date, today),
                     |event| {
                         // Map typed event to legacy display values
-                        let (msg_content, should_persist) = match event {
+                        let (raw_text, should_persist) = match event {
                             crate::ui::progress::ProgressEvent::Line { text, persist } => {
-                                (text.as_str(), *persist)
+                                (text.clone(), *persist)
                             }
                         };
+                        let msg_content = raw_text.as_str();
 
                         // Check if this is a ticker result (contains "→")
                         if let Some(count) = crate::dispatcher::parse_progress_count(msg_content) {
                             completed = count;
-                            // Clear spinner line, print ticker result, re-draw spinner
-                            print!("\r\x1B[2K"); // Clear current line
-                            println!("  {} {}", "↳".dimmed(), msg_content); // Print ticker with newline
-                            print!(
-                                "{} Fetching prices {}/{}...",
-                                spinner.tick(),
-                                completed,
-                                total
-                            );
-                            stdout().flush().ok();
+                            // Print ticker result, re-draw spinner message
+                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
+                                text: msg_content.to_string(),
+                                persist: true,
+                            });
+                            printer.update(&format!("Fetching prices {}/{}...", completed, total));
                         } else if should_persist {
-                            // Message should be persisted to terminal with newline
-                            print!("\r\x1B[2K"); // Clear current line
+                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
+                                text: msg_content.to_string(),
+                                persist: true,
+                            });
 
-                            // Format messages: completion (✓) in green, errors (❌) in red
-                            if msg_content.starts_with("✓") {
-                                println!("  {} {}", "↳".dimmed(), msg_content.green());
-                            } else if msg_content.starts_with("❌") {
-                                println!("  {} {}", "↳".dimmed(), msg_content.red());
-                            } else {
-                                println!("  {} {}", "↳".dimmed(), msg_content);
-                            }
-
-                            // Re-draw spinner on next line
-                            print!(
-                                "{} Fetching prices {}/{}...",
-                                spinner.tick(),
-                                completed,
-                                total
-                            );
-                            stdout().flush().ok();
+                            printer.update(&format!("Fetching prices {}/{}...", completed, total));
                         } else {
                             // Be permissive for non-persistent progress messages: show any
                             // transient activity so the user sees progress instead of a
                             // stagnant spinner.
                             if !msg_content.trim().is_empty() {
-                                print!("\r\x1B[2K"); // Clear current line
-                                print!("{} {}", spinner.tick(), msg_content);
-                                stdout().flush().ok();
+                                printer.handle_event(crate::ui::progress::ProgressEvent::Line {
+                                    text: raw_text,
+                                    persist: should_persist,
+                                });
                             }
                         }
                     },
@@ -174,9 +156,7 @@ pub async fn dispatch_portfolio_show(
                     Ok::<(), anyhow::Error>(())
                 })?;
 
-                // Stop spinner line and finish
-                print!("\r\x1B[2K");
-                println!("{} Price resolution complete", "✓".green());
+                printer.finish(true, "Price resolution complete");
 
                 // Recompute the portfolio now that current prices have been fetched
                 // so displayed values (Price, Value, P&L) reflect the latest data.

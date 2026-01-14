@@ -13,12 +13,11 @@ pub mod imports_helpers;
 mod inconsistencies;
 mod portfolio;
 mod prices;
-use crate::ui::crossterm_engine::Spinner;
+mod tickers;
 use crate::utils::format_currency;
 use crate::{db, tax};
 use anyhow::Result;
 use colored::Colorize;
-use std::io::{stdout, Write};
 use tracing::info;
 
 /// Route a parsed command to its handler
@@ -33,6 +32,7 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
         Command::Inconsistencies { action } => {
             inconsistencies::dispatch_inconsistencies(action, json_output).await
         }
+        Command::Tickers { action } => tickers::dispatch_tickers(action, json_output).await,
         Command::Help => {
             println!("Help: interest <command> [options]");
             println!("\nAvailable commands:");
@@ -57,6 +57,10 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             println!("  inconsistencies show <id>  - Show inconsistency details");
             println!("  inconsistencies resolve    - Resolve inconsistency");
             println!("  inconsistencies ignore     - Ignore inconsistency");
+            println!("  tickers refresh            - Refresh B3 tickers cache");
+            println!("  tickers status             - Show tickers cache status");
+            println!("  tickers list-unknown        - List unknown assets");
+            println!("  tickers resolve             - Resolve unknown assets");
             println!("  help                       - Show this help");
             println!("  exit                       - Exit application");
             Ok(())
@@ -107,7 +111,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
     let report = if json_output {
         tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
     } else {
-        let mut printer = TaxProgressPrinter::new(true);
+        let mut printer = TaxProgressPrinter::new();
         tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
     };
 
@@ -247,7 +251,7 @@ async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
     let conn = db::open_db(None)?;
 
     // Generate report with in-place spinner progress (terse)
-    let mut printer = TaxProgressPrinter::new(true);
+    let mut printer = TaxProgressPrinter::new();
     let report = tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?;
 
     if report.monthly_summaries.is_empty() {
@@ -439,12 +443,18 @@ async fn dispatch_income_show(year: Option<i32>, json_output: bool) -> Result<()
     // Define display order for asset types
     let type_order = [
         db::AssetType::Stock,
+        db::AssetType::Bdr,
         db::AssetType::Fii,
         db::AssetType::Fiagro,
         db::AssetType::FiInfra,
         db::AssetType::Etf,
+        db::AssetType::Fidc,
+        db::AssetType::Fip,
         db::AssetType::Bond,
         db::AssetType::GovBond,
+        db::AssetType::Option,
+        db::AssetType::TermContract,
+        db::AssetType::Unknown,
     ];
 
     let mut grand_total = Decimal::ZERO;
@@ -1163,8 +1173,7 @@ pub async fn dispatch_income_summary(year: Option<i32>, json_output: bool) -> Re
 // Snapshot commands are intentionally internal-only; no public dispatcher.
 
 struct TaxProgressPrinter {
-    spinner: Spinner,
-    in_place: bool,
+    printer: crate::ui::progress::ProgressPrinter,
     in_progress: bool,
     from_year: Option<i32>,
     target_year: Option<i32>,
@@ -1173,31 +1182,14 @@ struct TaxProgressPrinter {
 }
 
 impl TaxProgressPrinter {
-    fn new(in_place: bool) -> Self {
+    fn new() -> Self {
         Self {
-            spinner: Spinner::new(),
-            in_place,
+            printer: crate::ui::progress::ProgressPrinter::new(false),
             in_progress: false,
             from_year: None,
             target_year: None,
             total_years: 0,
             completed_years: 0,
-        }
-    }
-
-    fn render_line(&mut self, text: &str) {
-        if self.in_place {
-            print!("\r\x1b[2K{} {}", self.spinner.tick(), text);
-            let _ = stdout().flush();
-        } else {
-            println!("{} {}", self.spinner.tick(), text);
-        }
-    }
-
-    fn finish_line(&mut self) {
-        if self.in_place {
-            println!();
-            let _ = stdout().flush();
         }
     }
 
@@ -1214,7 +1206,7 @@ impl TaxProgressPrinter {
                     .target_year
                     .map(|t| (t - from_year + 1).max(1) as usize)
                     .unwrap_or(1);
-                self.render_line(&format!(
+                self.printer.update(&format!(
                     "↻ Recomputing snapshots {}/{} (starting {})",
                     self.completed_years, self.total_years, from_year
                 ));
@@ -1224,15 +1216,10 @@ impl TaxProgressPrinter {
                     self.completed_years = (self.completed_years + 1).min(self.total_years);
                     let from = self.from_year.unwrap_or(year);
                     if Some(year) == self.target_year {
-                        // Finalize with a clean success line
-                        if self.in_place {
-                            print!("\r\x1b[2K");
-                        }
-                        println!("✓ Snapshots updated {}→{}", from, year);
-                        let _ = stdout().flush();
+                        self.printer.finish(true, &format!("Snapshots updated {}→{}", from, year));
                         self.in_progress = false;
                     } else {
-                        self.render_line(&format!(
+                        self.printer.update(&format!(
                             "↻ Recomputing snapshots {}/{} (year {})",
                             self.completed_years, self.total_years, year
                         ));
@@ -1240,8 +1227,8 @@ impl TaxProgressPrinter {
                 }
             }
             tax::ReportProgress::TargetCacheHit { year } => {
-                self.render_line(&format!("✓ Cache hit for {}; using cached carry", year));
-                self.finish_line();
+                self.printer
+                    .persist(&format!("✓ Cache hit for {}; using cached carry", year));
             }
             _ => {}
         }

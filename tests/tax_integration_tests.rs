@@ -17,7 +17,9 @@ fn create_test_db() -> Result<NamedTempFile> {
 /// Helper to insert an asset
 fn insert_asset(db_path: &std::path::Path, ticker: &str, asset_type: AssetType) -> Result<i64> {
     let conn = open_db(Some(db_path.to_path_buf()))?;
-    upsert_asset(&conn, ticker, &asset_type, Some(ticker))
+    let asset_id = upsert_asset(&conn, ticker, &asset_type, Some(ticker))?;
+    interest::db::update_asset_type(&conn, ticker, &asset_type)?;
+    Ok(asset_id)
 }
 
 /// Helper to insert a transaction

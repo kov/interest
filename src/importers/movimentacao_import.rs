@@ -41,8 +41,9 @@ pub fn import_movimentacao_entries(
         }
 
         let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
-        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, None) {
+        let asset_type = db::AssetType::Unknown;
+        let asset_name = extract_asset_name(&entry.product);
+        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, asset_name.as_deref()) {
             Ok(id) => id,
             Err(e) => {
                 warn!("Error upserting asset {}: {}", ticker, e);
@@ -115,8 +116,9 @@ pub fn import_movimentacao_entries(
         }
 
         let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
-        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, None) {
+        let asset_type = db::AssetType::Unknown;
+        let asset_name = extract_asset_name(&entry.product);
+        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, asset_name.as_deref()) {
             Ok(id) => id,
             Err(e) => {
                 warn!("Error upserting asset {}: {}", ticker, e);
@@ -436,8 +438,9 @@ pub fn import_movimentacao_entries(
         }
 
         let ticker = entry.ticker.as_ref().unwrap();
-        let asset_type = db::AssetType::detect_from_ticker(ticker).unwrap_or(db::AssetType::Stock);
-        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, None) {
+        let asset_type = db::AssetType::Unknown;
+        let asset_name = extract_asset_name(&entry.product);
+        let asset_id = match db::upsert_asset(conn, ticker, &asset_type, asset_name.as_deref()) {
             Ok(id) => id,
             Err(e) => {
                 warn!("Error upserting asset {} for income event: {}", ticker, e);
@@ -686,6 +689,23 @@ fn normalized_product_description(product: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_uppercase()
+}
+
+fn extract_asset_name(product: &str) -> Option<String> {
+    let parts: Vec<&str> = product
+        .split(" - ")
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.last().unwrap().trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(test)]
