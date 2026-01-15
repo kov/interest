@@ -58,6 +58,44 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
 CREATE INDEX IF NOT EXISTS idx_corporate_actions_asset ON corporate_actions(asset_id);
 CREATE INDEX IF NOT EXISTS idx_corporate_actions_date ON corporate_actions(ex_date);
 
+-- Asset renames (symbol-only changes, no economic impact)
+CREATE TABLE IF NOT EXISTS asset_renames (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_asset_id INTEGER NOT NULL,
+    to_asset_id INTEGER NOT NULL,
+    effective_date DATE NOT NULL,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (from_asset_id) REFERENCES assets(id),
+    FOREIGN KEY (to_asset_id) REFERENCES assets(id),
+    UNIQUE(from_asset_id, to_asset_id, effective_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_renames_from ON asset_renames(from_asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_renames_to ON asset_renames(to_asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_renames_date ON asset_renames(effective_date);
+
+-- Asset exchanges (spin-off or merger, cost basis reallocation)
+CREATE TABLE IF NOT EXISTS asset_exchanges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,          -- 'SPINOFF' or 'MERGER'
+    from_asset_id INTEGER NOT NULL,
+    to_asset_id INTEGER NOT NULL,
+    effective_date DATE NOT NULL,
+    to_quantity TEXT NOT NULL,         -- Decimal text
+    allocated_cost TEXT NOT NULL,      -- Decimal text (cost basis allocated to new asset)
+    cash_amount TEXT NOT NULL DEFAULT '0', -- Decimal text (cash amortization)
+    source TEXT,                       -- 'MANUAL', 'B3', etc.
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (from_asset_id) REFERENCES assets(id),
+    FOREIGN KEY (to_asset_id) REFERENCES assets(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_exchanges_from ON asset_exchanges(from_asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_exchanges_to ON asset_exchanges(to_asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_exchanges_date ON asset_exchanges(effective_date);
+
 -- Price history (daily OHLCV data)
 CREATE TABLE IF NOT EXISTS price_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

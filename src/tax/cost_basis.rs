@@ -85,6 +85,12 @@ impl AverageCostMatcher {
         }
     }
 
+    /// Clear the current position without generating a sale (e.g., mergers/exchanges).
+    pub fn clear_position(&mut self) {
+        self.total_quantity = Decimal::ZERO;
+        self.total_cost = Decimal::ZERO;
+    }
+
     /// Match a sale using average cost up to that point, with optional adjusted quantity
     pub fn match_sale(
         &mut self,

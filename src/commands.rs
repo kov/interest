@@ -20,6 +20,8 @@ pub enum Command {
     Tax { action: TaxAction },
     /// Income commands and sub-actions (e.g. `income show`)
     Income { action: IncomeAction },
+    /// Corporate actions (renames, splits, bonuses, exchanges)
+    Actions { action: ActionsAction },
     /// Price management: `prices import-b3 <year> [--nocache]` or `prices clear-cache [year]`
     Prices { action: PricesAction },
     /// Inconsistencies management
@@ -70,6 +72,101 @@ pub enum IncomeAction {
     },
     /// Show income summary: `income summary [year]`
     Summary { year: Option<i32> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum ActionsAction {
+    Rename {
+        action: RenameAction,
+    },
+    Split {
+        action: SplitAction,
+    },
+    Bonus {
+        action: BonusAction,
+    },
+    Spinoff {
+        action: ExchangeAction,
+    },
+    Merger {
+        action: ExchangeAction,
+    },
+    /// Apply corporate actions (bonus synthetic transactions)
+    Apply {
+        ticker: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum RenameAction {
+    Add {
+        from: String,
+        to: String,
+        date: String,
+        notes: Option<String>,
+    },
+    List {
+        ticker: Option<String>,
+    },
+    Remove {
+        id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum SplitAction {
+    Add {
+        ticker: String,
+        quantity_adjustment: String,
+        date: String,
+        notes: Option<String>,
+    },
+    List {
+        ticker: Option<String>,
+    },
+    Remove {
+        id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum BonusAction {
+    Add {
+        ticker: String,
+        quantity_adjustment: String,
+        date: String,
+        notes: Option<String>,
+    },
+    List {
+        ticker: Option<String>,
+    },
+    Remove {
+        id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ExchangeAction {
+    Add {
+        from: String,
+        to: String,
+        date: String,
+        quantity: String,
+        allocated_cost: String,
+        cash: Option<String>,
+        notes: Option<String>,
+    },
+    List {
+        ticker: Option<String>,
+    },
+    Remove {
+        id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +540,240 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                     ),
                 }),
             }
+        }
+        "actions" | "action" => {
+            let action_type = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "actions requires a type (rename, split, bonus, spinoff, merger)."
+                        .to_string(),
+                })?
+                .to_lowercase();
+
+            if action_type == "apply" {
+                let ticker = parts.next().map(|t| t.to_string());
+                return Ok(Command::Actions {
+                    action: ActionsAction::Apply { ticker },
+                });
+            }
+
+            let verb = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "actions requires a verb (add, list, remove).".to_string(),
+                })?
+                .to_lowercase();
+
+            let collected: Vec<_> = parts.collect();
+            let mut i = 0;
+            let mut notes: Option<String> = None;
+            let mut cash: Option<String> = None;
+            let mut args: Vec<String> = Vec::new();
+
+            while i < collected.len() {
+                match collected[i] {
+                    "--notes" if i + 1 < collected.len() => {
+                        notes = Some(collected[i + 1].to_string());
+                        i += 2;
+                    }
+                    "--cash" if i + 1 < collected.len() => {
+                        cash = Some(collected[i + 1].to_string());
+                        i += 2;
+                    }
+                    _ => {
+                        args.push(collected[i].to_string());
+                        i += 1;
+                    }
+                }
+            }
+
+            let action = match (action_type.as_str(), verb.as_str()) {
+                ("rename", "add") => {
+                    if args.len() < 3 {
+                        return Err(CommandParseError {
+                            message: "actions rename add requires: <from> <to> <date>".to_string(),
+                        });
+                    }
+                    ActionsAction::Rename {
+                        action: RenameAction::Add {
+                            from: args[0].to_string(),
+                            to: args[1].to_string(),
+                            date: args[2].to_string(),
+                            notes,
+                        },
+                    }
+                }
+                ("rename", "list") => ActionsAction::Rename {
+                    action: RenameAction::List {
+                        ticker: args.first().map(|s| s.to_string()),
+                    },
+                },
+                ("rename", "remove") => {
+                    let id = args
+                        .first()
+                        .ok_or_else(|| CommandParseError {
+                            message: "actions rename remove requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "actions rename remove requires a numeric id".to_string(),
+                        })?;
+                    ActionsAction::Rename {
+                        action: RenameAction::Remove { id },
+                    }
+                }
+                ("split", "add") => {
+                    if args.len() < 3 {
+                        return Err(CommandParseError {
+                            message: "actions split add requires: <ticker> <qty_adjustment> <date>"
+                                .to_string(),
+                        });
+                    }
+                    ActionsAction::Split {
+                        action: SplitAction::Add {
+                            ticker: args[0].to_string(),
+                            quantity_adjustment: args[1].to_string(),
+                            date: args[2].to_string(),
+                            notes,
+                        },
+                    }
+                }
+                ("split", "list") => ActionsAction::Split {
+                    action: SplitAction::List {
+                        ticker: args.first().map(|s| s.to_string()),
+                    },
+                },
+                ("split", "remove") => {
+                    let id = args
+                        .first()
+                        .ok_or_else(|| CommandParseError {
+                            message: "actions split remove requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "actions split remove requires a numeric id".to_string(),
+                        })?;
+                    ActionsAction::Split {
+                        action: SplitAction::Remove { id },
+                    }
+                }
+                ("bonus", "add") => {
+                    if args.len() < 3 {
+                        return Err(CommandParseError {
+                            message: "actions bonus add requires: <ticker> <qty_adjustment> <date>"
+                                .to_string(),
+                        });
+                    }
+                    ActionsAction::Bonus {
+                        action: BonusAction::Add {
+                            ticker: args[0].to_string(),
+                            quantity_adjustment: args[1].to_string(),
+                            date: args[2].to_string(),
+                            notes,
+                        },
+                    }
+                }
+                ("bonus", "list") => ActionsAction::Bonus {
+                    action: BonusAction::List {
+                        ticker: args.first().map(|s| s.to_string()),
+                    },
+                },
+                ("bonus", "remove") => {
+                    let id = args
+                        .first()
+                        .ok_or_else(|| CommandParseError {
+                            message: "actions bonus remove requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "actions bonus remove requires a numeric id".to_string(),
+                        })?;
+                    ActionsAction::Bonus {
+                        action: BonusAction::Remove { id },
+                    }
+                }
+                ("spinoff", "add") => {
+                    if args.len() < 5 {
+                        return Err(CommandParseError {
+                            message: "actions spinoff add requires: <from> <to> <date> <quantity> <allocated_cost>".to_string(),
+                        });
+                    }
+                    ActionsAction::Spinoff {
+                        action: ExchangeAction::Add {
+                            from: args[0].to_string(),
+                            to: args[1].to_string(),
+                            date: args[2].to_string(),
+                            quantity: args[3].to_string(),
+                            allocated_cost: args[4].to_string(),
+                            cash,
+                            notes,
+                        },
+                    }
+                }
+                ("spinoff", "list") => ActionsAction::Spinoff {
+                    action: ExchangeAction::List {
+                        ticker: args.first().map(|s| s.to_string()),
+                    },
+                },
+                ("spinoff", "remove") => {
+                    let id = args
+                        .first()
+                        .ok_or_else(|| CommandParseError {
+                            message: "actions spinoff remove requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "actions spinoff remove requires a numeric id".to_string(),
+                        })?;
+                    ActionsAction::Spinoff {
+                        action: ExchangeAction::Remove { id },
+                    }
+                }
+                ("merger", "add") => {
+                    if args.len() < 5 {
+                        return Err(CommandParseError {
+                            message: "actions merger add requires: <from> <to> <date> <quantity> <allocated_cost>".to_string(),
+                        });
+                    }
+                    ActionsAction::Merger {
+                        action: ExchangeAction::Add {
+                            from: args[0].to_string(),
+                            to: args[1].to_string(),
+                            date: args[2].to_string(),
+                            quantity: args[3].to_string(),
+                            allocated_cost: args[4].to_string(),
+                            cash,
+                            notes,
+                        },
+                    }
+                }
+                ("merger", "list") => ActionsAction::Merger {
+                    action: ExchangeAction::List {
+                        ticker: args.first().map(|s| s.to_string()),
+                    },
+                },
+                ("merger", "remove") => {
+                    let id = args
+                        .first()
+                        .ok_or_else(|| CommandParseError {
+                            message: "actions merger remove requires an id".to_string(),
+                        })?
+                        .parse::<i64>()
+                        .map_err(|_| CommandParseError {
+                            message: "actions merger remove requires a numeric id".to_string(),
+                        })?;
+                    ActionsAction::Merger {
+                        action: ExchangeAction::Remove { id },
+                    }
+                }
+                _ => {
+                    return Err(CommandParseError {
+                        message: format!("Unknown actions command: {} {}", action_type, verb),
+                    })
+                }
+            };
+
+            Ok(Command::Actions { action })
         }
         "inconsistencies" | "inconsistency" => {
             let action = parts

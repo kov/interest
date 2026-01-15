@@ -6,19 +6,19 @@ use std::str::FromStr;
 /// Asset types supported by the system
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AssetType {
-    Stock,   // Brazilian stocks (ações)
-    Etf,     // Exchange-traded funds
-    Fii,     // Real estate investment funds
-    Fiagro,  // Agribusiness investment funds
-    FiInfra, // Infrastructure investment funds
-    Bond,    // Corporate bonds
-    GovBond, // Government bonds (Tesouro Direto)
-    Bdr,     // Brazilian Depositary Receipts
-    Fidc,    // Credit rights investment funds
-    Fip,     // Private equity funds
-    Option,  // Options on equities
+    Stock,        // Brazilian stocks (ações)
+    Etf,          // Exchange-traded funds
+    Fii,          // Real estate investment funds
+    Fiagro,       // Agribusiness investment funds
+    FiInfra,      // Infrastructure investment funds
+    Bond,         // Corporate bonds
+    GovBond,      // Government bonds (Tesouro Direto)
+    Bdr,          // Brazilian Depositary Receipts
+    Fidc,         // Credit rights investment funds
+    Fip,          // Private equity funds
+    Option,       // Options on equities
     TermContract, // Term contracts (e.g., ANIM3T)
-    Unknown, // Unresolved/unknown type
+    Unknown,      // Unresolved/unknown type
 }
 
 impl AssetType {
@@ -39,7 +39,6 @@ impl AssetType {
             AssetType::Unknown => "UNKNOWN",
         }
     }
-
 }
 
 impl FromStr for AssetType {
@@ -169,6 +168,61 @@ pub struct CorporateAction {
     pub event_date: NaiveDate,
     pub ex_date: NaiveDate,
     pub quantity_adjustment: Decimal, // Share quantity to add/subtract (positive = add, negative = subtract)
+    pub source: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Asset rename (symbol-only change, no economic impact)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRename {
+    pub id: Option<i64>,
+    pub from_asset_id: i64,
+    pub to_asset_id: i64,
+    pub effective_date: NaiveDate,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Exchange action type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssetExchangeType {
+    Spinoff,
+    Merger,
+}
+
+impl AssetExchangeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AssetExchangeType::Spinoff => "SPINOFF",
+            AssetExchangeType::Merger => "MERGER",
+        }
+    }
+}
+
+impl FromStr for AssetExchangeType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "SPINOFF" | "SPIN-OFF" => Ok(AssetExchangeType::Spinoff),
+            "MERGER" | "INCORPORATION" => Ok(AssetExchangeType::Merger),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Asset exchange (spin-off or merger with cost basis allocation)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetExchange {
+    pub id: Option<i64>,
+    pub event_type: AssetExchangeType,
+    pub from_asset_id: i64,
+    pub to_asset_id: i64,
+    pub effective_date: NaiveDate,
+    pub to_quantity: Decimal,
+    pub allocated_cost: Decimal,
+    pub cash_amount: Decimal,
     pub source: String,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -433,7 +487,6 @@ mod tests {
         );
         assert_eq!("INVALID".parse::<AssetType>().ok(), None);
     }
-
 
     #[test]
     fn test_transaction_type_conversions() {

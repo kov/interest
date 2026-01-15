@@ -8,6 +8,7 @@ pub mod performance;
 use performance::dispatch_performance;
 
 use crate::commands::Command;
+mod actions;
 mod imports;
 pub mod imports_helpers;
 mod inconsistencies;
@@ -28,6 +29,7 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
         Command::Performance { action } => dispatch_performance(action, json_output).await,
         Command::Tax { action } => dispatch_tax(action, json_output).await,
         Command::Income { action } => dispatch_income(action, json_output).await,
+        Command::Actions { action } => actions::dispatch_actions(action, json_output).await,
         Command::Prices { action } => prices::dispatch_prices(action, json_output).await,
         Command::Inconsistencies { action } => {
             inconsistencies::dispatch_inconsistencies(action, json_output).await
@@ -50,6 +52,11 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             println!(
                 "  income summary [year]      - Show yearly totals (or monthly if year given)"
             );
+            println!("  actions rename <...>       - Manage asset renames");
+            println!("  actions split <...>        - Manage splits/reverse splits");
+            println!("  actions bonus <...>        - Manage bonus actions");
+            println!("  actions spinoff <...>      - Manage spin-off exchanges");
+            println!("  actions merger <...>       - Manage merger exchanges");
             println!("  prices import-b3 <year>    - Import B3 COTAHIST data for year");
             println!("  prices import-b3-file <p>  - Import COTAHIST from local ZIP file");
             println!("  prices clear-cache [year]  - Clear B3 COTAHIST cache");

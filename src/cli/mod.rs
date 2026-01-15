@@ -220,24 +220,40 @@ pub enum IncomeCommands {
 
 #[derive(Subcommand)]
 pub enum ActionCommands {
-    /// Manually add a corporate action (split, reverse split, bonus)
-    Add {
-        /// Ticker symbol (e.g., PETR4, A1MD34)
-        ticker: String,
+    /// Manage asset renames (symbol-only changes)
+    Rename {
+        #[command(subcommand)]
+        action: RenameCommands,
+    },
 
-        /// Action type: split, reverse-split, or bonus
-        #[arg(value_parser = ["split", "reverse-split", "bonus", "SPLIT", "REVERSE-SPLIT", "BONUS"])]
-        action_type: String,
+    /// Manage splits and reverse splits (quantity adjustments)
+    Split {
+        #[command(subcommand)]
+        action: SplitCommands,
+    },
 
-        /// Ratio in format "from:to" (e.g., "1:2" for 1:2 split, "10:1" for 10:1 reverse split)
-        ratio: String,
+    /// Manage bonus actions (synthetic share grants)
+    Bonus {
+        #[command(subcommand)]
+        action: BonusCommands,
+    },
 
-        /// Ex-date when the action becomes effective (YYYY-MM-DD)
-        date: String,
+    /// Manage spin-offs (parent continues)
+    Spinoff {
+        #[command(subcommand)]
+        action: ExchangeCommands,
+    },
 
-        /// Optional notes
-        #[arg(short, long)]
-        notes: Option<String>,
+    /// Manage mergers/exchanges (source disappears)
+    Merger {
+        #[command(subcommand)]
+        action: ExchangeCommands,
+    },
+
+    /// Apply unapplied corporate actions to transactions
+    Apply {
+        /// Ticker symbol (optional, applies all if not specified)
+        ticker: Option<String>,
     },
 
     /// Scrape corporate actions from investing.com
@@ -260,45 +276,116 @@ pub enum ActionCommands {
 
     /// Update corporate actions from API
     Update,
+}
 
-    /// List corporate actions for a ticker
-    List {
-        /// Ticker symbol (optional, shows all if not specified)
-        ticker: Option<String>,
-    },
-
-    /// Apply unapplied corporate actions to transactions
-    Apply {
-        /// Ticker symbol (optional, applies all if not specified)
-        ticker: Option<String>,
-    },
-
-    /// Delete a corporate action by ID
-    Delete {
-        /// Corporate action ID
-        id: i64,
-    },
-
-    /// Edit a corporate action's details
-    Edit {
-        /// Corporate action ID
-        id: i64,
-
-        /// New action type: split, reverse-split, or bonus
-        #[arg(long, value_parser = ["split", "reverse-split", "bonus", "SPLIT", "REVERSE-SPLIT", "BONUS"])]
-        action_type: Option<String>,
-
-        /// New ratio in format "from:to" (e.g., "1:8")
-        #[arg(long)]
-        ratio: Option<String>,
-
-        /// New ex-date (YYYY-MM-DD)
-        #[arg(long)]
-        date: Option<String>,
-
-        /// New notes
-        #[arg(long)]
+#[derive(Subcommand)]
+pub enum RenameCommands {
+    /// Add a rename
+    Add {
+        /// Old ticker symbol
+        from: String,
+        /// New ticker symbol
+        to: String,
+        /// Effective date (YYYY-MM-DD)
+        date: String,
+        /// Optional notes
+        #[arg(short, long)]
         notes: Option<String>,
+    },
+    /// List renames (optional ticker filter)
+    List {
+        /// Ticker symbol (optional)
+        ticker: Option<String>,
+    },
+    /// Remove a rename by ID
+    Remove {
+        /// Rename ID
+        id: i64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SplitCommands {
+    /// Add a split or reverse split (negative adjustment for reverse)
+    Add {
+        /// Ticker symbol
+        ticker: String,
+        /// Quantity adjustment (signed)
+        quantity_adjustment: String,
+        /// Ex-date (YYYY-MM-DD)
+        date: String,
+        /// Optional notes
+        #[arg(short, long)]
+        notes: Option<String>,
+    },
+    /// List splits (optional ticker filter)
+    List {
+        /// Ticker symbol (optional)
+        ticker: Option<String>,
+    },
+    /// Remove a split by ID
+    Remove {
+        /// Corporate action ID
+        id: i64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BonusCommands {
+    /// Add a bonus action
+    Add {
+        /// Ticker symbol
+        ticker: String,
+        /// Quantity adjustment
+        quantity_adjustment: String,
+        /// Ex-date (YYYY-MM-DD)
+        date: String,
+        /// Optional notes
+        #[arg(short, long)]
+        notes: Option<String>,
+    },
+    /// List bonus actions (optional ticker filter)
+    List {
+        /// Ticker symbol (optional)
+        ticker: Option<String>,
+    },
+    /// Remove a bonus action by ID
+    Remove {
+        /// Corporate action ID
+        id: i64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExchangeCommands {
+    /// Add a spin-off or merger exchange
+    Add {
+        /// Source ticker
+        from: String,
+        /// Target ticker
+        to: String,
+        /// Effective date (YYYY-MM-DD)
+        date: String,
+        /// Quantity received
+        quantity: String,
+        /// Cost basis allocated to new ticker
+        allocated_cost: String,
+        /// Cash amortization amount
+        #[arg(long)]
+        cash: Option<String>,
+        /// Optional notes
+        #[arg(short, long)]
+        notes: Option<String>,
+    },
+    /// List exchanges (optional ticker filter)
+    List {
+        /// Ticker symbol (optional)
+        ticker: Option<String>,
+    },
+    /// Remove an exchange by ID
+    Remove {
+        /// Exchange ID
+        id: i64,
     },
 }
 

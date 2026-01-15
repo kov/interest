@@ -63,7 +63,154 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
             })),
         },
 
-        Commands::Actions { .. } => Ok(None),
+        Commands::Actions { action } => match action {
+            crate::cli::ActionCommands::Rename { action } => {
+                let mapped = match action {
+                    crate::cli::RenameCommands::Add { from, to, date, notes } => {
+                        cmd::ActionsAction::Rename {
+                            action: cmd::RenameAction::Add {
+                                from: from.clone(),
+                                to: to.clone(),
+                                date: date.clone(),
+                                notes: notes.clone(),
+                            },
+                        }
+                    }
+                    crate::cli::RenameCommands::List { ticker } => cmd::ActionsAction::Rename {
+                        action: cmd::RenameAction::List {
+                            ticker: ticker.clone(),
+                        },
+                    },
+                    crate::cli::RenameCommands::Remove { id } => cmd::ActionsAction::Rename {
+                        action: cmd::RenameAction::Remove { id: *id },
+                    },
+                };
+                Ok(Some(Command::Actions { action: mapped }))
+            }
+            crate::cli::ActionCommands::Split { action } => {
+                let mapped = match action {
+                    crate::cli::SplitCommands::Add {
+                        ticker,
+                        quantity_adjustment,
+                        date,
+                        notes,
+                    } => cmd::ActionsAction::Split {
+                        action: cmd::SplitAction::Add {
+                            ticker: ticker.clone(),
+                            quantity_adjustment: quantity_adjustment.clone(),
+                            date: date.clone(),
+                            notes: notes.clone(),
+                        },
+                    },
+                    crate::cli::SplitCommands::List { ticker } => cmd::ActionsAction::Split {
+                        action: cmd::SplitAction::List {
+                            ticker: ticker.clone(),
+                        },
+                    },
+                    crate::cli::SplitCommands::Remove { id } => cmd::ActionsAction::Split {
+                        action: cmd::SplitAction::Remove { id: *id },
+                    },
+                };
+                Ok(Some(Command::Actions { action: mapped }))
+            }
+            crate::cli::ActionCommands::Bonus { action } => {
+                let mapped = match action {
+                    crate::cli::BonusCommands::Add {
+                        ticker,
+                        quantity_adjustment,
+                        date,
+                        notes,
+                    } => cmd::ActionsAction::Bonus {
+                        action: cmd::BonusAction::Add {
+                            ticker: ticker.clone(),
+                            quantity_adjustment: quantity_adjustment.clone(),
+                            date: date.clone(),
+                            notes: notes.clone(),
+                        },
+                    },
+                    crate::cli::BonusCommands::List { ticker } => cmd::ActionsAction::Bonus {
+                        action: cmd::BonusAction::List {
+                            ticker: ticker.clone(),
+                        },
+                    },
+                    crate::cli::BonusCommands::Remove { id } => cmd::ActionsAction::Bonus {
+                        action: cmd::BonusAction::Remove { id: *id },
+                    },
+                };
+                Ok(Some(Command::Actions { action: mapped }))
+            }
+            crate::cli::ActionCommands::Spinoff { action } => {
+                let mapped = match action {
+                    crate::cli::ExchangeCommands::Add {
+                        from,
+                        to,
+                        date,
+                        quantity,
+                        allocated_cost,
+                        cash,
+                        notes,
+                    } => cmd::ActionsAction::Spinoff {
+                        action: cmd::ExchangeAction::Add {
+                            from: from.clone(),
+                            to: to.clone(),
+                            date: date.clone(),
+                            quantity: quantity.clone(),
+                            allocated_cost: allocated_cost.clone(),
+                            cash: cash.clone(),
+                            notes: notes.clone(),
+                        },
+                    },
+                    crate::cli::ExchangeCommands::List { ticker } => cmd::ActionsAction::Spinoff {
+                        action: cmd::ExchangeAction::List {
+                            ticker: ticker.clone(),
+                        },
+                    },
+                    crate::cli::ExchangeCommands::Remove { id } => cmd::ActionsAction::Spinoff {
+                        action: cmd::ExchangeAction::Remove { id: *id },
+                    },
+                };
+                Ok(Some(Command::Actions { action: mapped }))
+            }
+            crate::cli::ActionCommands::Merger { action } => {
+                let mapped = match action {
+                    crate::cli::ExchangeCommands::Add {
+                        from,
+                        to,
+                        date,
+                        quantity,
+                        allocated_cost,
+                        cash,
+                        notes,
+                    } => cmd::ActionsAction::Merger {
+                        action: cmd::ExchangeAction::Add {
+                            from: from.clone(),
+                            to: to.clone(),
+                            date: date.clone(),
+                            quantity: quantity.clone(),
+                            allocated_cost: allocated_cost.clone(),
+                            cash: cash.clone(),
+                            notes: notes.clone(),
+                        },
+                    },
+                    crate::cli::ExchangeCommands::List { ticker } => cmd::ActionsAction::Merger {
+                        action: cmd::ExchangeAction::List {
+                            ticker: ticker.clone(),
+                        },
+                    },
+                    crate::cli::ExchangeCommands::Remove { id } => cmd::ActionsAction::Merger {
+                        action: cmd::ExchangeAction::Remove { id: *id },
+                    },
+                };
+                Ok(Some(Command::Actions { action: mapped }))
+            }
+            crate::cli::ActionCommands::Apply { ticker } => Ok(Some(Command::Actions {
+                action: cmd::ActionsAction::Apply {
+                    ticker: ticker.clone(),
+                },
+            })),
+            crate::cli::ActionCommands::Scrape { .. } => Ok(None),
+            crate::cli::ActionCommands::Update => Ok(None),
+        },
         Commands::Inconsistencies { action } => match action {
             crate::cli::InconsistenciesCommands::List {
                 open: _,

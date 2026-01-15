@@ -179,9 +179,11 @@ pub fn calculate_monthly_tax(
             .unwrap()
     };
 
-    let mut assets_by_ticker = HashMap::new();
+    let mut assets_by_id = HashMap::new();
     for asset in &assets {
-        assets_by_ticker.insert(asset.ticker.clone(), asset.clone());
+        if let Some(id) = asset.id {
+            assets_by_id.insert(id, asset.clone());
+        }
     }
 
     // Process each asset ONCE
@@ -190,9 +192,6 @@ pub fn calculate_monthly_tax(
             continue;
         }
 
-        if crate::db::is_rename_source_ticker(&asset.ticker) {
-            continue;
-        }
         if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
             continue;
         }
@@ -204,24 +203,68 @@ pub fn calculate_monthly_tax(
 
         let asset_id = asset.id.unwrap();
 
+        if crate::db::is_rename_source_asset(conn, asset_id, month_end)? {
+            continue;
+        }
+
         // Get all transactions for this asset up to end of month
         let mut transactions = get_transactions_up_to_month(conn, asset_id, year, month)?;
 
-        for (source_ticker, effective_date) in crate::db::rename_sources_for(&asset.ticker) {
-            if effective_date > month_end {
-                continue;
-            }
-
-            if let Some(source_asset) = assets_by_ticker.get(source_ticker) {
+        let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, month_end)?;
+        for rename in renames {
+            if let Some(source_asset) = assets_by_id.get(&rename.from_asset_id) {
                 if let Some(carryover) = build_rename_carryover_transaction(
                     conn,
                     source_asset,
                     asset_id,
-                    effective_date,
+                    rename.effective_date,
                 )? {
                     transactions.push(carryover);
                 }
             }
+        }
+
+        let exchanges = crate::db::get_asset_exchanges_as_target_up_to(conn, asset_id, month_end)?;
+        for exchange in exchanges {
+            if exchange.to_quantity <= Decimal::ZERO {
+                continue;
+            }
+
+            let source_ticker = assets_by_id
+                .get(&exchange.from_asset_id)
+                .map(|a| a.ticker.as_str())
+                .unwrap_or("UNKNOWN");
+            let notes = match exchange.event_type {
+                crate::db::AssetExchangeType::Spinoff => {
+                    format!("Spin-off from {}", source_ticker)
+                }
+                crate::db::AssetExchangeType::Merger => {
+                    format!("Merger from {}", source_ticker)
+                }
+            };
+
+            let price_per_unit = if exchange.to_quantity > Decimal::ZERO {
+                exchange.allocated_cost / exchange.to_quantity
+            } else {
+                Decimal::ZERO
+            };
+
+            transactions.push(Transaction {
+                id: None,
+                asset_id,
+                transaction_type: TransactionType::Buy,
+                trade_date: exchange.effective_date,
+                settlement_date: Some(exchange.effective_date),
+                quantity: exchange.to_quantity,
+                price_per_unit,
+                total_cost: exchange.allocated_cost,
+                fees: Decimal::ZERO,
+                is_day_trade: false,
+                quota_issuance_date: None,
+                notes: Some(notes),
+                source: "EXCHANGE".to_string(),
+                created_at: chrono::Utc::now(),
+            });
         }
 
         transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
@@ -235,6 +278,9 @@ pub fn calculate_monthly_tax(
         let amortizations =
             crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(month_end))?;
         let mut amort_idx: usize = 0;
+        let exchanges_as_source =
+            crate::db::get_asset_exchanges_as_source_up_to(conn, asset_id, month_end)?;
+        let mut exchange_idx: usize = 0;
 
         // Forward-only corporate action adjustments: apply once at ex-date
         // We only apply quantity adjustments to the swing matcher (persistent holdings)
@@ -248,6 +294,16 @@ pub fn calculate_monthly_tax(
             {
                 swing_matcher.apply_amortization(amortizations[amort_idx].total_amount);
                 amort_idx += 1;
+            }
+
+            while exchange_idx < exchanges_as_source.len()
+                && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
+            {
+                apply_exchange_source_effect(
+                    &mut swing_matcher,
+                    &exchanges_as_source[exchange_idx],
+                );
+                exchange_idx += 1;
             }
 
             // Before processing this transaction, apply any corporate actions up to its date
@@ -611,6 +667,21 @@ fn apply_actions_to_carryover(
     }
 
     Ok(())
+}
+
+fn apply_exchange_source_effect(
+    matcher: &mut AverageCostMatcher,
+    exchange: &crate::db::AssetExchange,
+) {
+    match exchange.event_type {
+        crate::db::AssetExchangeType::Spinoff => {
+            let reduction = exchange.allocated_cost + exchange.cash_amount;
+            matcher.apply_amortization(reduction);
+        }
+        crate::db::AssetExchangeType::Merger => {
+            matcher.clear_position();
+        }
+    }
 }
 
 /// Get all transactions for an asset up to the end of specified month

@@ -9,14 +9,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::OnceLock;
 use tracing::info;
 
 use crate::term_contracts;
 pub use models::{
-    Asset, AssetType, CorporateAction, CorporateActionType, IncomeEvent, IncomeEventType,
-    Inconsistency, InconsistencySeverity, InconsistencyStatus, InconsistencyType, PriceHistory,
-    Transaction, TransactionType,
+    Asset, AssetExchange, AssetExchangeType, AssetRename, AssetType, CorporateAction,
+    CorporateActionType, IncomeEvent, IncomeEventType, Inconsistency, InconsistencySeverity,
+    InconsistencyStatus, InconsistencyType, PriceHistory, Transaction, TransactionType,
 };
 
 /// Get the default database path (~/.interest/data.db)
@@ -428,65 +427,380 @@ fn is_follow_on_option_ticker(ticker: &str) -> bool {
     matches!(ticker.to_uppercase().as_str(), "JURO15" | "CDII15")
 }
 
-/// Rename/merger mappings applied in portfolio/tax calculations.
-pub struct RenameMapping {
-    pub from: &'static str,
-    pub to: &'static str,
-    pub effective_date: NaiveDate,
-    pub target_quantity: Option<rust_decimal::Decimal>,
+/// Insert an asset rename (symbol-only change).
+pub fn insert_asset_rename(conn: &Connection, rename: &AssetRename) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO asset_renames (from_asset_id, to_asset_id, effective_date, notes)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            rename.from_asset_id,
+            rename.to_asset_id,
+            rename.effective_date,
+            rename.notes
+        ],
+    )?;
+
+    Ok(conn.last_insert_rowid())
 }
 
-pub fn rename_mappings() -> &'static [RenameMapping] {
-    static MAPPINGS: OnceLock<Vec<RenameMapping>> = OnceLock::new();
-    MAPPINGS.get_or_init(|| {
-        vec![
-            RenameMapping {
-                from: "JSLG3",
-                to: "SIMH3",
-                effective_date: NaiveDate::from_ymd_opt(2020, 9, 21).unwrap(),
-                target_quantity: None,
-            },
-            RenameMapping {
-                from: "BAHI3",
-                to: "BIED3",
-                effective_date: NaiveDate::from_ymd_opt(2024, 11, 26).unwrap(),
-                target_quantity: None,
-            },
-            RenameMapping {
-                from: "ALZM11",
-                to: "ALZC11",
-                effective_date: NaiveDate::from_ymd_opt(2025, 2, 24).unwrap(),
-                target_quantity: Some(rust_decimal::Decimal::from(762)),
-            },
-            RenameMapping {
-                from: "RBRF11",
-                to: "RBRX11",
-                effective_date: NaiveDate::from_ymd_opt(2025, 12, 1).unwrap(),
-                target_quantity: Some(rust_decimal::Decimal::from(7894)),
-            },
-        ]
-    })
+/// Get an asset rename by id.
+pub fn get_asset_rename(conn: &Connection, id: i64) -> Result<Option<AssetRename>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_asset_id, to_asset_id, effective_date, notes, created_at
+         FROM asset_renames
+         WHERE id = ?1",
+    )?;
+
+    let result = stmt
+        .query_row(params![id], |row| {
+            Ok(AssetRename {
+                id: Some(row.get(0)?),
+                from_asset_id: row.get(1)?,
+                to_asset_id: row.get(2)?,
+                effective_date: row.get(3)?,
+                notes: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
 }
 
-pub fn is_rename_source_ticker(ticker: &str) -> bool {
-    rename_mappings()
-        .iter()
-        .any(|m| m.from.eq_ignore_ascii_case(ticker))
+/// List renames with asset tickers for display, optionally filtered by ticker.
+pub fn list_asset_renames_with_assets(
+    conn: &Connection,
+    ticker: Option<&str>,
+) -> Result<Vec<(AssetRename, Asset, Asset)>> {
+    let base_sql = "SELECT r.id, r.from_asset_id, r.to_asset_id, r.effective_date, r.notes, r.created_at,
+                    af.id, af.ticker, af.asset_type, af.name, af.created_at, af.updated_at,
+                    at.id, at.ticker, at.asset_type, at.name, at.created_at, at.updated_at
+             FROM asset_renames r
+             JOIN assets af ON r.from_asset_id = af.id
+             JOIN assets at ON r.to_asset_id = at.id";
+
+    let map_row = |row: &rusqlite::Row| {
+        let rename = AssetRename {
+            id: Some(row.get(0)?),
+            from_asset_id: row.get(1)?,
+            to_asset_id: row.get(2)?,
+            effective_date: row.get(3)?,
+            notes: row.get(4)?,
+            created_at: row.get(5)?,
+        };
+        let from_asset = Asset {
+            id: Some(row.get(6)?),
+            ticker: row.get(7)?,
+            asset_type: row
+                .get::<_, String>(8)?
+                .parse::<AssetType>()
+                .unwrap_or(AssetType::Unknown),
+            name: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+        };
+        let to_asset = Asset {
+            id: Some(row.get(12)?),
+            ticker: row.get(13)?,
+            asset_type: row
+                .get::<_, String>(14)?
+                .parse::<AssetType>()
+                .unwrap_or(AssetType::Unknown),
+            name: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
+        };
+        Ok((rename, from_asset, to_asset))
+    };
+
+    let rows = if let Some(t) = ticker {
+        let sql = format!(
+            "{} WHERE af.ticker = ?1 OR at.ticker = ?1 ORDER BY r.effective_date DESC",
+            base_sql
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![t], map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    } else {
+        let sql = format!("{} ORDER BY r.effective_date DESC", base_sql);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![], map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    Ok(rows)
 }
 
-pub fn rename_sources_for(ticker: &str) -> Vec<(&'static str, NaiveDate)> {
-    rename_mappings()
-        .iter()
-        .filter(|m| m.to.eq_ignore_ascii_case(ticker))
-        .map(|m| (m.from, m.effective_date))
-        .collect()
+/// Delete an asset rename by id.
+pub fn delete_asset_rename(conn: &Connection, id: i64) -> Result<usize> {
+    let count = conn.execute("DELETE FROM asset_renames WHERE id = ?1", params![id])?;
+    Ok(count)
 }
 
-pub fn rename_quantity_override(ticker: &str, source: &str) -> Option<rust_decimal::Decimal> {
-    rename_mappings()
-        .iter()
-        .find(|m| m.to.eq_ignore_ascii_case(ticker) && m.from.eq_ignore_ascii_case(source))
-        .and_then(|m| m.target_quantity)
+/// Get renames where this asset is the target, effective up to a date.
+pub fn get_asset_renames_as_target_up_to(
+    conn: &Connection,
+    asset_id: i64,
+    as_of: NaiveDate,
+) -> Result<Vec<AssetRename>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_asset_id, to_asset_id, effective_date, notes, created_at
+         FROM asset_renames
+         WHERE to_asset_id = ?1 AND effective_date <= ?2
+         ORDER BY effective_date ASC",
+    )?;
+
+    let results = stmt
+        .query_map(params![asset_id, as_of], |row| {
+            Ok(AssetRename {
+                id: Some(row.get(0)?),
+                from_asset_id: row.get(1)?,
+                to_asset_id: row.get(2)?,
+                effective_date: row.get(3)?,
+                notes: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
+}
+
+/// Check if an asset is a rename source effective on or before the provided date.
+pub fn is_rename_source_asset(
+    conn: &Connection,
+    asset_id: i64,
+    as_of: NaiveDate,
+) -> Result<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM asset_renames WHERE from_asset_id = ?1 AND effective_date <= ?2 LIMIT 1",
+            params![asset_id, as_of],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+
+    Ok(exists)
+}
+
+/// Insert an asset exchange (spin-off or merger).
+pub fn insert_asset_exchange(conn: &Connection, exchange: &AssetExchange) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO asset_exchanges (
+            event_type, from_asset_id, to_asset_id, effective_date,
+            to_quantity, allocated_cost, cash_amount, source, notes
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            exchange.event_type.as_str(),
+            exchange.from_asset_id,
+            exchange.to_asset_id,
+            exchange.effective_date,
+            exchange.to_quantity.to_string(),
+            exchange.allocated_cost.to_string(),
+            exchange.cash_amount.to_string(),
+            exchange.source,
+            exchange.notes
+        ],
+    )?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+/// Get an asset exchange by id.
+pub fn get_asset_exchange(conn: &Connection, id: i64) -> Result<Option<AssetExchange>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, event_type, from_asset_id, to_asset_id, effective_date,
+                to_quantity, allocated_cost, cash_amount, source, notes, created_at
+         FROM asset_exchanges
+         WHERE id = ?1",
+    )?;
+
+    let result = stmt
+        .query_row(params![id], |row| {
+            Ok(AssetExchange {
+                id: Some(row.get(0)?),
+                event_type: row
+                    .get::<_, String>(1)?
+                    .parse::<AssetExchangeType>()
+                    .unwrap_or(AssetExchangeType::Spinoff),
+                from_asset_id: row.get(2)?,
+                to_asset_id: row.get(3)?,
+                effective_date: row.get(4)?,
+                to_quantity: get_decimal_value(row, 5)?,
+                allocated_cost: get_decimal_value(row, 6)?,
+                cash_amount: get_decimal_value(row, 7)?,
+                source: row.get(8)?,
+                notes: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
+/// List exchanges with asset tickers for display, optionally filtered by ticker.
+pub fn list_asset_exchanges_with_assets(
+    conn: &Connection,
+    ticker: Option<&str>,
+) -> Result<Vec<(AssetExchange, Asset, Asset)>> {
+    let base_sql = "SELECT e.id, e.event_type, e.from_asset_id, e.to_asset_id, e.effective_date,
+                    e.to_quantity, e.allocated_cost, e.cash_amount, e.source, e.notes, e.created_at,
+                    af.id, af.ticker, af.asset_type, af.name, af.created_at, af.updated_at,
+                    at.id, at.ticker, at.asset_type, at.name, at.created_at, at.updated_at
+             FROM asset_exchanges e
+             JOIN assets af ON e.from_asset_id = af.id
+             JOIN assets at ON e.to_asset_id = at.id";
+
+    let map_row = |row: &rusqlite::Row| {
+        let exchange = AssetExchange {
+            id: Some(row.get(0)?),
+            event_type: row
+                .get::<_, String>(1)?
+                .parse::<AssetExchangeType>()
+                .unwrap_or(AssetExchangeType::Spinoff),
+            from_asset_id: row.get(2)?,
+            to_asset_id: row.get(3)?,
+            effective_date: row.get(4)?,
+            to_quantity: get_decimal_value(row, 5)?,
+            allocated_cost: get_decimal_value(row, 6)?,
+            cash_amount: get_decimal_value(row, 7)?,
+            source: row.get(8)?,
+            notes: row.get(9)?,
+            created_at: row.get(10)?,
+        };
+        let from_asset = Asset {
+            id: Some(row.get(11)?),
+            ticker: row.get(12)?,
+            asset_type: row
+                .get::<_, String>(13)?
+                .parse::<AssetType>()
+                .unwrap_or(AssetType::Unknown),
+            name: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
+        };
+        let to_asset = Asset {
+            id: Some(row.get(17)?),
+            ticker: row.get(18)?,
+            asset_type: row
+                .get::<_, String>(19)?
+                .parse::<AssetType>()
+                .unwrap_or(AssetType::Unknown),
+            name: row.get(20)?,
+            created_at: row.get(21)?,
+            updated_at: row.get(22)?,
+        };
+        Ok((exchange, from_asset, to_asset))
+    };
+
+    let rows = if let Some(t) = ticker {
+        let sql = format!(
+            "{} WHERE af.ticker = ?1 OR at.ticker = ?1 ORDER BY e.effective_date DESC",
+            base_sql
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![t], map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    } else {
+        let sql = format!("{} ORDER BY e.effective_date DESC", base_sql);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params![], map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    Ok(rows)
+}
+
+/// Delete an asset exchange by id.
+pub fn delete_asset_exchange(conn: &Connection, id: i64) -> Result<usize> {
+    let count = conn.execute("DELETE FROM asset_exchanges WHERE id = ?1", params![id])?;
+    Ok(count)
+}
+
+/// Get exchanges where this asset is the source, effective up to a date.
+pub fn get_asset_exchanges_as_source_up_to(
+    conn: &Connection,
+    asset_id: i64,
+    as_of: NaiveDate,
+) -> Result<Vec<AssetExchange>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, event_type, from_asset_id, to_asset_id, effective_date,
+                to_quantity, allocated_cost, cash_amount, source, notes, created_at
+         FROM asset_exchanges
+         WHERE from_asset_id = ?1 AND effective_date <= ?2
+         ORDER BY effective_date ASC",
+    )?;
+
+    let results = stmt
+        .query_map(params![asset_id, as_of], |row| {
+            Ok(AssetExchange {
+                id: Some(row.get(0)?),
+                event_type: row
+                    .get::<_, String>(1)?
+                    .parse::<AssetExchangeType>()
+                    .unwrap_or(AssetExchangeType::Spinoff),
+                from_asset_id: row.get(2)?,
+                to_asset_id: row.get(3)?,
+                effective_date: row.get(4)?,
+                to_quantity: get_decimal_value(row, 5)?,
+                allocated_cost: get_decimal_value(row, 6)?,
+                cash_amount: get_decimal_value(row, 7)?,
+                source: row.get(8)?,
+                notes: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
+}
+
+/// Get exchanges where this asset is the target, effective up to a date.
+pub fn get_asset_exchanges_as_target_up_to(
+    conn: &Connection,
+    asset_id: i64,
+    as_of: NaiveDate,
+) -> Result<Vec<AssetExchange>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, event_type, from_asset_id, to_asset_id, effective_date,
+                to_quantity, allocated_cost, cash_amount, source, notes, created_at
+         FROM asset_exchanges
+         WHERE to_asset_id = ?1 AND effective_date <= ?2
+         ORDER BY effective_date ASC",
+    )?;
+
+    let results = stmt
+        .query_map(params![asset_id, as_of], |row| {
+            Ok(AssetExchange {
+                id: Some(row.get(0)?),
+                event_type: row
+                    .get::<_, String>(1)?
+                    .parse::<AssetExchangeType>()
+                    .unwrap_or(AssetExchangeType::Spinoff),
+                from_asset_id: row.get(2)?,
+                to_asset_id: row.get(3)?,
+                effective_date: row.get(4)?,
+                to_quantity: get_decimal_value(row, 5)?,
+                allocated_cost: get_decimal_value(row, 6)?,
+                cash_amount: get_decimal_value(row, 7)?,
+                source: row.get(8)?,
+                notes: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
 }
 
 /// Get latest price for an asset
@@ -693,6 +1007,60 @@ pub fn list_corporate_actions(
     };
 
     Ok(results)
+}
+
+/// Get a corporate action by id with asset info.
+pub fn get_corporate_action(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<(CorporateAction, Asset)>> {
+    let mut stmt = conn.prepare(
+        "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
+                ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
+                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+         FROM corporate_actions ca
+         JOIN assets a ON ca.asset_id = a.id
+         WHERE ca.id = ?1",
+    )?;
+
+    let result = stmt
+        .query_row(params![id], |row| {
+            let action = CorporateAction {
+                id: Some(row.get(0)?),
+                asset_id: row.get(1)?,
+                action_type: row
+                    .get::<_, String>(2)?
+                    .parse::<CorporateActionType>()
+                    .unwrap_or(CorporateActionType::Split),
+                event_date: row.get(3)?,
+                ex_date: row.get(4)?,
+                quantity_adjustment: get_decimal_value(row, 5)?,
+                source: row.get(6)?,
+                notes: row.get(7)?,
+                created_at: row.get(8)?,
+            };
+            let asset = Asset {
+                id: Some(row.get(9)?),
+                ticker: row.get(10)?,
+                asset_type: row
+                    .get::<_, String>(11)?
+                    .parse::<AssetType>()
+                    .unwrap_or(AssetType::Unknown),
+                name: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            };
+            Ok((action, asset))
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
+/// Delete a corporate action by id.
+pub fn delete_corporate_action(conn: &Connection, id: i64) -> Result<usize> {
+    let count = conn.execute("DELETE FROM corporate_actions WHERE id = ?1", params![id])?;
+    Ok(count)
 }
 
 /// Insert income event
