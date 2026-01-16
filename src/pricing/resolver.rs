@@ -9,7 +9,7 @@
 //! **Design Philosophy**: Make it work automatically - don't make users think about
 //! price data management.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use rusqlite::{Connection, OptionalExtension};
 use rust_decimal::Decimal;
@@ -22,6 +22,7 @@ use crate::utils::format_currency;
 
 use crate::db::models::{Asset, AssetType};
 use crate::importers::b3_cotahist;
+use crate::pricing::tesouro;
 
 /// Maximum concurrent API requests to avoid rate limiting
 const MAX_CONCURRENT_REQUESTS: usize = 5;
@@ -139,20 +140,46 @@ where
     let yesterday = today - chrono::Duration::days(1);
     let current_only = start_date == today && end_date == today;
 
-    // Count priceable assets (exclude bonds)
-    let priceable_asset_ids: Vec<i64> = assets
+    let gov_bond_assets: Vec<Asset> = assets
         .iter()
-        .filter(|a| is_priceable_asset(a))
-        .filter_map(|a| a.id)
+        .filter(|a| a.asset_type == AssetType::GovBond)
+        .cloned()
         .collect();
 
-    if priceable_asset_ids.is_empty() {
+    let priceable_assets: Vec<Asset> = assets
+        .iter()
+        .filter(|a| is_priceable_asset(a))
+        .cloned()
+        .collect();
+
+    // Count priceable assets (exclude bonds)
+    let priceable_asset_ids: Vec<i64> = priceable_assets.iter().filter_map(|a| a.id).collect();
+
+    if priceable_asset_ids.is_empty() && gov_bond_assets.is_empty() {
         progress(&ProgressEvent::from_message("✓ No price updates needed"));
         tracing::debug!("No priceable assets in portfolio, skipping resolution");
         return Ok(());
     }
 
     if current_only {
+        if !gov_bond_assets.is_empty() {
+            progress(&ProgressEvent::from_message(
+                "Importing Tesouro Direto recent prices...",
+            ));
+            let recent_start = today - chrono::Duration::days(365);
+            let count =
+                import_gov_bond_prices(gov_bond_assets.clone(), recent_start, today).await?;
+            progress(&ProgressEvent::from_message(&format!(
+                "✓ Imported {} Tesouro prices",
+                count
+            )));
+        }
+
+        if priceable_asset_ids.is_empty() {
+            progress(&ProgressEvent::from_message("✓ Tesouro prices updated"));
+            return Ok(());
+        }
+
         // Fast path: check if we already have recent prices for all *priceable* assets
         // If we have prices from yesterday or today, skip the expensive COTAHIST parsing
         progress(&ProgressEvent::from_message(&format!(
@@ -257,12 +284,6 @@ where
             "Skipping COTAHIST (have some prices), fetching current prices only via API"
         );
 
-        let priceable_assets: Vec<Asset> = assets
-            .iter()
-            .filter(|a| is_priceable_asset(a))
-            .cloned()
-            .collect();
-
         if !priceable_assets.is_empty() {
             progress(&ProgressEvent::from_message(&format!(
                 "Fetching prices for {} assets...",
@@ -279,7 +300,8 @@ where
     }
 
     // Determine which years need bulk download and which assets need current prices
-    let needs = determine_price_resolution_needs(conn, assets, start_date, end_date, today)?;
+    let needs =
+        determine_price_resolution_needs(conn, &priceable_assets, start_date, end_date, today)?;
     let needed_years = needs.needed_years;
     let need_current_prices_assets = needs.need_current_prices_assets;
 
@@ -420,6 +442,21 @@ where
         }
     }
 
+    if !gov_bond_assets.is_empty() && start_date < today {
+        let historical_end = if end_date < today { end_date } else { today };
+        if start_date <= historical_end {
+            progress(&ProgressEvent::from_message(
+                "Importing Tesouro Direto historical prices...",
+            ));
+            let count =
+                import_gov_bond_prices(gov_bond_assets.clone(), start_date, historical_end).await?;
+            progress(&ProgressEvent::from_message(&format!(
+                "✓ Imported {} Tesouro historical prices",
+                count
+            )));
+        }
+    }
+
     // Filter out assets that we know don't have prices available from Yahoo/Brapi
     // (bonds, government bonds - these need different pricing sources)
     let priceable_assets: Vec<Asset> = need_current_prices_assets
@@ -442,6 +479,19 @@ where
     }
 
     Ok(())
+}
+
+async fn import_gov_bond_prices(
+    assets: Vec<Asset>,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<usize> {
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::db::open_db(None)?;
+        tesouro::import_tesouro_csv(&conn, &assets, start_date, end_date)
+    })
+    .await
+    .map_err(|err| anyhow!("Failed to import Tesouro prices: {}", err))?
 }
 
 /// Check if an asset can be priced via Yahoo Finance or Brapi.dev APIs.
@@ -707,7 +757,13 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
         let end = start;
 
-        let needs = determine_price_resolution_needs(&conn, &[asset.clone()], start, end, today)?;
+        let needs = determine_price_resolution_needs(
+            &conn,
+            std::slice::from_ref(&asset),
+            start,
+            end,
+            today,
+        )?;
 
         assert!(needs.needed_years.contains(&2024));
         assert!(needs.need_current_prices_assets.is_empty());
@@ -722,7 +778,13 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
         let end = today;
 
-        let needs = determine_price_resolution_needs(&conn, &[asset.clone()], start, end, today)?;
+        let needs = determine_price_resolution_needs(
+            &conn,
+            std::slice::from_ref(&asset),
+            start,
+            end,
+            today,
+        )?;
 
         assert!(needs.needed_years.contains(&2024));
         assert!(needs.needed_years.contains(&2025));

@@ -9,6 +9,7 @@ mod reports;
 mod scraping;
 mod tax;
 mod term_contracts;
+mod tesouro;
 mod tickers;
 mod ui;
 mod utils;

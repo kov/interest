@@ -2,6 +2,7 @@
 
 pub mod brapi;
 pub mod resolver;
+pub mod tesouro;
 pub mod yahoo;
 
 use anyhow::{Context, Result};

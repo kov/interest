@@ -80,16 +80,8 @@ impl MovimentacaoEntry {
         }
 
         // Handle Tesouro Direto (government bonds) - create synthetic ticker from name
-        if product.starts_with("Tesouro ") {
-            // Extract bond type and year
-            // e.g., "Tesouro IPCA+ com Juros Semestrais 2035" -> "TESOURO_IPCA_2035"
-            let parts: Vec<&str> = product.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let bond_type = parts.get(1)?.replace('+', "").replace("com", "");
-                let year = parts.last()?;
-                let synthetic_ticker = format!("TESOURO_{}_{}", bond_type, year);
-                return Some(synthetic_ticker.to_uppercase());
-            }
+        if let Some(ticker) = crate::tesouro::ticker_from_name(product) {
+            return Some(ticker);
         }
 
         // Handle CRI (Real Estate Receivables Certificate): "CRI - CODE - COMPANY"
@@ -554,6 +546,17 @@ mod tests {
         assert_eq!(
             MovimentacaoEntry::extract_ticker("TEST32 - TEST FIAGRO"),
             Some("TEST32".to_string())
+        );
+
+        // Tesouro Direto (government bonds)
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("Tesouro IPCA+ com Juros Semestrais 2035"),
+            Some("TESOURO_IPCA_JUROS_2035".to_string())
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("Tesouro IPCA+ 2035"),
+            Some("TESOURO_IPCA_2035".to_string())
         );
 
         // No separator

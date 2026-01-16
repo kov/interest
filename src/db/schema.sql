@@ -115,6 +115,21 @@ CREATE TABLE IF NOT EXISTS price_history (
 CREATE INDEX IF NOT EXISTS idx_price_history_asset ON price_history(asset_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_date ON price_history(price_date);
 
+-- Government bond yield/rate history (Tesouro Direto)
+CREATE TABLE IF NOT EXISTS gov_bond_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL,
+    price_date DATE NOT NULL,
+    sell_rate DECIMAL(15,6) NOT NULL,
+    source TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+    UNIQUE(asset_id, price_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gov_bond_rates_asset ON gov_bond_rates(asset_id);
+CREATE INDEX IF NOT EXISTS idx_gov_bond_rates_date ON gov_bond_rates(price_date);
+
 -- Portfolio snapshots with fingerprint-based invalidation
 CREATE TABLE IF NOT EXISTS position_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

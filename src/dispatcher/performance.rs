@@ -75,7 +75,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     // Filter out blocked assets
     let assets = db::get_assets_with_transactions(&conn)?;
     let priceable_assets = crate::pricing::resolver::filter_priceable_assets(&assets);
-    if !priceable_assets.is_empty() {
+    if !assets.is_empty() {
         // Get the date range for prices
         let earliest = db::get_earliest_transaction_date(&conn)?;
         if let Some(earliest_date) = earliest {
@@ -93,7 +93,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
-                    &priceable_assets,
+                    &assets,
                     (price_start, today),
                     |event| {
                         let (raw_text, should_persist) = match event {
@@ -145,7 +145,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                 // JSON mode: no spinner, just fetch silently
                 crate::pricing::resolver::ensure_prices_available(
                     &mut conn,
-                    &priceable_assets,
+                    &assets,
                     (price_start, today),
                 )
                 .await

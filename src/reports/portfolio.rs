@@ -154,7 +154,9 @@ fn calculate_portfolio_with_cutoff(
             }
         }
 
-        if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
+        if !crate::db::is_supported_portfolio_ticker(&asset.ticker)
+            && !matches!(asset.asset_type, AssetType::Bond | AssetType::GovBond)
+        {
             continue;
         }
 

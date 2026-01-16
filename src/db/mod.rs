@@ -14,8 +14,9 @@ use tracing::info;
 use crate::term_contracts;
 pub use models::{
     Asset, AssetExchange, AssetExchangeType, AssetRename, AssetType, CorporateAction,
-    CorporateActionType, IncomeEvent, IncomeEventType, Inconsistency, InconsistencySeverity,
-    InconsistencyStatus, InconsistencyType, PriceHistory, Transaction, TransactionType,
+    CorporateActionType, GovBondRate, IncomeEvent, IncomeEventType, Inconsistency,
+    InconsistencySeverity, InconsistencyStatus, InconsistencyType, PriceHistory, Transaction,
+    TransactionType,
 };
 
 /// Get the default database path (~/.interest/data.db)
@@ -37,6 +38,11 @@ pub fn open_db(db_path: Option<PathBuf>) -> Result<Connection> {
     // Enable foreign keys
     conn.execute("PRAGMA foreign_keys = ON", [])
         .context("Failed to enable foreign keys")?;
+
+    // Apply schema updates (idempotent) to ensure new tables exist.
+    let schema_sql = include_str!("schema.sql");
+    conn.execute_batch(schema_sql)
+        .context("Failed to apply database schema")?;
 
     Ok(conn)
 }
@@ -524,6 +530,23 @@ pub fn insert_price_history(conn: &Connection, price: &PriceHistory) -> Result<i
             price.low_price.as_ref().map(|d| d.to_string()),
             price.volume,
             price.source,
+        ],
+    )?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+/// Insert government bond rate history
+pub fn insert_gov_bond_rate(conn: &Connection, rate: &GovBondRate) -> Result<i64> {
+    conn.execute(
+        "INSERT OR REPLACE INTO gov_bond_rates (
+            asset_id, price_date, sell_rate, source
+        ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            rate.asset_id,
+            rate.price_date,
+            rate.sell_rate.to_string(),
+            rate.source.as_deref(),
         ],
     )?;
 

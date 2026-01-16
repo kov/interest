@@ -99,7 +99,7 @@ pub async fn dispatch_portfolio_show(
             let priceable_assets =
                 crate::pricing::resolver::filter_priceable_assets(&assets_with_positions);
 
-            if !priceable_assets.is_empty() {
+            if !assets_with_positions.is_empty() {
                 let total = priceable_assets.len();
                 let printer = ProgressPrinter::new(json_output);
                 let mut completed = 0usize;
@@ -114,7 +114,7 @@ pub async fn dispatch_portfolio_show(
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
-                    &priceable_assets,
+                    &assets_with_positions,
                     price_range,
                     |event| {
                         // Map typed event to legacy display values
@@ -176,10 +176,8 @@ pub async fn dispatch_portfolio_show(
             // JSON mode: no spinner, just fetch silently
             let assets_with_positions: Vec<_> =
                 report.positions.iter().map(|p| p.asset.clone()).collect();
-            let priceable_assets =
-                crate::pricing::resolver::filter_priceable_assets(&assets_with_positions);
 
-            if !priceable_assets.is_empty() {
+            if !assets_with_positions.is_empty() {
                 let price_range = if let Some(date) = historical_date {
                     (date, date)
                 } else {
@@ -188,7 +186,7 @@ pub async fn dispatch_portfolio_show(
 
                 crate::pricing::resolver::ensure_prices_available(
                     &mut conn,
-                    &priceable_assets,
+                    &assets_with_positions,
                     price_range,
                 )
                 .await

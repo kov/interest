@@ -358,6 +358,17 @@ pub struct PriceHistory {
     pub created_at: DateTime<Utc>,
 }
 
+/// Government bond rate entry (Tesouro Direto)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovBondRate {
+    pub id: Option<i64>,
+    pub asset_id: i64,
+    pub price_date: NaiveDate,
+    pub sell_rate: Decimal,
+    pub source: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Current position (holdings)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
