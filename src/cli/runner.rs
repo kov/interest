@@ -35,6 +35,19 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
             })),
         },
 
+        Commands::CashFlow { action } => match action {
+            crate::cli::CashFlowCommands::Show { period } => Ok(Some(Command::CashFlow {
+                action: cmd::CashFlowAction::Show {
+                    period: period.clone().unwrap_or_else(|| "ALL".to_string()),
+                },
+            })),
+            crate::cli::CashFlowCommands::Stats { period } => Ok(Some(Command::CashFlow {
+                action: cmd::CashFlowAction::Stats {
+                    period: period.clone().unwrap_or_else(|| "ALL".to_string()),
+                },
+            })),
+        },
+
         Commands::Tax { action } => match action {
             crate::cli::TaxCommands::Report { year, export } => Ok(Some(Command::Tax {
                 action: cmd::TaxAction::Report {
@@ -66,16 +79,19 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
         Commands::Actions { action } => match action {
             crate::cli::ActionCommands::Rename { action } => {
                 let mapped = match action {
-                    crate::cli::RenameCommands::Add { from, to, date, notes } => {
-                        cmd::ActionsAction::Rename {
-                            action: cmd::RenameAction::Add {
-                                from: from.clone(),
-                                to: to.clone(),
-                                date: date.clone(),
-                                notes: notes.clone(),
-                            },
-                        }
-                    }
+                    crate::cli::RenameCommands::Add {
+                        from,
+                        to,
+                        date,
+                        notes,
+                    } => cmd::ActionsAction::Rename {
+                        action: cmd::RenameAction::Add {
+                            from: from.clone(),
+                            to: to.clone(),
+                            date: date.clone(),
+                            notes: notes.clone(),
+                        },
+                    },
                     crate::cli::RenameCommands::List { ticker } => cmd::ActionsAction::Rename {
                         action: cmd::RenameAction::List {
                             ticker: ticker.clone(),
@@ -285,10 +301,7 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
             crate::cli::TickersCommands::ListUnknown => Ok(Some(Command::Tickers {
                 action: cmd::TickersAction::ListUnknown,
             })),
-            crate::cli::TickersCommands::Resolve {
-                ticker,
-                asset_type,
-            } => {
+            crate::cli::TickersCommands::Resolve { ticker, asset_type } => {
                 if ticker.is_some() && asset_type.is_none() {
                     anyhow::bail!("tickers resolve requires --type when a ticker is provided");
                 }
@@ -322,12 +335,14 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                     name: name.clone(),
                 },
             })),
-            crate::cli::AssetsCommands::SetType { ticker, asset_type } => Ok(Some(Command::Assets {
-                action: cmd::AssetsAction::SetType {
-                    ticker: ticker.clone(),
-                    asset_type: asset_type.clone(),
-                },
-            })),
+            crate::cli::AssetsCommands::SetType { ticker, asset_type } => {
+                Ok(Some(Command::Assets {
+                    action: cmd::AssetsAction::SetType {
+                        ticker: ticker.clone(),
+                        asset_type: asset_type.clone(),
+                    },
+                }))
+            }
             crate::cli::AssetsCommands::SetName { ticker, name } => Ok(Some(Command::Assets {
                 action: cmd::AssetsAction::SetName {
                     ticker: ticker.clone(),

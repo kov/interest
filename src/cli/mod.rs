@@ -74,6 +74,12 @@ pub enum Commands {
         action: PerformanceCommands,
     },
 
+    /// Cash flow reporting
+    CashFlow {
+        #[command(subcommand)]
+        action: CashFlowCommands,
+    },
+
     /// Income events (dividends, JCP, amortization)
     Income {
         #[command(subcommand)]
@@ -196,6 +202,20 @@ pub enum PerformanceCommands {
     Show {
         /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
         period: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CashFlowCommands {
+    /// Show cash flow summary
+    Show {
+        /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
+        period: Option<String>,
+    },
+    /// Show cash flow statistics
+    Stats {
+        /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
+        period: Option<String>,
     },
 }
 

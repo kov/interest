@@ -9,13 +9,14 @@ use performance::dispatch_performance;
 
 use crate::commands::Command;
 mod actions;
+mod assets;
+mod cashflow;
 mod imports;
 pub mod imports_helpers;
 mod inconsistencies;
 mod portfolio;
 mod prices;
 mod tickers;
-mod assets;
 use crate::utils::format_currency;
 use crate::{db, tax};
 use anyhow::Result;
@@ -28,6 +29,7 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
         Command::Import { action } => dispatch_import(action, json_output).await,
         Command::Portfolio { action } => portfolio::dispatch_portfolio(action, json_output).await,
         Command::Performance { action } => dispatch_performance(action, json_output).await,
+        Command::CashFlow { action } => cashflow::dispatch_cashflow(action, json_output).await,
         Command::Tax { action } => dispatch_tax(action, json_output).await,
         Command::Income { action } => dispatch_income(action, json_output).await,
         Command::Actions { action } => actions::dispatch_actions(action, json_output).await,
@@ -46,6 +48,12 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             );
             println!(
                 "  performance show <P>       - Show performance (P: MTD|QTD|YTD|1Y|ALL|from:to)"
+            );
+            println!(
+                "  cash-flow show [P]         - Show cash flow (P: MTD|QTD|YTD|1Y|ALL|YYYY|from:to)"
+            );
+            println!(
+                "  cash-flow stats [P]        - Show cash flow statistics (P: MTD|QTD|YTD|1Y|ALL|YYYY|from:to)"
             );
             println!("  tax report <year>          - Generate tax report");
             println!("  tax summary <year>         - Show tax summary");
@@ -1232,7 +1240,8 @@ impl TaxProgressPrinter {
                     self.completed_years = (self.completed_years + 1).min(self.total_years);
                     let from = self.from_year.unwrap_or(year);
                     if Some(year) == self.target_year {
-                        self.printer.finish(true, &format!("Snapshots updated {}→{}", from, year));
+                        self.printer
+                            .finish(true, &format!("Snapshots updated {}→{}", from, year));
                         self.in_progress = false;
                     } else {
                         self.printer.update(&format!(

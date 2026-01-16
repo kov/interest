@@ -13,7 +13,7 @@ use anyhow::Result;
 use assert_cmd::{cargo, prelude::*};
 use chrono::Datelike;
 use interest::db::models::{AssetType, IncomeEvent, Transaction, TransactionType};
-use interest::db::{init_database, open_db, upsert_asset};
+use interest::db::{init_database, insert_asset, open_db, upsert_asset};
 use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::importers::import_movimentacao_entries;
 use interest::importers::movimentacao_excel::parse_movimentacao_excel;
@@ -69,6 +69,141 @@ fn base_cmd(home: &TempDir) -> Command {
     cmd.env("INTEREST_SKIP_PRICE_FETCH", "1");
     cmd.arg("--no-color");
     cmd
+}
+
+#[test]
+fn test_cash_flow_show_single_year_monthly_output() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    let asset_id = insert_asset(&conn, "TESTCF1", &AssetType::Stock, None)?;
+
+    let buy_tx = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 4).unwrap()),
+        quantity: Decimal::from(10),
+        price_per_unit: Decimal::from(10),
+        total_cost: Decimal::from(100),
+        fees: Decimal::from(2),
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(&conn, &buy_tx)?;
+
+    let sell_tx = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Sell,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 2, 5).unwrap()),
+        quantity: Decimal::from(5),
+        price_per_unit: Decimal::from(12),
+        total_cost: Decimal::from(60),
+        fees: Decimal::from(1),
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(&conn, &sell_tx)?;
+
+    let income_event = IncomeEvent {
+        id: None,
+        asset_id,
+        event_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
+        ex_date: None,
+        event_type: interest::db::IncomeEventType::Dividend,
+        amount_per_quota: Decimal::ZERO,
+        total_amount: Decimal::from(10),
+        withholding_tax: Decimal::from(2),
+        is_quota_pre_2026: None,
+        source: "TEST".to_string(),
+        notes: None,
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_income_event(&conn, &income_event)?;
+
+    let output = base_cmd(&home)
+        .arg("cash-flow")
+        .arg("show")
+        .arg("2024")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Janeiro 2024"));
+    assert!(stdout.contains("Fevereiro 2024"));
+    assert!(stdout.contains("STOCK"));
+    assert!(stdout.contains("Total new money"));
+
+    Ok(())
+}
+
+#[test]
+fn test_cash_flow_show_multi_year_ordering() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    let asset_id = insert_asset(&conn, "TESTCF2", &AssetType::Fii, None)?;
+
+    let tx_2023 = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(),
+        settlement_date: None,
+        quantity: Decimal::from(1),
+        price_per_unit: Decimal::from(100),
+        total_cost: Decimal::from(100),
+        fees: Decimal::ZERO,
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(&conn, &tx_2023)?;
+
+    let tx_2024 = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
+        settlement_date: None,
+        quantity: Decimal::from(1),
+        price_per_unit: Decimal::from(110),
+        total_cost: Decimal::from(110),
+        fees: Decimal::ZERO,
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(&conn, &tx_2024)?;
+
+    let output = base_cmd(&home).arg("cash-flow").arg("show").output()?;
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let idx_2023 = stdout.find("\n2023\n").expect("missing 2023 header");
+    let idx_2024 = stdout.find("\n2024\n").expect("missing 2024 header");
+    assert!(idx_2023 < idx_2024);
+
+    Ok(())
 }
 
 /// Run import command and return stats as JSON
@@ -898,7 +1033,11 @@ fn test_12_desdobro_absolute_adjustment() -> Result<()> {
     let actions_json: Value =
         serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
     let actions_array = actions_json.as_array().expect("actions JSON is not array");
-    assert_eq!(actions_array.len(), 1, "Corporate action should be recorded");
+    assert_eq!(
+        actions_array.len(),
+        1,
+        "Corporate action should be recorded"
+    );
     let qty_str = actions_array[0]
         .get("quantity_adjustment")
         .and_then(|v| v.as_str())
@@ -1999,7 +2138,10 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
         .arg("SIMH3")
         .output()
         .expect("failed to run actions split list");
-    assert!(simh3_actions_out.status.success(), "actions split list failed");
+    assert!(
+        simh3_actions_out.status.success(),
+        "actions split list failed"
+    );
     let simh3_actions_json: Value =
         serde_json::from_slice(&simh3_actions_out.stdout).expect("invalid actions JSON");
     let simh3_actions = simh3_actions_json

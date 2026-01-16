@@ -16,6 +16,8 @@ pub enum Command {
     Portfolio { action: PortfolioAction },
     /// Performance commands and sub-actions (e.g. `performance show`)
     Performance { action: PerformanceAction },
+    /// Cash flow commands and sub-actions (e.g. `cash-flow show`)
+    CashFlow { action: CashFlowAction },
     /// Tax commands and sub-actions (e.g. `tax report`)
     Tax { action: TaxAction },
     /// Income commands and sub-actions (e.g. `income show`)
@@ -55,6 +57,16 @@ pub enum PerformanceAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
+pub enum CashFlowAction {
+    /// Show cash flow summary: `cash-flow show [period]`
+    /// period: MTD|QTD|YTD|1Y|ALL|<year>|<from:to>
+    Show { period: String },
+    /// Show cash flow statistics: `cash-flow stats [period]`
+    Stats { period: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
 pub enum TaxAction {
     /// Generate annual report: `tax report <year> [--export]`
     Report { year: i32, export_csv: bool },
@@ -79,17 +91,32 @@ pub enum IncomeAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum AssetsAction {
-    List { asset_type: Option<String> },
-    Show { ticker: String },
+    List {
+        asset_type: Option<String>,
+    },
+    Show {
+        ticker: String,
+    },
     Add {
         ticker: String,
         asset_type: Option<String>,
         name: Option<String>,
     },
-    SetType { ticker: String, asset_type: String },
-    SetName { ticker: String, name: String },
-    Rename { old_ticker: String, new_ticker: String },
-    Remove { ticker: String },
+    SetType {
+        ticker: String,
+        asset_type: String,
+    },
+    SetName {
+        ticker: String,
+        name: String,
+    },
+    Rename {
+        old_ticker: String,
+        new_ticker: String,
+    },
+    Remove {
+        ticker: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,6 +494,29 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         "Unknown performance action: {}. Use: performance show",
                         action
                     ),
+                }),
+            }
+        }
+        "cashflow" | "cash-flow" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "cash-flow requires action (show, stats). Usage: cash-flow show [period] or cash-flow stats [period]"
+                        .to_string(),
+                })?
+                .to_lowercase();
+
+            let period = parts.next().unwrap_or_else(|| "ALL".to_string());
+
+            match action.as_str() {
+                "show" => Ok(Command::CashFlow {
+                    action: CashFlowAction::Show { period },
+                }),
+                "stats" => Ok(Command::CashFlow {
+                    action: CashFlowAction::Stats { period },
+                }),
+                _ => Err(CommandParseError {
+                    message: format!("Unknown cash-flow action: {}. Use: show or stats", action),
                 }),
             }
         }
@@ -1643,8 +1693,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_command_quotes() {
-        let tokens =
-            tokenize_command("assets add TEST --name 'My Fund' --type fii").unwrap();
+        let tokens = tokenize_command("assets add TEST --name 'My Fund' --type fii").unwrap();
         assert_eq!(
             tokens,
             vec!["assets", "add", "TEST", "--name", "My Fund", "--type", "fii"]
@@ -1653,15 +1702,13 @@ mod tests {
 
     #[test]
     fn test_tokenize_command_double_quotes() {
-        let tokens =
-            tokenize_command("assets add TEST --name \"My Fund\"").unwrap();
+        let tokens = tokenize_command("assets add TEST --name \"My Fund\"").unwrap();
         assert_eq!(tokens, vec!["assets", "add", "TEST", "--name", "My Fund"]);
     }
 
     #[test]
     fn test_tokenize_command_unterminated_quote() {
-        let err = tokenize_command("assets add TEST --name 'My Fund")
-            .unwrap_err();
+        let err = tokenize_command("assets add TEST --name 'My Fund").unwrap_err();
         assert!(err.message.contains("Unterminated quote"));
     }
 }

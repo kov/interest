@@ -99,8 +99,9 @@ pub fn upsert_asset(
 /// Check whether a ticker exists in `assets`
 pub fn asset_exists(conn: &Connection, ticker: &str) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT id FROM assets WHERE ticker = ?1")?;
-    let existing: Option<i64> =
-        stmt.query_row([ticker.to_uppercase()], |row| row.get(0)).optional()?;
+    let existing: Option<i64> = stmt
+        .query_row([ticker.to_uppercase()], |row| row.get(0))
+        .optional()?;
     Ok(existing.is_some())
 }
 
@@ -585,7 +586,8 @@ pub fn list_asset_renames_with_assets(
     conn: &Connection,
     ticker: Option<&str>,
 ) -> Result<Vec<(AssetRename, Asset, Asset)>> {
-    let base_sql = "SELECT r.id, r.from_asset_id, r.to_asset_id, r.effective_date, r.notes, r.created_at,
+    let base_sql =
+        "SELECT r.id, r.from_asset_id, r.to_asset_id, r.effective_date, r.notes, r.created_at,
                     af.id, af.ticker, af.asset_type, af.name, af.created_at, af.updated_at,
                     at.id, at.ticker, at.asset_type, at.name, at.created_at, at.updated_at
              FROM asset_renames r
@@ -684,11 +686,7 @@ pub fn get_asset_renames_as_target_up_to(
 }
 
 /// Check if an asset is a rename source effective on or before the provided date.
-pub fn is_rename_source_asset(
-    conn: &Connection,
-    asset_id: i64,
-    as_of: NaiveDate,
-) -> Result<bool> {
+pub fn is_rename_source_asset(conn: &Connection, asset_id: i64, as_of: NaiveDate) -> Result<bool> {
     let exists = conn
         .query_row(
             "SELECT 1 FROM asset_renames WHERE from_asset_id = ?1 AND effective_date <= ?2 LIMIT 1",
@@ -1272,7 +1270,7 @@ pub fn get_income_events_with_assets(
                     .unwrap_or(IncomeEventType::Dividend),
                 amount_per_quota: get_decimal_value(row, 5)?,
                 total_amount: get_decimal_value(row, 6)?,
-                withholding_tax: get_decimal_value(row, 7)?,
+                withholding_tax: get_optional_decimal_value(row, 7)?.unwrap_or(Decimal::ZERO),
                 is_quota_pre_2026: row.get(8)?,
                 source: row.get(9)?,
                 notes: row.get(10)?,
@@ -1337,7 +1335,7 @@ pub fn get_amortizations_for_asset(
                     .unwrap_or(IncomeEventType::Amortization),
                 amount_per_quota: get_decimal_value(row, 5)?,
                 total_amount: get_decimal_value(row, 6)?,
-                withholding_tax: get_decimal_value(row, 7)?,
+                withholding_tax: get_optional_decimal_value(row, 7)?.unwrap_or(Decimal::ZERO),
                 is_quota_pre_2026: row.get(8)?,
                 source: row.get(9)?,
                 notes: row.get(10)?,

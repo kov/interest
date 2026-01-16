@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
-use crate::db::AssetType;
+use crate::db::{self, AssetType};
 use crate::reports::portfolio::{
     calculate_portfolio_at_date, get_valid_snapshot, save_portfolio_snapshot, PositionSummary,
 };
@@ -278,26 +278,32 @@ pub fn extract_cash_flows(
     to_date: NaiveDate,
 ) -> Result<Vec<CashFlow>> {
     let mut stmt = conn.prepare(
-        "SELECT trade_date, transaction_type, 
-                ABS(quantity * price_per_unit + COALESCE(fees, 0)) as amount
+        "SELECT COALESCE(settlement_date, trade_date) as flow_date,
+                transaction_type,
+                quantity,
+                price_per_unit,
+                fees
          FROM transactions
-         WHERE trade_date >= ?1 AND trade_date <= ?2
+         WHERE COALESCE(settlement_date, trade_date) >= ?1
+           AND COALESCE(settlement_date, trade_date) <= ?2
            AND transaction_type IN ('BUY', 'SELL')
            AND (notes IS NULL OR notes NOT LIKE '%Term contract liquidation%')
-         ORDER BY trade_date",
+         ORDER BY flow_date",
     )?;
 
     let flows = stmt
         .query_map([from_date, to_date], |row| {
             let date: NaiveDate = row.get(0)?;
             let tx_type: String = row.get(1)?;
-            // Amount is computed, so get as string and parse
-            let amount_val: rusqlite::types::Value = row.get(2)?;
-            let amount = match amount_val {
-                rusqlite::types::Value::Text(s) => s.parse::<Decimal>().unwrap_or(Decimal::ZERO),
-                rusqlite::types::Value::Real(f) => Decimal::try_from(f).unwrap_or(Decimal::ZERO),
-                rusqlite::types::Value::Integer(i) => Decimal::from(i),
-                _ => Decimal::ZERO,
+            let quantity = db::get_decimal_value(row, 2)?;
+            let price = db::get_decimal_value(row, 3)?;
+            let fees = db::get_optional_decimal_value(row, 4)?.unwrap_or(Decimal::ZERO);
+
+            let gross = quantity * price;
+            let amount = match tx_type.as_str() {
+                "BUY" => gross + fees,
+                "SELL" => gross - fees,
+                _ => gross,
             };
 
             let flow_type = match tx_type.as_str() {
@@ -314,6 +320,19 @@ pub fn extract_cash_flows(
         })?
         .filter_map(|r| r.ok().and_then(|opt| opt))
         .collect::<Vec<_>>();
+
+    let mut flows = flows;
+
+    let income_events =
+        db::get_income_events_with_assets(conn, Some(from_date), Some(to_date), None)?;
+    for (event, _asset) in income_events {
+        let net_income = event.total_amount - event.withholding_tax;
+        flows.push(CashFlow {
+            date: event.event_date,
+            flow_type: FlowType::Withdrawal,
+            amount: net_income,
+        });
+    }
 
     Ok(flows)
 }

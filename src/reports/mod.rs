@@ -1,5 +1,6 @@
 // Reports module - Portfolio and tax report generators
 
+pub mod cashflow;
 pub mod performance;
 pub mod portfolio;
 
