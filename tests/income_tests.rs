@@ -174,10 +174,10 @@ fn test_get_income_events_with_assets_no_filter() -> Result<()> {
 
     assert_eq!(results.len(), 2, "Should return both events");
     assert_eq!(
-        results[0].1.ticker, "MXRF11",
-        "Should be ordered by date DESC"
+        results[0].1.ticker, "XPLG11",
+        "Should be ordered by date ASC"
     );
-    assert_eq!(results[1].1.ticker, "XPLG11");
+    assert_eq!(results[1].1.ticker, "MXRF11");
 
     Ok(())
 }

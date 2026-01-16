@@ -12,7 +12,9 @@
 use anyhow::Result;
 use assert_cmd::{cargo, prelude::*};
 use chrono::Datelike;
-use interest::db::models::{AssetType, IncomeEvent, Transaction, TransactionType};
+use interest::db::models::{
+    AssetType, CorporateAction, CorporateActionType, IncomeEvent, Transaction, TransactionType,
+};
 use interest::db::{init_database, insert_asset, open_db, upsert_asset};
 use interest::importers::cei_excel::resolve_option_exercise_ticker;
 use interest::importers::import_movimentacao_entries;
@@ -145,6 +147,133 @@ fn test_cash_flow_show_single_year_monthly_output() -> Result<()> {
     assert!(stdout.contains("Fevereiro 2024"));
     assert!(stdout.contains("STOCK"));
     assert!(stdout.contains("Total new money"));
+
+    Ok(())
+}
+
+#[test]
+fn test_actions_split_list_orders_by_ex_date_asc() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    let asset_id = insert_asset(&conn, "TESTSPLT", &AssetType::Stock, None)?;
+
+    let earlier = CorporateAction {
+        id: None,
+        asset_id,
+        action_type: CorporateActionType::Split,
+        event_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+        ex_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+        quantity_adjustment: dec!(50),
+        source: "TEST".to_string(),
+        notes: None,
+        created_at: chrono::Utc::now(),
+    };
+    let later = CorporateAction {
+        id: None,
+        asset_id,
+        action_type: CorporateActionType::Split,
+        event_date: chrono::NaiveDate::from_ymd_opt(2024, 3, 5).unwrap(),
+        ex_date: chrono::NaiveDate::from_ymd_opt(2024, 3, 5).unwrap(),
+        quantity_adjustment: dec!(100),
+        source: "TEST".to_string(),
+        notes: None,
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_corporate_action(&conn, &later)?;
+    interest::db::insert_corporate_action(&conn, &earlier)?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("actions")
+        .arg("split")
+        .arg("list")
+        .arg("TESTSPLT")
+        .output()?;
+    assert!(output.status.success());
+
+    let actions_json: Value = serde_json::from_slice(&output.stdout).expect("invalid actions JSON");
+    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let dates: Vec<String> = actions_array
+        .iter()
+        .map(|row| {
+            row.get("ex_date")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(dates, vec!["2024-01-10", "2024-03-05"]);
+
+    Ok(())
+}
+
+#[test]
+fn test_income_detail_orders_by_event_date_asc() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    let asset_id = insert_asset(&conn, "TESTINC", &AssetType::Fii, None)?;
+
+    let later = IncomeEvent {
+        id: None,
+        asset_id,
+        event_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
+        ex_date: None,
+        event_type: interest::db::IncomeEventType::Dividend,
+        amount_per_quota: Decimal::ZERO,
+        total_amount: Decimal::from(10),
+        withholding_tax: Decimal::ZERO,
+        is_quota_pre_2026: None,
+        source: "TEST".to_string(),
+        notes: None,
+        created_at: chrono::Utc::now(),
+    };
+    let earlier = IncomeEvent {
+        id: None,
+        asset_id,
+        event_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+        ex_date: None,
+        event_type: interest::db::IncomeEventType::Dividend,
+        amount_per_quota: Decimal::ZERO,
+        total_amount: Decimal::from(5),
+        withholding_tax: Decimal::ZERO,
+        is_quota_pre_2026: None,
+        source: "TEST".to_string(),
+        notes: None,
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_income_event(&conn, &later)?;
+    interest::db::insert_income_event(&conn, &earlier)?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("income")
+        .arg("detail")
+        .arg("2024")
+        .arg("--asset")
+        .arg("TESTINC")
+        .output()?;
+    assert!(output.status.success());
+
+    let income_json: Value = serde_json::from_slice(&output.stdout).expect("invalid income JSON");
+    let income_array = income_json.as_array().expect("income JSON is not array");
+    let dates: Vec<String> = income_array
+        .iter()
+        .map(|row| {
+            row.get("date")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(dates, vec!["2024-01-10", "2024-02-15"]);
 
     Ok(())
 }

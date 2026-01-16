@@ -347,6 +347,13 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
 - AllTime (since first transaction)
 - Custom (from:to date range)
 
+#### 9. Output Ordering (CLI/TUI)
+
+**Preferred order for date-based lists**: show earlier first (ascending), so later entries appear last.
+
+- Use `ORDER BY <date> ASC` (and tie-breakers like ticker/id ASC) for list-style outputs in CLI/TUI and JSON.
+- Keep this consistent across commands such as `actions ... list` and `income detail`.
+
 ### Brazilian Tax Rules Implementation
 
 #### Tax Categories

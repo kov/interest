@@ -653,7 +653,7 @@ pub fn list_asset_renames_with_assets(
 
     let rows = if let Some(t) = ticker {
         let sql = format!(
-            "{} WHERE af.ticker = ?1 OR at.ticker = ?1 ORDER BY r.effective_date DESC",
+            "{} WHERE af.ticker = ?1 OR at.ticker = ?1 ORDER BY r.effective_date ASC",
             base_sql
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -662,7 +662,7 @@ pub fn list_asset_renames_with_assets(
             .collect::<Result<Vec<_>, _>>()?;
         rows
     } else {
-        let sql = format!("{} ORDER BY r.effective_date DESC", base_sql);
+        let sql = format!("{} ORDER BY r.effective_date ASC", base_sql);
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(rusqlite::params![], map_row)?
@@ -835,7 +835,7 @@ pub fn list_asset_exchanges_with_assets(
 
     let rows = if let Some(t) = ticker {
         let sql = format!(
-            "{} WHERE af.ticker = ?1 OR at.ticker = ?1 ORDER BY e.effective_date DESC",
+            "{} WHERE af.ticker = ?1 OR at.ticker = ?1 ORDER BY e.effective_date ASC",
             base_sql
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -844,7 +844,7 @@ pub fn list_asset_exchanges_with_assets(
             .collect::<Result<Vec<_>, _>>()?;
         rows
     } else {
-        let sql = format!("{} ORDER BY e.effective_date DESC", base_sql);
+        let sql = format!("{} ORDER BY e.effective_date ASC", base_sql);
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(rusqlite::params![], map_row)?
@@ -1079,14 +1079,14 @@ pub fn list_corporate_actions(
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
          WHERE a.ticker = ?1
-         ORDER BY ca.ex_date DESC"
+         ORDER BY ca.ex_date ASC"
     } else {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
                 ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
                 a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
-         ORDER BY ca.ex_date DESC"
+         ORDER BY ca.ex_date ASC"
     };
 
     let mut stmt = conn.prepare(query)?;
@@ -1275,7 +1275,7 @@ pub fn get_income_events_with_assets(
         params.push(Box::new(ticker.to_uppercase()));
     }
 
-    sql.push_str(" ORDER BY ie.event_date DESC, a.ticker ASC");
+    sql.push_str(" ORDER BY ie.event_date ASC, a.ticker ASC");
 
     let mut stmt = conn.prepare(&sql)?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
