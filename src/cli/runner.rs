@@ -300,6 +300,55 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                 }))
             }
         },
+        Commands::Assets { action } => match action {
+            crate::cli::AssetsCommands::List { asset_type } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::List {
+                    asset_type: asset_type.clone(),
+                },
+            })),
+            crate::cli::AssetsCommands::Show { ticker } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::Show {
+                    ticker: ticker.clone(),
+                },
+            })),
+            crate::cli::AssetsCommands::Add {
+                ticker,
+                asset_type,
+                name,
+            } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::Add {
+                    ticker: ticker.clone(),
+                    asset_type: asset_type.clone(),
+                    name: name.clone(),
+                },
+            })),
+            crate::cli::AssetsCommands::SetType { ticker, asset_type } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::SetType {
+                    ticker: ticker.clone(),
+                    asset_type: asset_type.clone(),
+                },
+            })),
+            crate::cli::AssetsCommands::SetName { ticker, name } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::SetName {
+                    ticker: ticker.clone(),
+                    name: name.clone(),
+                },
+            })),
+            crate::cli::AssetsCommands::Rename {
+                old_ticker,
+                new_ticker,
+            } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::Rename {
+                    old_ticker: old_ticker.clone(),
+                    new_ticker: new_ticker.clone(),
+                },
+            })),
+            crate::cli::AssetsCommands::Remove { ticker } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::Remove {
+                    ticker: ticker.clone(),
+                },
+            })),
+        },
 
         Commands::ProcessTerms => Ok(None),
         Commands::Transactions { .. } => Ok(None),

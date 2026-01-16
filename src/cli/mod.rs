@@ -98,6 +98,12 @@ pub enum Commands {
         action: TickersCommands,
     },
 
+    /// Asset management
+    Assets {
+        #[command(subcommand)]
+        action: AssetsCommands,
+    },
+
     /// Process term contract liquidations
     ProcessTerms,
 
@@ -469,6 +475,69 @@ pub enum TickersCommands {
         /// Asset type to set (required when a ticker is provided)
         #[arg(long = "type")]
         asset_type: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AssetsCommands {
+    /// List all assets (optional filter by type)
+    List {
+        /// Asset type to filter (STOCK, FII, FIAGRO, FI_INFRA, etc.)
+        #[arg(long = "type")]
+        asset_type: Option<String>,
+    },
+
+    /// Show details for a single asset
+    Show {
+        /// Ticker symbol
+        ticker: String,
+    },
+
+    /// Add a new asset
+    Add {
+        /// Ticker symbol
+        ticker: String,
+
+        /// Asset type (overrides auto-detect)
+        #[arg(long = "type")]
+        asset_type: Option<String>,
+
+        /// Optional name
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Update asset type
+    SetType {
+        /// Ticker symbol
+        ticker: String,
+
+        /// Asset type
+        asset_type: String,
+    },
+
+    /// Update asset name
+    SetName {
+        /// Ticker symbol
+        ticker: String,
+
+        /// Asset name
+        name: String,
+    },
+
+    /// Rename ticker symbol (correction-only)
+    Rename {
+        /// Old ticker
+        old_ticker: String,
+
+        /// New ticker
+        new_ticker: String,
+    },
+
+    /// Remove asset and all related data
+    Remove {
+        /// Ticker symbol
+        ticker: String,
     },
 }
 

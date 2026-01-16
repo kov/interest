@@ -28,6 +28,8 @@ pub enum Command {
     Inconsistencies { action: InconsistenciesAction },
     /// Ticker metadata management
     Tickers { action: TickersAction },
+    /// Asset management
+    Assets { action: AssetsAction },
     /// Show help
     Help,
     /// Exit/quit
@@ -72,6 +74,22 @@ pub enum IncomeAction {
     },
     /// Show income summary: `income summary [year]`
     Summary { year: Option<i32> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum AssetsAction {
+    List { asset_type: Option<String> },
+    Show { ticker: String },
+    Add {
+        ticker: String,
+        asset_type: Option<String>,
+        name: Option<String>,
+    },
+    SetType { ticker: String, asset_type: String },
+    SetName { ticker: String, name: String },
+    Rename { old_ticker: String, new_ticker: String },
+    Remove { ticker: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +302,68 @@ pub fn parse_flexible_date(s: &str) -> Result<String, CommandParseError> {
 /// - `portfolio show stock` or `/portfolio show --filter stock`
 /// - `tax report 2024` or `/tax report 2024`
 #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
+fn tokenize_command(input: &str) -> Result<Vec<String>, CommandParseError> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else if ch == '\\' {
+                    if let Some(next) = chars.peek().copied() {
+                        if next == q || next == '\\' {
+                            current.push(next);
+                            chars.next();
+                        } else {
+                            current.push(ch);
+                        }
+                    } else {
+                        current.push(ch);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                } else if ch.is_whitespace() {
+                    if !current.is_empty() {
+                        tokens.push(current.clone());
+                        current.clear();
+                    }
+                } else if ch == '\\' {
+                    if let Some(next) = chars.peek().copied() {
+                        current.push(next);
+                        chars.next();
+                    } else {
+                        current.push(ch);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+        }
+    }
+
+    if quote.is_some() {
+        return Err(CommandParseError {
+            message: "Unterminated quote in command input".to_string(),
+        });
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
+#[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
     let input = input.trim();
 
@@ -297,7 +377,8 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
     // Remove leading slash if present
     let input = input.strip_prefix('/').unwrap_or(input);
 
-    let mut parts = input.split_whitespace();
+    let tokens = tokenize_command(input)?;
+    let mut parts = tokens.into_iter();
     let cmd = parts.next().ok_or_else(|| CommandParseError {
         message: "No command provided".to_string(),
     })?;
@@ -342,7 +423,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                             i += 2;
                         } else if collected[i] == "--at" && i + 1 < collected.len() {
                             // Parse and validate the date, converting to canonical form
-                            as_of_date = Some(parse_flexible_date(collected[i + 1])?);
+                            as_of_date = Some(parse_flexible_date(&collected[i + 1])?);
                             i += 2;
                         } else {
                             i += 1;
@@ -571,7 +652,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
             let mut args: Vec<String> = Vec::new();
 
             while i < collected.len() {
-                match collected[i] {
+                match collected[i].as_str() {
                     "--notes" if i + 1 < collected.len() => {
                         notes = Some(collected[i + 1].to_string());
                         i += 2;
@@ -792,7 +873,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                     let collected: Vec<_> = parts.collect();
                     let mut i = 0;
                     while i < collected.len() {
-                        match collected[i] {
+                        match collected[i].as_str() {
                             "--open" => {
                                 status = Some("OPEN".to_string());
                                 i += 1;
@@ -862,7 +943,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                     let mut set = Vec::new();
                     let mut json = None;
                     while i < collected.len() {
-                        match collected[i] {
+                        match collected[i].as_str() {
                             "--set" if i + 1 < collected.len() => {
                                 if let Some((k, v)) = collected[i + 1].split_once('=') {
                                     set.push((k.to_string(), v.to_string()));
@@ -975,6 +1056,146 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 _ => Err(CommandParseError {
                     message: format!(
                         "Unknown tickers action: {}. Use: refresh, status, list-unknown, resolve",
+                        action
+                    ),
+                }),
+            }
+        }
+        "assets" | "asset" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "assets requires action (list, show, add, set-type, set-name, rename, remove)".to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "list" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut asset_type = None;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        if collected[i] == "--type" && i + 1 < collected.len() {
+                            asset_type = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    Ok(Command::Assets {
+                        action: AssetsAction::List { asset_type },
+                    })
+                }
+                "show" => {
+                    let ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets show requires a ticker".to_string(),
+                        })?
+                        .to_string();
+                    Ok(Command::Assets {
+                        action: AssetsAction::Show { ticker },
+                    })
+                }
+                "add" => {
+                    let ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets add requires a ticker".to_string(),
+                        })?
+                        .to_string();
+                    let collected: Vec<_> = parts.collect();
+                    let mut asset_type = None;
+                    let mut name = None;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        if collected[i] == "--type" && i + 1 < collected.len() {
+                            asset_type = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else if collected[i] == "--name" && i + 1 < collected.len() {
+                            name = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    Ok(Command::Assets {
+                        action: AssetsAction::Add {
+                            ticker,
+                            asset_type,
+                            name,
+                        },
+                    })
+                }
+                "set-type" => {
+                    let ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets set-type requires: <ticker> <type>".to_string(),
+                        })?
+                        .to_string();
+                    let asset_type = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets set-type requires: <ticker> <type>".to_string(),
+                        })?
+                        .to_string();
+                    Ok(Command::Assets {
+                        action: AssetsAction::SetType { ticker, asset_type },
+                    })
+                }
+                "set-name" => {
+                    let ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets set-name requires: <ticker> <name>".to_string(),
+                        })?
+                        .to_string();
+                    let name = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets set-name requires: <ticker> <name>".to_string(),
+                        })?
+                        .to_string();
+                    Ok(Command::Assets {
+                        action: AssetsAction::SetName { ticker, name },
+                    })
+                }
+                "rename" => {
+                    let old_ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets rename requires: <old> <new>".to_string(),
+                        })?
+                        .to_string();
+                    let new_ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets rename requires: <old> <new>".to_string(),
+                        })?
+                        .to_string();
+                    Ok(Command::Assets {
+                        action: AssetsAction::Rename {
+                            old_ticker,
+                            new_ticker,
+                        },
+                    })
+                }
+                "remove" => {
+                    let ticker = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: "assets remove requires a ticker".to_string(),
+                        })?
+                        .to_string();
+                    Ok(Command::Assets {
+                        action: AssetsAction::Remove { ticker },
+                    })
+                }
+                _ => Err(CommandParseError {
+                    message: format!(
+                        "Unknown assets action: {}. Use: list, show, add, set-type, set-name, rename, remove",
                         action
                     ),
                 }),
@@ -1418,5 +1639,29 @@ mod tests {
         let cmd1 = parse_command("PORTFOLIO SHOW").unwrap();
         let cmd2 = parse_command("portfolio show").unwrap();
         assert_eq!(cmd1, cmd2);
+    }
+
+    #[test]
+    fn test_tokenize_command_quotes() {
+        let tokens =
+            tokenize_command("assets add TEST --name 'My Fund' --type fii").unwrap();
+        assert_eq!(
+            tokens,
+            vec!["assets", "add", "TEST", "--name", "My Fund", "--type", "fii"]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_command_double_quotes() {
+        let tokens =
+            tokenize_command("assets add TEST --name \"My Fund\"").unwrap();
+        assert_eq!(tokens, vec!["assets", "add", "TEST", "--name", "My Fund"]);
+    }
+
+    #[test]
+    fn test_tokenize_command_unterminated_quote() {
+        let err = tokenize_command("assets add TEST --name 'My Fund")
+            .unwrap_err();
+        assert!(err.message.contains("Unterminated quote"));
     }
 }

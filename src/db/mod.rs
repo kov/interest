@@ -99,8 +99,121 @@ pub fn upsert_asset(
 /// Check whether a ticker exists in `assets`
 pub fn asset_exists(conn: &Connection, ticker: &str) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT id FROM assets WHERE ticker = ?1")?;
-    let existing: Option<i64> = stmt.query_row([ticker], |row| row.get(0)).optional()?;
+    let existing: Option<i64> =
+        stmt.query_row([ticker.to_uppercase()], |row| row.get(0)).optional()?;
     Ok(existing.is_some())
+}
+
+/// Get asset by ticker
+pub fn get_asset_by_ticker(conn: &Connection, ticker: &str) -> Result<Option<Asset>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ticker, asset_type, name, created_at, updated_at
+         FROM assets WHERE ticker = ?1",
+    )?;
+    let asset = stmt
+        .query_row([ticker.to_uppercase()], |row| {
+            Ok(Asset {
+                id: row.get(0)?,
+                ticker: row.get(1)?,
+                asset_type: row
+                    .get::<_, String>(2)?
+                    .parse::<AssetType>()
+                    .unwrap_or(AssetType::Unknown),
+                name: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .optional()?;
+    Ok(asset)
+}
+
+/// Insert asset with an explicit type (no auto-detect)
+pub fn insert_asset(
+    conn: &Connection,
+    ticker: &str,
+    asset_type: &AssetType,
+    name: Option<&str>,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO assets (ticker, asset_type, name) VALUES (?1, ?2, ?3)",
+        params![ticker.to_uppercase(), asset_type.as_str(), name],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Update asset name for a ticker
+pub fn update_asset_name(conn: &Connection, ticker: &str, name: &str) -> Result<()> {
+    let count = conn.execute(
+        "UPDATE assets SET name = ?1, updated_at = CURRENT_TIMESTAMP WHERE ticker = ?2",
+        params![name, ticker.to_uppercase()],
+    )?;
+    if count == 0 {
+        return Err(anyhow::anyhow!("Ticker {} not found in assets", ticker));
+    }
+    Ok(())
+}
+
+/// Rename an asset ticker (correction-only, no historical tracking)
+pub fn update_asset_ticker(conn: &Connection, old_ticker: &str, new_ticker: &str) -> Result<()> {
+    let new_upper = new_ticker.to_uppercase();
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM assets WHERE ticker = ?1",
+            [new_upper.clone()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing.is_some() {
+        return Err(anyhow::anyhow!("Ticker {} already exists", new_upper));
+    }
+
+    let count = conn.execute(
+        "UPDATE assets SET ticker = ?1, updated_at = CURRENT_TIMESTAMP WHERE ticker = ?2",
+        params![new_upper, old_ticker.to_uppercase()],
+    )?;
+    if count == 0 {
+        return Err(anyhow::anyhow!("Ticker {} not found in assets", old_ticker));
+    }
+    Ok(())
+}
+
+/// Delete asset by ticker (cascades to related tables)
+pub fn delete_asset(conn: &Connection, ticker: &str) -> Result<usize> {
+    let count = conn.execute(
+        "DELETE FROM assets WHERE ticker = ?1",
+        params![ticker.to_uppercase()],
+    )?;
+    Ok(count)
+}
+
+/// Count transactions for an asset ticker
+pub fn count_transactions_for_asset(conn: &Connection, ticker: &str) -> Result<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transactions t
+         JOIN assets a ON t.asset_id = a.id
+         WHERE a.ticker = ?1",
+        [ticker.to_uppercase()],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Get earliest transaction date for an asset ticker
+pub fn get_earliest_transaction_date_for_asset(
+    conn: &Connection,
+    ticker: &str,
+) -> Result<Option<NaiveDate>> {
+    let date: Option<NaiveDate> = conn
+        .query_row(
+            "SELECT MIN(t.trade_date) FROM transactions t
+             JOIN assets a ON t.asset_id = a.id
+             WHERE a.ticker = ?1",
+            [ticker.to_uppercase()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(date)
 }
 
 /// Insert transaction

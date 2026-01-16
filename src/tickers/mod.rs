@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, Utc};
 use encoding_rs::ISO_8859_15;
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::db::AssetType;
 pub(crate) mod ambima;
@@ -54,8 +54,8 @@ struct CachedMap {
 static TICKERS_CACHE: OnceLock<Mutex<Option<CachedMap>>> = OnceLock::new();
 
 pub fn get_tickers_cache_dir() -> Result<PathBuf> {
-    let cache_dir =
-        dir_spec::cache_home().ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?;
+    let cache_dir = dir_spec::cache_home()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?;
 
     Ok(cache_dir.join("interest").join("tickers"))
 }
@@ -102,8 +102,8 @@ pub fn read_cache_meta(cache_dir: Option<&Path>) -> Result<Option<TickersMetaInf
         return Ok(None);
     }
     let meta_bytes = fs::read(&meta_path).context("Failed to read tickers metadata")?;
-    let meta: TickersMeta = serde_json::from_slice(&meta_bytes)
-        .context("Failed to parse tickers metadata")?;
+    let meta: TickersMeta =
+        serde_json::from_slice(&meta_bytes).context("Failed to parse tickers metadata")?;
     Ok(Some(TickersMetaInfo {
         fetched_at: meta.fetched_at,
         source_url: meta.source_url,
@@ -346,10 +346,7 @@ fn is_subscription_like_ticker(ticker: &str) -> bool {
     if upper.ends_with('9') {
         return true;
     }
-    upper.ends_with("12")
-        || upper.ends_with("13")
-        || upper.ends_with("14")
-        || upper.ends_with("15")
+    upper.ends_with("12") || upper.ends_with("13") || upper.ends_with("14") || upper.ends_with("15")
 }
 
 fn classify_by_cfi_hint(cfi_code: Option<&str>) -> Option<AssetType> {
@@ -409,13 +406,7 @@ const FII_KEYWORDS: [&str; 9] = [
     "LAJES",
     "CORPORATIVO",
 ];
-const FIDC_STRONG_KEYWORDS: [&str; 5] = [
-    "FIDC",
-    "CREDITO ESTRUTURADO",
-    "CRI",
-    "CRA",
-    "RECEBIVEIS",
-];
+const FIDC_STRONG_KEYWORDS: [&str; 5] = ["FIDC", "CREDITO ESTRUTURADO", "CRI", "CRA", "RECEBIVEIS"];
 const FIDC_WEAK_KEYWORDS: [&str; 1] = ["CREDITO"];
 const FIP_KEYWORDS: [&str; 3] = ["FIP", "PARTICIPACOES", "PRIVATE EQUITY"];
 const FOF_KEYWORDS: [&str; 5] = [
@@ -437,120 +428,23 @@ const FIXED_INCOME_ETF_KEYWORDS: [&str; 9] = [
     "INCOME",
 ];
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn record_with(
-        ticker: &str,
-        security_category: &str,
-        corporate_name: &str,
-        cfi_code: Option<&str>,
-    ) -> TickerRecord {
-        TickerRecord {
-            ticker: ticker.to_string(),
-            security_category: security_category.to_string(),
-            cfi_code: cfi_code.map(|v| v.to_string()),
-            corporate_name: Some(corporate_name.to_string()),
-        }
-    }
-
-    #[test]
-    fn normalize_name_strips_punctuation() {
-        assert_eq!(normalize_name("INV. EM INFR."), "INV EM INFR");
-        assert_eq!(normalize_name("FII  BTG   PACTUAL"), "FII BTG PACTUAL");
-    }
-
-    #[test]
-    fn classify_funds_by_name_keywords() {
-        let fi_infra = record_with(
-            "JURO11",
-            "FUNDS",
-            "SPARTA INFRA FIC FI INFRA RENDA FIXA CP",
-            None,
-        );
-        assert_eq!(map_record_to_asset_type(&fi_infra), Some(AssetType::FiInfra));
-
-        let fiagro = record_with(
-            "CRAA11",
-            "FUNDS",
-            "ASSET BANK AGRONEGOCIOS FIAGRO",
-            None,
-        );
-        assert_eq!(map_record_to_asset_type(&fiagro), Some(AssetType::Fiagro));
-
-        let fidc = record_with("ABCD11", "FUNDS", "XPTO FIDC RECEBIVEIS", None);
-        assert_eq!(map_record_to_asset_type(&fidc), Some(AssetType::Fidc));
-
-        let fip = record_with("FIPX11", "FUNDS", "ALPHA FIP PRIVATE EQUITY", None);
-        assert_eq!(map_record_to_asset_type(&fip), Some(AssetType::Fip));
-
-        let fii_credito_imob = record_with(
-            "ALZC11",
-            "FUNDS",
-            "ALIANZA CREDITO IMOB FUND DE INVEST IMOB RESP LIM",
-            None,
-        );
-        assert_eq!(
-            map_record_to_asset_type(&fii_credito_imob),
-            Some(AssetType::Fii)
-        );
-
-        let fii = record_with(
-            "BRCR11",
-            "FUNDS",
-            "BTG CORPORATE OFFICE FUND FII",
-            None,
-        );
-        assert_eq!(map_record_to_asset_type(&fii), Some(AssetType::Fii));
-    }
-
-    #[test]
-    fn subscription_name_match_requires_exact_name_and_prefix() {
-        let record = record_with(
-            "BRCR11",
-            "FUNDS",
-            "FII BTG PACTUAL CORPORATE OFFICE FUND",
-            None,
-        );
-        let mut map = HashMap::new();
-        map.insert(record.ticker.clone(), record);
-
-        let matched = find_record_by_name(&map, "BRCR13", Some("FII BTG PACTUAL CORPORATE OFFICE FUND"));
-        assert!(matched.is_some());
-
-        let mismatched = find_record_by_name(&map, "BRCR13", Some("BTG CORPORATE OFFICE FUND"));
-        assert!(mismatched.is_none());
-    }
-
-    #[test]
-    fn subscription_prefix_fallback_matches_base() {
-        let record = record_with("BRCR11", "FUNDS", "BTG CORPORATE OFFICE FUND FII", None);
-        let mut map = HashMap::new();
-        map.insert(record.ticker.clone(), record);
-
-        let matched = find_record_by_prefix(&map, "BRCR13");
-        assert!(matched.is_some());
-
-        let not_subscription = find_record_by_prefix(&map, "BRCR11");
-        assert!(not_subscription.is_none());
-    }
-}
-
 fn cache_is_stale(cache_dir: &Path) -> Result<bool> {
     let meta_path = cache_dir.join(META_FILENAME);
     if !meta_path.exists() {
         return Ok(true);
     }
     let meta_bytes = fs::read(&meta_path).context("Failed to read tickers metadata")?;
-    let meta: TickersMeta = serde_json::from_slice(&meta_bytes)
-        .context("Failed to parse tickers metadata")?;
+    let meta: TickersMeta =
+        serde_json::from_slice(&meta_bytes).context("Failed to parse tickers metadata")?;
     Ok(Utc::now() - meta.fetched_at > Duration::hours(CACHE_MAX_AGE_HOURS))
 }
 
 fn build_download_url(response: &B3DownloadResponse) -> Result<String> {
     if let Some(token) = response.token.as_deref() {
-        return Ok(format!("https://arquivos.b3.com.br/api/download/?token={}", token));
+        return Ok(format!(
+            "https://arquivos.b3.com.br/api/download/?token={}",
+            token
+        ));
     }
     if let Some(redirect_url) = response.redirect_url.as_deref() {
         if redirect_url.starts_with("http") {
@@ -642,7 +536,11 @@ fn detect_delimiter(content: &str) -> u8 {
     }
 }
 
-fn get_field<'a>(record: &'a csv::StringRecord, headers: &'a csv::StringRecord, name: &str) -> &'a str {
+fn get_field<'a>(
+    record: &'a csv::StringRecord,
+    headers: &'a csv::StringRecord,
+    name: &str,
+) -> &'a str {
     if let Some(idx) = headers.iter().position(|h| h == name) {
         record.get(idx).unwrap_or("")
     } else {
@@ -659,9 +557,8 @@ fn normalize_csv_content(content: &str) -> Result<(String, u8)> {
         }
     }
 
-    let header_index = header_index.ok_or_else(|| {
-        anyhow::anyhow!("B3 tickers CSV header not found in downloaded content")
-    })?;
+    let header_index = header_index
+        .ok_or_else(|| anyhow::anyhow!("B3 tickers CSV header not found in downloaded content"))?;
 
     let cleaned = content
         .lines()
@@ -670,4 +567,101 @@ fn normalize_csv_content(content: &str) -> Result<(String, u8)> {
         .join("\n");
     let delimiter = detect_delimiter(&cleaned);
     Ok((cleaned, delimiter))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_with(
+        ticker: &str,
+        security_category: &str,
+        corporate_name: &str,
+        cfi_code: Option<&str>,
+    ) -> TickerRecord {
+        TickerRecord {
+            ticker: ticker.to_string(),
+            security_category: security_category.to_string(),
+            cfi_code: cfi_code.map(|v| v.to_string()),
+            corporate_name: Some(corporate_name.to_string()),
+        }
+    }
+
+    #[test]
+    fn normalize_name_strips_punctuation() {
+        assert_eq!(normalize_name("INV. EM INFR."), "INV EM INFR");
+        assert_eq!(normalize_name("FII  BTG   PACTUAL"), "FII BTG PACTUAL");
+    }
+
+    #[test]
+    fn classify_funds_by_name_keywords() {
+        let fi_infra = record_with(
+            "JURO11",
+            "FUNDS",
+            "SPARTA INFRA FIC FI INFRA RENDA FIXA CP",
+            None,
+        );
+        assert_eq!(
+            map_record_to_asset_type(&fi_infra),
+            Some(AssetType::FiInfra)
+        );
+
+        let fiagro = record_with("CRAA11", "FUNDS", "ASSET BANK AGRONEGOCIOS FIAGRO", None);
+        assert_eq!(map_record_to_asset_type(&fiagro), Some(AssetType::Fiagro));
+
+        let fidc = record_with("ABCD11", "FUNDS", "XPTO FIDC RECEBIVEIS", None);
+        assert_eq!(map_record_to_asset_type(&fidc), Some(AssetType::Fidc));
+
+        let fip = record_with("FIPX11", "FUNDS", "ALPHA FIP PRIVATE EQUITY", None);
+        assert_eq!(map_record_to_asset_type(&fip), Some(AssetType::Fip));
+
+        let fii_credito_imob = record_with(
+            "ALZC11",
+            "FUNDS",
+            "ALIANZA CREDITO IMOB FUND DE INVEST IMOB RESP LIM",
+            None,
+        );
+        assert_eq!(
+            map_record_to_asset_type(&fii_credito_imob),
+            Some(AssetType::Fii)
+        );
+
+        let fii = record_with("BRCR11", "FUNDS", "BTG CORPORATE OFFICE FUND FII", None);
+        assert_eq!(map_record_to_asset_type(&fii), Some(AssetType::Fii));
+    }
+
+    #[test]
+    fn subscription_name_match_requires_exact_name_and_prefix() {
+        let record = record_with(
+            "BRCR11",
+            "FUNDS",
+            "FII BTG PACTUAL CORPORATE OFFICE FUND",
+            None,
+        );
+        let mut map = HashMap::new();
+        map.insert(record.ticker.clone(), record);
+
+        let matched = find_record_by_name(
+            &map,
+            "BRCR13",
+            Some("FII BTG PACTUAL CORPORATE OFFICE FUND"),
+        );
+        assert!(matched.is_some());
+
+        let mismatched = find_record_by_name(&map, "BRCR13", Some("BTG CORPORATE OFFICE FUND"));
+        assert!(mismatched.is_none());
+    }
+
+    #[test]
+    fn subscription_prefix_fallback_matches_base() {
+        let record = record_with("BRCR11", "FUNDS", "BTG CORPORATE OFFICE FUND FII", None);
+        let mut map = HashMap::new();
+        map.insert(record.ticker.clone(), record);
+
+        let matched = find_record_by_prefix(&map, "BRCR13");
+        assert!(matched.is_some());
+
+        let not_subscription = find_record_by_prefix(&map, "BRCR11");
+        assert!(not_subscription.is_none());
+    }
 }

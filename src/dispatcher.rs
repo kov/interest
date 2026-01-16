@@ -15,6 +15,7 @@ mod inconsistencies;
 mod portfolio;
 mod prices;
 mod tickers;
+mod assets;
 use crate::utils::format_currency;
 use crate::{db, tax};
 use anyhow::Result;
@@ -35,6 +36,7 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             inconsistencies::dispatch_inconsistencies(action, json_output).await
         }
         Command::Tickers { action } => tickers::dispatch_tickers(action, json_output).await,
+        Command::Assets { action } => assets::dispatch_assets(action, json_output).await,
         Command::Help => {
             println!("Help: interest <command> [options]");
             println!("\nAvailable commands:");
@@ -68,6 +70,13 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             println!("  tickers status             - Show tickers cache status");
             println!("  tickers list-unknown        - List unknown assets");
             println!("  tickers resolve             - Resolve unknown assets");
+            println!("  assets list                 - List assets");
+            println!("  assets show <ticker>        - Show asset details");
+            println!("  assets add <ticker>         - Add an asset");
+            println!("  assets set-type <t> <type>  - Set asset type");
+            println!("  assets set-name <t> <name>  - Set asset name");
+            println!("  assets rename <old> <new>   - Rename ticker (correction only)");
+            println!("  assets remove <ticker>      - Remove asset and all data");
             println!("  help                       - Show this help");
             println!("  exit                       - Exit application");
             Ok(())

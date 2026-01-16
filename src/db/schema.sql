@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     notes TEXT,                         -- Optional notes
     source TEXT,                        -- 'CEI', 'B3_PORTAL', 'MANUAL'
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id)
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_asset ON transactions(asset_id);
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
     source TEXT,                     -- 'BRAPI', 'MANUAL', 'B3', 'MOVIMENTACAO'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id)
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_corporate_actions_asset ON corporate_actions(asset_id);
@@ -66,8 +66,8 @@ CREATE TABLE IF NOT EXISTS asset_renames (
     effective_date DATE NOT NULL,
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (from_asset_id) REFERENCES assets(id),
-    FOREIGN KEY (to_asset_id) REFERENCES assets(id),
+    FOREIGN KEY (from_asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_asset_id) REFERENCES assets(id) ON DELETE CASCADE,
     UNIQUE(from_asset_id, to_asset_id, effective_date)
 );
 
@@ -88,8 +88,8 @@ CREATE TABLE IF NOT EXISTS asset_exchanges (
     source TEXT,                       -- 'MANUAL', 'B3', etc.
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (from_asset_id) REFERENCES assets(id),
-    FOREIGN KEY (to_asset_id) REFERENCES assets(id)
+    FOREIGN KEY (from_asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_exchanges_from ON asset_exchanges(from_asset_id);
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS price_history (
     volume BIGINT,
     source TEXT,                     -- 'YAHOO', 'BRAPI'
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
     UNIQUE(asset_id, price_date)
 );
 
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS position_snapshots (
     tx_fingerprint TEXT NOT NULL,
     label TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
     UNIQUE(snapshot_date, asset_id)
 );
 
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS realized_gains (
     sale_price DECIMAL(15,4) NOT NULL,
     realized_gain DECIMAL(15,4) NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id)
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_realized_gains_date ON realized_gains(sale_date);
@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     transaction_id INTEGER,
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
     FOREIGN KEY (transaction_id) REFERENCES transactions(id)
 );
 
@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS positions (
     total_cost DECIMAL(15,4) NOT NULL,         -- Total invested
     adjusted_cost DECIMAL(15,4) NOT NULL,      -- After amortization adjustments
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id)
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_asset ON positions(asset_id);
@@ -226,7 +226,7 @@ CREATE TABLE IF NOT EXISTS income_events (
     source TEXT,                         -- 'BRAPI', 'CEI', 'MANUAL'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES assets(id)
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_income_events_asset ON income_events(asset_id);
@@ -252,7 +252,7 @@ CREATE TABLE IF NOT EXISTS inconsistencies (
     resolution_json TEXT,              -- JSON blob with user-provided data
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     resolved_at DATETIME,
-    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
     FOREIGN KEY (transaction_id) REFERENCES transactions(id)
 );
 
