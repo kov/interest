@@ -47,11 +47,10 @@ pub async fn dispatch_portfolio_show(
         None
     };
 
-    // Skip live price fetch for historical views (use cached prices from price_history)
-    let skip_price_fetch = historical_date.is_some()
-        || std::env::var("INTEREST_SKIP_PRICE_FETCH")
-            .map(|v| v != "0")
-            .unwrap_or(false);
+    // Allow disabling live price fetching via env var
+    let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
+        .map(|v| v != "0")
+        .unwrap_or(false);
 
     // Parse asset type filter if provided
     let asset_type_filter = if let Some(type_str) = asset_type {
@@ -74,7 +73,6 @@ pub async fn dispatch_portfolio_show(
         return Ok(());
     }
 
-    let earliest_date = earliest_date.unwrap();
     let today = chrono::Local::now().date_naive();
 
     // Calculate portfolio positions first (fast, no network calls)
@@ -98,19 +96,26 @@ pub async fn dispatch_portfolio_show(
         if !json_output {
             let assets_with_positions: Vec<_> =
                 report.positions.iter().map(|p| p.asset.clone()).collect();
+            let priceable_assets =
+                crate::pricing::resolver::filter_priceable_assets(&assets_with_positions);
 
-            if !assets_with_positions.is_empty() {
-                let total = assets_with_positions.len();
+            if !priceable_assets.is_empty() {
+                let total = priceable_assets.len();
                 let printer = ProgressPrinter::new(json_output);
                 let mut completed = 0usize;
+                let price_range = if let Some(date) = historical_date {
+                    (date, date)
+                } else {
+                    (today, today)
+                };
 
                 // Show initial spinner
                 printer.update(&format!("Fetching prices 0/{}...", total));
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
-                    &assets_with_positions,
-                    (earliest_date, today),
+                    &priceable_assets,
+                    price_range,
                     |event| {
                         // Map typed event to legacy display values
                         let (raw_text, should_persist) = match event {
@@ -169,21 +174,30 @@ pub async fn dispatch_portfolio_show(
             }
         } else {
             // JSON mode: no spinner, just fetch silently
-            crate::pricing::resolver::ensure_prices_available(
-                &mut conn,
-                &report
-                    .positions
-                    .iter()
-                    .map(|p| p.asset.clone())
-                    .collect::<Vec<_>>(),
-                (earliest_date, today),
-            )
-            .await
-            .or_else(|e: anyhow::Error| {
-                tracing::warn!("Price resolution failed: {}", e);
-                // Continue anyway - use available prices
-                Ok::<(), anyhow::Error>(())
-            })?;
+            let assets_with_positions: Vec<_> =
+                report.positions.iter().map(|p| p.asset.clone()).collect();
+            let priceable_assets =
+                crate::pricing::resolver::filter_priceable_assets(&assets_with_positions);
+
+            if !priceable_assets.is_empty() {
+                let price_range = if let Some(date) = historical_date {
+                    (date, date)
+                } else {
+                    (today, today)
+                };
+
+                crate::pricing::resolver::ensure_prices_available(
+                    &mut conn,
+                    &priceable_assets,
+                    price_range,
+                )
+                .await
+                .or_else(|e: anyhow::Error| {
+                    tracing::warn!("Price resolution failed: {}", e);
+                    // Continue anyway - use available prices
+                    Ok::<(), anyhow::Error>(())
+                })?;
+            }
 
             // Recompute for JSON mode as well so JSON output contains updated prices
             report = if let Some(date) = historical_date {

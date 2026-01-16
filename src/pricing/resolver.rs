@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -25,6 +25,62 @@ use crate::importers::b3_cotahist;
 
 /// Maximum concurrent API requests to avoid rate limiting
 const MAX_CONCURRENT_REQUESTS: usize = 5;
+
+#[derive(Debug)]
+struct PriceResolutionNeeds {
+    needed_years: HashSet<i32>,
+    need_current_prices_assets: Vec<Asset>,
+}
+
+fn determine_price_resolution_needs(
+    conn: &Connection,
+    assets: &[Asset],
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    today: NaiveDate,
+) -> Result<PriceResolutionNeeds> {
+    let mut needed_years = HashSet::new();
+    let mut need_current_prices_assets = Vec::new();
+
+    for asset in assets {
+        let asset_id = asset.id.expect("Asset from database must have id");
+        let has_prices = if start_date == end_date && end_date < today {
+            conn.query_row(
+                "SELECT 1 FROM price_history WHERE asset_id = ?1 AND price_date <= ?2 LIMIT 1",
+                rusqlite::params![asset_id, end_date],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        } else {
+            crate::db::has_any_prices(conn, asset_id, start_date, end_date)?
+        };
+
+        if !has_prices {
+            // Determine if we need historical bulk or current API fetch
+            if end_date < today {
+                // All historical - use COTAHIST
+                for year in start_date.year()..=end_date.year() {
+                    needed_years.insert(year);
+                }
+            } else if start_date == today {
+                // Current-only - use API
+                need_current_prices_assets.push(asset.clone());
+            } else {
+                // Mixed: historical + current
+                for year in start_date.year()..=today.year() {
+                    needed_years.insert(year);
+                }
+                need_current_prices_assets.push(asset.clone());
+            }
+        }
+    }
+
+    Ok(PriceResolutionNeeds {
+        needed_years,
+        need_current_prices_assets,
+    })
+}
 
 #[cfg(not(test))]
 use tracing;
@@ -67,7 +123,6 @@ where
 {
     let (start_date, end_date) = date_range;
     let today = Local::now().date_naive();
-    let thirty_days_ago = today - chrono::Duration::days(30);
 
     tracing::debug!(
         "Resolving prices for {} assets from {} to {}",
@@ -81,9 +136,8 @@ where
         return Ok(());
     }
 
-    // Fast path: check if we already have recent prices for all *priceable* assets
-    // If we have prices from yesterday or today, skip the expensive COTAHIST parsing
     let yesterday = today - chrono::Duration::days(1);
+    let current_only = start_date == today && end_date == today;
 
     // Count priceable assets (exclude bonds)
     let priceable_asset_ids: Vec<i64> = assets
@@ -98,79 +152,96 @@ where
         return Ok(());
     }
 
-    progress(&ProgressEvent::from_message(&format!(
-        "Checking {} assets...",
-        priceable_asset_ids.len()
-    )));
+    if current_only {
+        // Fast path: check if we already have recent prices for all *priceable* assets
+        // If we have prices from yesterday or today, skip the expensive COTAHIST parsing
+        progress(&ProgressEvent::from_message(&format!(
+            "Checking {} assets...",
+            priceable_asset_ids.len()
+        )));
 
-    let placeholders = priceable_asset_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
-    let query = format!(
-        "SELECT COUNT(DISTINCT asset_id) FROM price_history 
-         WHERE asset_id IN ({}) AND price_date >= ?",
-        placeholders
-    );
-
-    // Build params: asset IDs first, then date
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    for id in &priceable_asset_ids {
-        params.push(Box::new(*id));
-    }
-    params.push(Box::new(yesterday));
-
-    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-
-    let has_recent_prices =
-        conn.query_row(&query, params_refs.as_slice(), |row| row.get::<_, i64>(0))?;
-
-    let priceable_count = priceable_asset_ids.len() as i64;
-    if has_recent_prices == priceable_count {
-        progress(&ProgressEvent::from_message("✓ All prices are up to date!"));
-        tracing::debug!(
-            "All {} priceable assets have recent prices (since {}), skipping resolution",
-            priceable_count,
-            yesterday
-        );
-        return Ok(());
-    }
-
-    tracing::debug!(
-        "{} of {} priceable assets need price updates",
-        priceable_count - has_recent_prices,
-        priceable_count
-    );
-
-    // If most assets have recent prices, skip expensive COTAHIST parsing
-    // and only fetch current prices via API for the few that need updates
-    if has_recent_prices > (priceable_count * 8 / 10) {
-        tracing::debug!(
-            "Skipping COTAHIST bulk import ({}% coverage), fetching current prices only",
-            (has_recent_prices * 100 / priceable_count)
-        );
-
-        // Only fetch current prices for assets that need updates
-        let need_update_assets: Vec<Asset> = assets
+        let placeholders = priceable_asset_ids
             .iter()
-            .filter(|a| is_priceable_asset(a))
-            .cloned()
-            .collect();
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            "SELECT COUNT(DISTINCT asset_id) FROM price_history 
+             WHERE asset_id IN ({}) AND price_date >= ?",
+            placeholders
+        );
 
-        if !need_update_assets.is_empty() {
-            progress(&ProgressEvent::from_message(&format!(
-                "Fetching prices for {} assets...",
-                need_update_assets.len()
-            )));
-            tracing::info!(
-                "Fetching current prices for {} assets from Yahoo/Brapi",
-                need_update_assets.len()
-            );
-            fetch_current_prices_with_progress(conn, &need_update_assets, progress).await?;
-            progress(&ProgressEvent::from_message("✓ Price updates complete!"));
+        // Build params: asset IDs first, then date
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for id in &priceable_asset_ids {
+            params.push(Box::new(*id));
         }
-        return Ok(());
+        params.push(Box::new(yesterday));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+
+        let has_recent_prices =
+            conn.query_row(&query, params_refs.as_slice(), |row| row.get::<_, i64>(0))?;
+
+        let priceable_count = priceable_asset_ids.len() as i64;
+        if has_recent_prices == priceable_count {
+            progress(&ProgressEvent::from_message("✓ All prices are up to date!"));
+            tracing::debug!(
+                "All {} priceable assets have recent prices (since {}), skipping resolution",
+                priceable_count,
+                yesterday
+            );
+            return Ok(());
+        }
+
+        tracing::debug!(
+            "{} of {} priceable assets need price updates",
+            priceable_count - has_recent_prices,
+            priceable_count
+        );
+
+        // If most assets have recent prices, skip expensive COTAHIST parsing
+        // and only fetch current prices via API for the few that need updates
+        if has_recent_prices > (priceable_count * 8 / 10) {
+            tracing::debug!(
+                "Skipping COTAHIST bulk import ({}% coverage), fetching current prices only",
+                (has_recent_prices * 100 / priceable_count)
+            );
+
+            // Only fetch current prices for assets that need updates
+            let recent_query = format!(
+                "SELECT DISTINCT asset_id FROM price_history
+                 WHERE asset_id IN ({}) AND price_date >= ?",
+                placeholders
+            );
+            let mut recent_ids: HashSet<i64> = HashSet::new();
+            let mut stmt = conn.prepare(&recent_query)?;
+            let rows = stmt.query_map(params_refs.as_slice(), |row| row.get::<_, i64>(0))?;
+            for row in rows {
+                recent_ids.insert(row?);
+            }
+
+            let need_update_assets: Vec<Asset> = assets
+                .iter()
+                .filter(|a| is_priceable_asset(a))
+                .filter(|a| a.id.map(|id| !recent_ids.contains(&id)).unwrap_or(false))
+                .cloned()
+                .collect();
+
+            if !need_update_assets.is_empty() {
+                progress(&ProgressEvent::from_message(&format!(
+                    "Fetching prices for {} assets...",
+                    need_update_assets.len()
+                )));
+                tracing::info!(
+                    "Fetching current prices for {} assets from Yahoo/Brapi",
+                    need_update_assets.len()
+                );
+                fetch_current_prices_with_progress(conn, &need_update_assets, progress).await?;
+                progress(&ProgressEvent::from_message("✓ Price updates complete!"));
+            }
+            return Ok(());
+        }
     }
 
     // Skip COTAHIST if we have ANY prices - just fetch current prices via API
@@ -181,7 +252,7 @@ where
         })
         .unwrap_or(false);
 
-    if has_any_price_at_all {
+    if has_any_price_at_all && current_only {
         tracing::debug!(
             "Skipping COTAHIST (have some prices), fetching current prices only via API"
         );
@@ -208,32 +279,9 @@ where
     }
 
     // Determine which years need bulk download and which assets need current prices
-    let mut needed_years = HashSet::new();
-    let mut need_current_prices_assets = Vec::new();
-
-    for asset in assets {
-        let asset_id = asset.id.expect("Asset from database must have id");
-        let has_prices = crate::db::has_any_prices(conn, asset_id, start_date, end_date)?;
-
-        if !has_prices {
-            // Determine if we need historical bulk or current API fetch
-            if end_date <= thirty_days_ago {
-                // All historical - use COTAHIST
-                for year in start_date.year()..=end_date.year() {
-                    needed_years.insert(year);
-                }
-            } else if start_date > thirty_days_ago {
-                // All recent - use API
-                need_current_prices_assets.push(asset.clone());
-            } else {
-                // Mixed: historical + recent
-                for year in start_date.year()..=thirty_days_ago.year() {
-                    needed_years.insert(year);
-                }
-                need_current_prices_assets.push(asset.clone());
-            }
-        }
-    }
+    let needs = determine_price_resolution_needs(conn, assets, start_date, end_date, today)?;
+    let needed_years = needs.needed_years;
+    let need_current_prices_assets = needs.need_current_prices_assets;
 
     // Fetch historical prices first (bulk COTAHIST)
     if !needed_years.is_empty() {
@@ -399,7 +447,7 @@ where
 /// Check if an asset can be priced via Yahoo Finance or Brapi.dev APIs.
 /// Bonds and government bonds need different pricing sources (not yet implemented).
 /// FIXME: this is a hack that should be mostly fixed by parsing asset types properly.
-fn is_priceable_asset(asset: &Asset) -> bool {
+pub(crate) fn is_priceable_asset(asset: &Asset) -> bool {
     match asset.asset_type {
         AssetType::Stock
         | AssetType::Bdr
@@ -451,6 +499,14 @@ fn is_priceable_asset(asset: &Asset) -> bool {
         | AssetType::TermContract
         | AssetType::Unknown => false,
     }
+}
+
+pub(crate) fn filter_priceable_assets(assets: &[Asset]) -> Vec<Asset> {
+    assets
+        .iter()
+        .filter(|&asset| is_priceable_asset(asset))
+        .cloned()
+        .collect()
 }
 
 /// Fetch prices in parallel with semaphore-based rate limiting.
@@ -528,6 +584,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
+    use chrono::{NaiveDate, Utc};
+    use rust_decimal::Decimal;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_strategy_determination() {
@@ -558,7 +618,6 @@ mod tests {
     };
 
     fn make_test_asset(ticker: &str, asset_type: AssetType) -> Asset {
-        use chrono::Utc;
         Asset {
             id: Some(1),
             ticker: ticker.to_string(),
@@ -567,6 +626,39 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn setup_db() -> Result<(NamedTempFile, Connection)> {
+        let tmp = NamedTempFile::new()?;
+        let path = tmp.path().to_path_buf();
+        crate::db::init_database(Some(path.clone()))?;
+        let conn = crate::db::open_db(Some(path))?;
+        Ok((tmp, conn))
+    }
+
+    fn insert_asset(conn: &Connection, ticker: &str, asset_type: AssetType) -> Result<Asset> {
+        conn.execute(
+            "INSERT INTO assets (ticker, asset_type, name) VALUES (?1, ?2, NULL)",
+            rusqlite::params![ticker.to_ascii_uppercase(), asset_type.as_str()],
+        )?;
+        Ok(crate::db::get_asset_by_ticker(conn, ticker)?.expect("asset should exist"))
+    }
+
+    fn insert_price(conn: &Connection, asset_id: i64, date: NaiveDate) -> Result<()> {
+        let price = crate::db::PriceHistory {
+            id: None,
+            asset_id,
+            price_date: date,
+            close_price: Decimal::from(10),
+            open_price: None,
+            high_price: None,
+            low_price: None,
+            volume: None,
+            source: "TEST".to_string(),
+            created_at: Utc::now(),
+        };
+        crate::db::insert_price_history(conn, &price)?;
+        Ok(())
     }
 
     #[test]
@@ -605,5 +697,71 @@ mod tests {
     fn test_is_priceable_asset_delisted_excluded() {
         let delisted = make_test_asset("BAHI3", AssetType::Stock);
         assert!(!is_priceable_asset(&delisted));
+    }
+
+    #[test]
+    fn test_determine_needs_historical_only() -> Result<()> {
+        let (_tmp, conn) = setup_db()?;
+        let asset = insert_asset(&conn, "PETR4", AssetType::Stock)?;
+        let today = Local::now().date_naive();
+        let start = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        let end = start;
+
+        let needs = determine_price_resolution_needs(&conn, &[asset.clone()], start, end, today)?;
+
+        assert!(needs.needed_years.contains(&2024));
+        assert!(needs.need_current_prices_assets.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_determine_needs_mixed_range() -> Result<()> {
+        let (_tmp, conn) = setup_db()?;
+        let asset = insert_asset(&conn, "PETR4", AssetType::Stock)?;
+        let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        let end = today;
+
+        let needs = determine_price_resolution_needs(&conn, &[asset.clone()], start, end, today)?;
+
+        assert!(needs.needed_years.contains(&2024));
+        assert!(needs.needed_years.contains(&2025));
+        assert_eq!(needs.need_current_prices_assets.len(), 1);
+        assert_eq!(needs.need_current_prices_assets[0].ticker, "PETR4");
+        Ok(())
+    }
+
+    #[test]
+    fn test_determine_needs_cache_hit_for_range() -> Result<()> {
+        let (_tmp, conn) = setup_db()?;
+        let asset = insert_asset(&conn, "PETR4", AssetType::Stock)?;
+        let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        let end = start;
+
+        insert_price(&conn, asset.id.unwrap(), start)?;
+
+        let needs = determine_price_resolution_needs(&conn, &[asset], start, end, today)?;
+
+        assert!(needs.needed_years.is_empty());
+        assert!(needs.need_current_prices_assets.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_determine_needs_historical_date_cache_hit_on_or_before() -> Result<()> {
+        let (_tmp, conn) = setup_db()?;
+        let asset = insert_asset(&conn, "PETR4", AssetType::Stock)?;
+        let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
+        let price_date = NaiveDate::from_ymd_opt(2025, 3, 6).unwrap();
+        let as_of = NaiveDate::from_ymd_opt(2025, 3, 7).unwrap();
+
+        insert_price(&conn, asset.id.unwrap(), price_date)?;
+
+        let needs = determine_price_resolution_needs(&conn, &[asset], as_of, as_of, today)?;
+
+        assert!(needs.needed_years.is_empty());
+        assert!(needs.need_current_prices_assets.is_empty());
+        Ok(())
     }
 }

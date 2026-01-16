@@ -64,7 +64,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 
     let period = parse_period_string(period_str)?;
     // Determine period boundaries (used for price range limiting)
-    let (_period_start, period_end) =
+    let (period_start, period_end) =
         crate::reports::performance::get_period_dates(period.clone(), Some(&conn))?;
     // Allow disabling live price fetching via env var (mirrors portfolio command)
     let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
@@ -74,15 +74,17 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     // Ensure prices are available for the required date range
     // Filter out blocked assets
     let assets = db::get_assets_with_transactions(&conn)?;
-    if !assets.is_empty() {
+    let priceable_assets = crate::pricing::resolver::filter_priceable_assets(&assets);
+    if !priceable_assets.is_empty() {
         // Get the date range for prices
         let earliest = db::get_earliest_transaction_date(&conn)?;
         if let Some(earliest_date) = earliest {
             // Limit price resolution to the end of the requested period
             let today = period_end;
+            let price_start = std::cmp::max(earliest_date, period_start);
 
             if !json_output && !skip_price_fetch {
-                let total = assets.len();
+                let total = priceable_assets.len();
                 let printer = ProgressPrinter::new(json_output);
                 let mut completed = 0usize;
 
@@ -91,8 +93,8 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
-                    &assets,
-                    (earliest_date, today),
+                    &priceable_assets,
+                    (price_start, today),
                     |event| {
                         let (raw_text, should_persist) = match event {
                             crate::ui::progress::ProgressEvent::Line { text, persist } => {
@@ -143,8 +145,8 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                 // JSON mode: no spinner, just fetch silently
                 crate::pricing::resolver::ensure_prices_available(
                     &mut conn,
-                    &assets,
-                    (earliest_date, today),
+                    &priceable_assets,
+                    (price_start, today),
                 )
                 .await
                 .or_else(|e: anyhow::Error| {
