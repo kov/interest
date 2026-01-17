@@ -4,7 +4,7 @@ use std::io::{stdin, stdout, Write};
 use tabled::{Table, Tabled};
 
 use crate::commands::AssetsAction;
-use crate::{db, reports};
+use crate::{db, reports, scraping};
 
 pub async fn dispatch_assets(action: AssetsAction, json_output: bool) -> Result<()> {
     match action {
@@ -24,6 +24,10 @@ pub async fn dispatch_assets(action: AssetsAction, json_output: bool) -> Result<
             new_ticker,
         } => rename_asset(&old_ticker, &new_ticker, json_output),
         AssetsAction::Remove { ticker } => remove_asset(&ticker, json_output),
+        AssetsAction::SyncMaisRetorno {
+            asset_type,
+            dry_run,
+        } => sync_maisretorno(asset_type.as_deref(), dry_run, json_output).await,
     }
 }
 
@@ -85,6 +89,7 @@ fn show_asset(ticker: &str, json_output: bool) -> Result<()> {
             "ticker": asset.ticker,
             "asset_type": asset.asset_type.as_str(),
             "name": asset.name,
+            "cnpj": asset.cnpj,
             "created_at": asset.created_at.to_rfc3339(),
             "updated_at": asset.updated_at.to_rfc3339(),
             "transactions": tx_count,
@@ -96,6 +101,7 @@ fn show_asset(ticker: &str, json_output: bool) -> Result<()> {
     println!("Asset: {}", asset.ticker);
     println!("  Type: {}", asset.asset_type.as_str());
     println!("  Name: {}", asset.name.unwrap_or_else(|| "-".to_string()));
+    println!("  CNPJ: {}", asset.cnpj.unwrap_or_else(|| "-".to_string()));
     println!("  Created: {}", asset.created_at.to_rfc3339());
     println!("  Updated: {}", asset.updated_at.to_rfc3339());
     println!("  Transactions: {}", tx_count);
@@ -243,6 +249,78 @@ fn remove_asset(ticker: &str, json_output: bool) -> Result<()> {
     }
 
     println!("{} Removed asset {}", "✓".green().bold(), asset.ticker);
+    Ok(())
+}
+
+async fn sync_maisretorno(
+    asset_type: Option<&str>,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let conn = open_conn()?;
+    let parsed_type = asset_type.map(parse_asset_type).transpose()?;
+    let sources = scraping::maisretorno::select_sources(parsed_type);
+    if sources.is_empty() {
+        anyhow::bail!("No Mais Retorno sources available for this asset type");
+    }
+
+    let printer = crate::ui::progress::ProgressPrinter::new(json_output);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let progress_handle = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            printer.handle_event(crate::ui::progress::ProgressEvent::from_message(&msg));
+        }
+    });
+
+    let stats = scraping::maisretorno::sync_registry(&conn, &sources, dry_run, Some(tx)).await?;
+    let _ = progress_handle.await;
+    if !json_output {
+        crate::ui::progress::clear_progress_line();
+    }
+
+    if json_output {
+        let payload = serde_json::json!({
+            "sources": sources.iter().map(|s| {
+                serde_json::json!({
+                    "asset_type": s.asset_type.as_str(),
+                    "url": s.url,
+                })
+            }).collect::<Vec<_>>(),
+            "entries": stats.total_entries,
+            "registry_written": stats.registry_written,
+            "assets_updated": stats.assets_updated,
+            "updated_type": stats.updated_type,
+            "updated_name": stats.updated_name,
+            "updated_cnpj": stats.updated_cnpj,
+            "dry_run": stats.dry_run,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} Mais Retorno sync complete.",
+        if dry_run {
+            "ℹ".blue().bold()
+        } else {
+            "✓".green().bold()
+        }
+    );
+    println!("  Entries fetched: {}", stats.total_entries);
+    if dry_run {
+        println!("  Registry writes skipped (dry run).");
+    } else {
+        println!("  Registry entries written: {}", stats.registry_written);
+    }
+    if dry_run {
+        println!("  Asset updates skipped (dry run).");
+    } else {
+        println!("  Assets updated: {}", stats.assets_updated);
+        println!("    Type updates: {}", stats.updated_type);
+        println!("    Name updates: {}", stats.updated_name);
+        println!("    CNPJ updates: {}", stats.updated_cnpj);
+    }
+
     Ok(())
 }
 

@@ -13,8 +13,8 @@ use tracing::info;
 
 use crate::term_contracts;
 pub use models::{
-    Asset, AssetExchange, AssetExchangeType, AssetRename, AssetType, CorporateAction,
-    CorporateActionType, GovBondRate, IncomeEvent, IncomeEventType, Inconsistency,
+    Asset, AssetExchange, AssetExchangeType, AssetRegistryEntry, AssetRename, AssetType,
+    CorporateAction, CorporateActionType, GovBondRate, IncomeEvent, IncomeEventType, Inconsistency,
     InconsistencySeverity, InconsistencyStatus, InconsistencyType, PriceHistory, Transaction,
     TransactionType,
 };
@@ -45,6 +45,23 @@ pub fn open_db(db_path: Option<PathBuf>) -> Result<Connection> {
         .context("Failed to apply database schema")?;
 
     Ok(conn)
+}
+
+/// Read a metadata value by key.
+pub fn get_metadata(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM metadata WHERE key = ?1")?;
+    let value = stmt.query_row(params![key], |row| row.get(0)).optional()?;
+    Ok(value)
+}
+
+/// Insert or update a metadata key.
+pub fn set_metadata(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO metadata (key, value, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 /// Initialize the database with schema
@@ -93,10 +110,29 @@ pub fn upsert_asset(
         }
     };
 
+    let registry = get_asset_registry_by_ticker(conn, "MAIS_RETORNO", ticker)?;
+    let (final_type, final_name, final_cnpj) = if let Some(entry) = registry {
+        let asset_type = if resolved_type == AssetType::Unknown {
+            entry.asset_type
+        } else {
+            resolved_type
+        };
+        let name = name.map(|s| s.to_string()).or_else(|| entry.name.clone());
+        let cnpj = entry.cnpj.clone();
+        (asset_type, name, cnpj)
+    } else {
+        (resolved_type, name.map(|s| s.to_string()), None)
+    };
+
     // Insert new asset
     conn.execute(
-        "INSERT INTO assets (ticker, asset_type, name) VALUES (?1, ?2, ?3)",
-        params![ticker, resolved_type.as_str(), name],
+        "INSERT INTO assets (ticker, asset_type, name, cnpj) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            ticker.to_uppercase(),
+            final_type.as_str(),
+            final_name,
+            final_cnpj
+        ],
     )?;
 
     Ok(conn.last_insert_rowid())
@@ -114,7 +150,7 @@ pub fn asset_exists(conn: &Connection, ticker: &str) -> Result<bool> {
 /// Get asset by ticker
 pub fn get_asset_by_ticker(conn: &Connection, ticker: &str) -> Result<Option<Asset>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ticker, asset_type, name, created_at, updated_at
+        "SELECT id, ticker, asset_type, name, cnpj, created_at, updated_at
          FROM assets WHERE ticker = ?1",
     )?;
     let asset = stmt
@@ -127,8 +163,9 @@ pub fn get_asset_by_ticker(conn: &Connection, ticker: &str) -> Result<Option<Ass
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Unknown),
                 name: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                cnpj: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })
         .optional()?;
@@ -143,8 +180,13 @@ pub fn insert_asset(
     name: Option<&str>,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO assets (ticker, asset_type, name) VALUES (?1, ?2, ?3)",
-        params![ticker.to_uppercase(), asset_type.as_str(), name],
+        "INSERT INTO assets (ticker, asset_type, name, cnpj) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            ticker.to_uppercase(),
+            asset_type.as_str(),
+            name,
+            Option::<String>::None
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -159,6 +201,108 @@ pub fn update_asset_name(conn: &Connection, ticker: &str, name: &str) -> Result<
         return Err(anyhow::anyhow!("Ticker {} not found in assets", ticker));
     }
     Ok(())
+}
+
+/// Update asset CNPJ for a ticker
+pub fn update_asset_cnpj(conn: &Connection, ticker: &str, cnpj: &str) -> Result<()> {
+    let count = conn.execute(
+        "UPDATE assets SET cnpj = ?1, updated_at = CURRENT_TIMESTAMP WHERE ticker = ?2",
+        params![cnpj, ticker.to_uppercase()],
+    )?;
+    if count == 0 {
+        return Err(anyhow::anyhow!("Ticker {} not found in assets", ticker));
+    }
+    Ok(())
+}
+
+/// Insert or update an external asset registry entry.
+pub fn upsert_asset_registry(conn: &Connection, entry: &AssetRegistryEntry) -> Result<()> {
+    conn.execute(
+        "INSERT INTO asset_registry (
+            source, ticker, asset_type, name, cnpj, actuation_segment, actuation_sector,
+            issue, situation, indexer, security_type, codigo, data_emissao, data_vencimento,
+            source_url, raw_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        ON CONFLICT(source, ticker) DO UPDATE SET
+            asset_type = excluded.asset_type,
+            name = excluded.name,
+            cnpj = excluded.cnpj,
+            actuation_segment = excluded.actuation_segment,
+            actuation_sector = excluded.actuation_sector,
+            issue = excluded.issue,
+            situation = excluded.situation,
+            indexer = excluded.indexer,
+            security_type = excluded.security_type,
+            codigo = excluded.codigo,
+            data_emissao = excluded.data_emissao,
+            data_vencimento = excluded.data_vencimento,
+            source_url = excluded.source_url,
+            raw_json = excluded.raw_json,
+            updated_at = CURRENT_TIMESTAMP",
+        params![
+            entry.source,
+            entry.ticker.to_uppercase(),
+            entry.asset_type.as_str(),
+            entry.name,
+            entry.cnpj,
+            entry.actuation_segment,
+            entry.actuation_sector,
+            entry.issue,
+            entry.situation,
+            entry.indexer,
+            entry.security_type,
+            entry.codigo,
+            entry.data_emissao,
+            entry.data_vencimento,
+            entry.source_url,
+            entry.raw_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Lookup an asset registry entry by source and ticker.
+pub fn get_asset_registry_by_ticker(
+    conn: &Connection,
+    source: &str,
+    ticker: &str,
+) -> Result<Option<AssetRegistryEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT source, ticker, asset_type, name, cnpj, actuation_segment, actuation_sector,
+                issue, situation, indexer, security_type, codigo, data_emissao, data_vencimento,
+                source_url, raw_json, updated_at
+         FROM asset_registry
+         WHERE source = ?1 AND ticker = ?2",
+    )?;
+
+    let entry = stmt
+        .query_row(params![source, ticker.to_uppercase()], |row| {
+            Ok(AssetRegistryEntry {
+                source: row.get(0)?,
+                ticker: row.get(1)?,
+                asset_type: row
+                    .get::<_, String>(2)?
+                    .parse::<AssetType>()
+                    .unwrap_or(AssetType::Unknown),
+                name: row.get(3)?,
+                cnpj: row.get(4)?,
+                actuation_segment: row.get(5)?,
+                actuation_sector: row.get(6)?,
+                issue: row.get(7)?,
+                situation: row.get(8)?,
+                indexer: row.get(9)?,
+                security_type: row.get(10)?,
+                codigo: row.get(11)?,
+                data_emissao: row.get(12)?,
+                data_vencimento: row.get(13)?,
+                source_url: row.get(14)?,
+                raw_json: row.get(15)?,
+                updated_at: row.get(16)?,
+            })
+        })
+        .optional()?;
+
+    Ok(entry)
 }
 
 /// Rename an asset ticker (correction-only, no historical tracking)
@@ -611,8 +755,8 @@ pub fn list_asset_renames_with_assets(
 ) -> Result<Vec<(AssetRename, Asset, Asset)>> {
     let base_sql =
         "SELECT r.id, r.from_asset_id, r.to_asset_id, r.effective_date, r.notes, r.created_at,
-                    af.id, af.ticker, af.asset_type, af.name, af.created_at, af.updated_at,
-                    at.id, at.ticker, at.asset_type, at.name, at.created_at, at.updated_at
+                    af.id, af.ticker, af.asset_type, af.name, af.cnpj, af.created_at, af.updated_at,
+                    at.id, at.ticker, at.asset_type, at.name, at.cnpj, at.created_at, at.updated_at
              FROM asset_renames r
              JOIN assets af ON r.from_asset_id = af.id
              JOIN assets at ON r.to_asset_id = at.id";
@@ -634,19 +778,21 @@ pub fn list_asset_renames_with_assets(
                 .parse::<AssetType>()
                 .unwrap_or(AssetType::Unknown),
             name: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            cnpj: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
         };
         let to_asset = Asset {
-            id: Some(row.get(12)?),
-            ticker: row.get(13)?,
+            id: Some(row.get(13)?),
+            ticker: row.get(14)?,
             asset_type: row
-                .get::<_, String>(14)?
+                .get::<_, String>(15)?
                 .parse::<AssetType>()
                 .unwrap_or(AssetType::Unknown),
-            name: row.get(15)?,
-            created_at: row.get(16)?,
-            updated_at: row.get(17)?,
+            name: row.get(16)?,
+            cnpj: row.get(17)?,
+            created_at: row.get(18)?,
+            updated_at: row.get(19)?,
         };
         Ok((rename, from_asset, to_asset))
     };
@@ -785,8 +931,8 @@ pub fn list_asset_exchanges_with_assets(
 ) -> Result<Vec<(AssetExchange, Asset, Asset)>> {
     let base_sql = "SELECT e.id, e.event_type, e.from_asset_id, e.to_asset_id, e.effective_date,
                     e.to_quantity, e.allocated_cost, e.cash_amount, e.source, e.notes, e.created_at,
-                    af.id, af.ticker, af.asset_type, af.name, af.created_at, af.updated_at,
-                    at.id, at.ticker, at.asset_type, at.name, at.created_at, at.updated_at
+                    af.id, af.ticker, af.asset_type, af.name, af.cnpj, af.created_at, af.updated_at,
+                    at.id, at.ticker, at.asset_type, at.name, at.cnpj, at.created_at, at.updated_at
              FROM asset_exchanges e
              JOIN assets af ON e.from_asset_id = af.id
              JOIN assets at ON e.to_asset_id = at.id";
@@ -816,19 +962,21 @@ pub fn list_asset_exchanges_with_assets(
                 .parse::<AssetType>()
                 .unwrap_or(AssetType::Unknown),
             name: row.get(14)?,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
+            cnpj: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
         };
         let to_asset = Asset {
-            id: Some(row.get(17)?),
-            ticker: row.get(18)?,
+            id: Some(row.get(18)?),
+            ticker: row.get(19)?,
             asset_type: row
-                .get::<_, String>(19)?
+                .get::<_, String>(20)?
                 .parse::<AssetType>()
                 .unwrap_or(AssetType::Unknown),
-            name: row.get(20)?,
-            created_at: row.get(21)?,
-            updated_at: row.get(22)?,
+            name: row.get(21)?,
+            cnpj: row.get(22)?,
+            created_at: row.get(23)?,
+            updated_at: row.get(24)?,
         };
         Ok((exchange, from_asset, to_asset))
     };
@@ -1075,7 +1223,7 @@ pub fn list_corporate_actions(
     let query = if ticker.is_some() {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
                 ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
-                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+                a.id, a.ticker, a.asset_type, a.name, a.cnpj, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
          WHERE a.ticker = ?1
@@ -1083,7 +1231,7 @@ pub fn list_corporate_actions(
     } else {
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
                 ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
-                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+                a.id, a.ticker, a.asset_type, a.name, a.cnpj, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
          ORDER BY ca.ex_date ASC"
@@ -1126,8 +1274,9 @@ pub fn list_corporate_actions(
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Unknown),
                 name: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                cnpj: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             },
         ))
     };
@@ -1151,7 +1300,7 @@ pub fn get_corporate_action(
     let mut stmt = conn.prepare(
         "SELECT ca.id, ca.asset_id, ca.action_type, ca.event_date, ca.ex_date,
                 ca.quantity_adjustment, ca.source, ca.notes, ca.created_at,
-                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+                a.id, a.ticker, a.asset_type, a.name, a.cnpj, a.created_at, a.updated_at
          FROM corporate_actions ca
          JOIN assets a ON ca.asset_id = a.id
          WHERE ca.id = ?1",
@@ -1181,8 +1330,9 @@ pub fn get_corporate_action(
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Unknown),
                 name: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                cnpj: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             };
             Ok((action, asset))
         })
@@ -1254,7 +1404,7 @@ pub fn get_income_events_with_assets(
         "SELECT ie.id, ie.asset_id, ie.event_date, ie.ex_date, ie.event_type,
                 ie.amount_per_quota, ie.total_amount, ie.withholding_tax,
                 ie.is_quota_pre_2026, ie.source, ie.notes, ie.created_at,
-                a.id, a.ticker, a.asset_type, a.name, a.created_at, a.updated_at
+                a.id, a.ticker, a.asset_type, a.name, a.cnpj, a.created_at, a.updated_at
          FROM income_events ie
          JOIN assets a ON ie.asset_id = a.id
          WHERE 1=1",
@@ -1307,8 +1457,9 @@ pub fn get_income_events_with_assets(
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Unknown),
                 name: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                cnpj: row.get(16)?,
+                created_at: row.get(17)?,
+                updated_at: row.get(18)?,
             };
             Ok((event, asset))
         })?
@@ -1373,7 +1524,7 @@ pub fn get_amortizations_for_asset(
 /// Get all assets (for batch price updates)
 pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ticker, asset_type, name, created_at, updated_at FROM assets ORDER BY ticker",
+        "SELECT id, ticker, asset_type, name, cnpj, created_at, updated_at FROM assets ORDER BY ticker",
     )?;
 
     let assets = stmt
@@ -1386,8 +1537,9 @@ pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Unknown),
                 name: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                cnpj: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1398,7 +1550,7 @@ pub fn get_all_assets(conn: &Connection) -> Result<Vec<Asset>> {
 /// Get assets with a specific asset type
 pub fn list_assets_by_type(conn: &Connection, asset_type: AssetType) -> Result<Vec<Asset>> {
     let mut stmt = conn.prepare(
-        "SELECT id, ticker, asset_type, name, created_at, updated_at FROM assets WHERE asset_type = ? ORDER BY ticker",
+        "SELECT id, ticker, asset_type, name, cnpj, created_at, updated_at FROM assets WHERE asset_type = ? ORDER BY ticker",
     )?;
 
     let assets = stmt
@@ -1411,8 +1563,9 @@ pub fn list_assets_by_type(conn: &Connection, asset_type: AssetType) -> Result<V
                     .parse::<AssetType>()
                     .unwrap_or(AssetType::Unknown),
                 name: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                cnpj: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1538,7 +1691,7 @@ pub fn get_earliest_transaction_date(conn: &Connection) -> Result<Option<NaiveDa
 #[allow(dead_code)]
 pub fn get_assets_with_transactions(conn: &Connection) -> Result<Vec<Asset>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.id, a.ticker, a.name, a.asset_type, a.created_at, a.updated_at
+        "SELECT DISTINCT a.id, a.ticker, a.name, a.cnpj, a.asset_type, a.created_at, a.updated_at
          FROM assets a 
          INNER JOIN transactions t ON a.id = t.asset_id
          ORDER BY a.ticker",
@@ -1549,9 +1702,10 @@ pub fn get_assets_with_transactions(conn: &Connection) -> Result<Vec<Asset>> {
             id: Some(row.get(0)?),
             ticker: row.get(1)?,
             name: row.get(2)?,
-            asset_type: row.get::<_, String>(3)?.parse().unwrap(),
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
+            cnpj: row.get(3)?,
+            asset_type: row.get::<_, String>(4)?.parse().unwrap(),
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })?;
 

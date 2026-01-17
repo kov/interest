@@ -71,8 +71,31 @@ pub struct Asset {
     pub ticker: String,
     pub asset_type: AssetType,
     pub name: Option<String>,
+    pub cnpj: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// External registry entry for an asset (e.g., Mais Retorno)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRegistryEntry {
+    pub source: String,
+    pub ticker: String,
+    pub asset_type: AssetType,
+    pub name: Option<String>,
+    pub cnpj: Option<String>,
+    pub actuation_segment: Option<String>,
+    pub actuation_sector: Option<String>,
+    pub issue: Option<String>,
+    pub situation: Option<String>,
+    pub indexer: Option<String>,
+    pub security_type: Option<String>,
+    pub codigo: Option<String>,
+    pub data_emissao: Option<String>,
+    pub data_vencimento: Option<String>,
+    pub source_url: Option<String>,
+    pub raw_json: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Transaction type (buy or sell)

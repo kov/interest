@@ -708,7 +708,7 @@ pub fn save_portfolio_snapshot(
 pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<PortfolioReport>> {
     let mut stmt = conn.prepare(
         "SELECT ps.asset_id, ps.quantity, ps.average_cost, ps.market_price, ps.market_value,
-                ps.unrealized_pl, ps.tx_fingerprint, a.ticker, a.asset_type, a.name,
+                ps.unrealized_pl, ps.tx_fingerprint, a.ticker, a.asset_type, a.name, a.cnpj,
                 a.created_at, a.updated_at
          FROM position_snapshots ps
          JOIN assets a ON ps.asset_id = a.id
@@ -729,8 +729,9 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
                     ticker: row.get(7)?,
                     asset_type,
                     name: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    cnpj: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 },
                 get_decimal_value(row, 1)?,
                 get_decimal_value(row, 2)?,

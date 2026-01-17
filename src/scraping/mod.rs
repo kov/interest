@@ -2,5 +2,6 @@
 // Uses headless Chrome to bypass Cloudflare protection
 
 pub mod investing;
+pub mod maisretorno;
 
 pub use investing::InvestingScraper;

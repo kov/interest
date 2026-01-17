@@ -12,6 +12,7 @@ pub fn ticker_from_name(name: &str) -> Option<String> {
     }
 
     let year = trimmed.split_whitespace().last()?;
+    let year = normalize_year_token(year)?;
     let bond_type = normalize_bond_type_from_text(trimmed)?;
     let has_juros = has_juros_semestrais(trimmed);
 
@@ -105,6 +106,20 @@ fn build_ticker(bond_type: &str, has_juros: bool, year: &str) -> String {
     }
 }
 
+fn normalize_year_token(token: &str) -> Option<&str> {
+    let year_part = token
+        .rsplit('/')
+        .next()
+        .unwrap_or(token)
+        .trim()
+        .trim_matches(|c: char| !c.is_ascii_digit());
+    if year_part.is_empty() {
+        None
+    } else {
+        Some(year_part)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +135,12 @@ mod tests {
     fn test_ticker_from_name_without_juros() {
         let ticker = ticker_from_name("Tesouro IPCA+ 2035");
         assert_eq!(ticker, Some("TESOURO_IPCA_2035".to_string()));
+    }
+
+    #[test]
+    fn test_ticker_from_name_month_year() {
+        let ticker = ticker_from_name("Tesouro Prefixado 01/2005");
+        assert_eq!(ticker, Some("TESOURO_PREFIXADO_2005".to_string()));
     }
 
     #[test]

@@ -154,6 +154,12 @@ impl ProgressPrinter {
     }
 }
 
+/// Clear any in-place spinner line.
+pub fn clear_progress_line() {
+    clear_line();
+    let _ = io::stdout().flush();
+}
+
 impl Drop for ProgressPrinter {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {

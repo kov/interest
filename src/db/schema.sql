@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS assets (
     ticker TEXT NOT NULL UNIQUE,  -- e.g., 'PETR4', 'MXRF11', 'AGRO3'
     asset_type TEXT NOT NULL,     -- 'STOCK', 'BDR', 'ETF', 'FII', 'FIAGRO', 'FI_INFRA', 'FIDC', 'FIP', 'BOND', 'GOV_BOND', 'OPTION', 'TERM', 'UNKNOWN'
     name TEXT,                     -- Full name of the asset
+    cnpj TEXT,                     -- Cadastro Nacional da Pessoa Juridica (digits only)
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -14,6 +15,30 @@ CREATE TABLE IF NOT EXISTS assets (
 -- Create index on ticker for fast lookups
 CREATE INDEX IF NOT EXISTS idx_assets_ticker ON assets(ticker);
 CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(asset_type);
+
+-- External asset registry (Mais Retorno, etc.)
+CREATE TABLE IF NOT EXISTS asset_registry (
+    source TEXT NOT NULL,          -- 'MAIS_RETORNO'
+    ticker TEXT NOT NULL,          -- uppercased ticker or canonical name for non-ticker assets
+    asset_type TEXT NOT NULL,      -- same domain as assets.asset_type
+    name TEXT,                     -- display name from source
+    cnpj TEXT,
+    actuation_segment TEXT,
+    actuation_sector TEXT,
+    issue TEXT,
+    situation TEXT,
+    indexer TEXT,
+    security_type TEXT,
+    codigo TEXT,
+    data_emissao TEXT,
+    data_vencimento TEXT,
+    source_url TEXT,
+    raw_json TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source, ticker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_registry_ticker ON asset_registry(ticker);
 
 -- Transactions (buys and sells)
 CREATE TABLE IF NOT EXISTS transactions (

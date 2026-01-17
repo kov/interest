@@ -672,6 +672,7 @@ mod tests {
             id: Some(1),
             ticker: ticker.to_string(),
             name: Some("Test Asset".to_string()),
+            cnpj: None,
             asset_type,
             created_at: Utc::now(),
             updated_at: Utc::now(),

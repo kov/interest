@@ -258,6 +258,7 @@ pub fn import_movimentacao_entries(
                 ticker: ticker.to_string(),
                 asset_type,
                 name: None,
+                cnpj: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -384,6 +385,7 @@ pub fn import_movimentacao_entries(
                 ticker: ticker.to_string(),
                 asset_type,
                 name: None,
+                cnpj: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };

@@ -418,6 +418,7 @@ mod tests {
             ticker: "TESOURO_IPCA_JUROS_2045".to_string(),
             asset_type: crate::db::AssetType::GovBond,
             name: None,
+            cnpj: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

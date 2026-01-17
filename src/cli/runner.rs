@@ -363,6 +363,15 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                     ticker: ticker.clone(),
                 },
             })),
+            crate::cli::AssetsCommands::SyncMaisRetorno {
+                asset_type,
+                dry_run,
+            } => Ok(Some(Command::Assets {
+                action: cmd::AssetsAction::SyncMaisRetorno {
+                    asset_type: asset_type.clone(),
+                    dry_run: *dry_run,
+                },
+            })),
         },
 
         Commands::ProcessTerms => Ok(None),

@@ -117,6 +117,10 @@ pub enum AssetsAction {
     Remove {
         ticker: String,
     },
+    SyncMaisRetorno {
+        asset_type: Option<String>,
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1115,7 +1119,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
             let action = parts
                 .next()
                 .ok_or_else(|| CommandParseError {
-                    message: "assets requires action (list, show, add, set-type, set-name, rename, remove)".to_string(),
+                    message: "assets requires action (list, show, add, set-type, set-name, rename, remove, sync-maisretorno)".to_string(),
                 })?
                 .to_lowercase();
 
@@ -1243,9 +1247,36 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         action: AssetsAction::Remove { ticker },
                     })
                 }
+                "sync-maisretorno" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut asset_type = None;
+                    let mut dry_run = false;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--type" if i + 1 < collected.len() => {
+                                asset_type = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--dry-run" => {
+                                dry_run = true;
+                                i += 1;
+                            }
+                            _ => {
+                                i += 1;
+                            }
+                        }
+                    }
+                    Ok(Command::Assets {
+                        action: AssetsAction::SyncMaisRetorno {
+                            asset_type,
+                            dry_run,
+                        },
+                    })
+                }
                 _ => Err(CommandParseError {
                     message: format!(
-                        "Unknown assets action: {}. Use: list, show, add, set-type, set-name, rename, remove",
+                        "Unknown assets action: {}. Use: list, show, add, set-type, set-name, rename, remove, sync-maisretorno",
                         action
                     ),
                 }),

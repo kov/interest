@@ -85,6 +85,7 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
             println!("  assets set-name <t> <name>  - Set asset name");
             println!("  assets rename <old> <new>   - Rename ticker (correction only)");
             println!("  assets remove <ticker>      - Remove asset and all data");
+            println!("  assets sync-maisretorno     - Sync Mais Retorno asset metadata");
             println!("  help                       - Show this help");
             println!("  exit                       - Exit application");
             Ok(())
@@ -127,7 +128,10 @@ async fn dispatch_import(action: crate::commands::ImportAction, json_output: boo
 async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
     use rust_decimal::Decimal;
     use serde::Serialize;
-    use tabled::{settings::Style, Table, Tabled};
+    use tabled::{
+        settings::{object::Columns, Alignment, Modify, Style},
+        Table, Tabled,
+    };
 
     info!("Generating IRPF annual report for {}", year);
 
@@ -175,6 +179,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
         struct IncomeSummaryJson {
             ticker: String,
             asset_type: String,
+            cnpj: Option<String>,
             dividends_net: rust_decimal::Decimal,
             jcp_net: rust_decimal::Decimal,
             total_net: rust_decimal::Decimal,
@@ -185,6 +190,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
             .map(|entry| IncomeSummaryJson {
                 ticker: entry.ticker.clone(),
                 asset_type: entry.asset_type.as_str().to_string(),
+                cnpj: entry.cnpj.clone(),
                 dividends_net: entry.dividends_net,
                 jcp_net: entry.jcp_net,
                 total_net: entry.dividends_net + entry.jcp_net,
@@ -288,6 +294,8 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
         struct IncomeRow {
             #[tabled(rename = "Ticker")]
             ticker: String,
+            #[tabled(rename = "CNPJ")]
+            cnpj: String,
             #[tabled(rename = "Asset Type")]
             asset_type: String,
             #[tabled(rename = "Dividends (Net)")]
@@ -307,6 +315,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
                 }
                 Some(IncomeRow {
                     ticker: entry.ticker.clone(),
+                    cnpj: format_cnpj(entry.cnpj.as_deref()).unwrap_or_else(|| "-".to_string()),
                     asset_type: entry.asset_type.as_str().to_string(),
                     dividends: if entry.dividends_net > Decimal::ZERO {
                         format_currency(entry.dividends_net)
@@ -330,6 +339,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
             let mut table_rows = rows;
             table_rows.push(IncomeRow {
                 ticker: "TOTAL".to_string(),
+                cnpj: "-".to_string(),
                 asset_type: "TOTAL".to_string(),
                 dividends: format_currency(total_dividends),
                 jcp: format_currency(total_jcp),
@@ -338,7 +348,9 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
 
             println!("{} Dividends & JCP Received:", "💵".cyan().bold());
             let mut table = Table::new(table_rows);
-            let table = table.with(Style::rounded());
+            let table = table
+                .with(Style::rounded())
+                .with(Modify::new(Columns::new(3..6)).with(Alignment::right()));
             println!("{table}");
             println!();
         }
@@ -359,6 +371,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
 struct IncomeByType {
     ticker: String,
     asset_type: db::AssetType,
+    cnpj: Option<String>,
     dividends_net: rust_decimal::Decimal,
     jcp_net: rust_decimal::Decimal,
 }
@@ -393,9 +406,13 @@ fn build_income_summary(conn: &rusqlite::Connection, year: i32) -> Result<Vec<In
             .or_insert(IncomeByType {
                 ticker: asset.ticker.clone(),
                 asset_type: asset.asset_type,
+                cnpj: asset.cnpj.clone(),
                 dividends_net: Decimal::ZERO,
                 jcp_net: Decimal::ZERO,
             });
+        if entry.cnpj.is_none() {
+            entry.cnpj = asset.cnpj.clone();
+        }
         let net_amount = event.total_amount - event.withholding_tax;
         match event.event_type {
             db::IncomeEventType::Dividend => entry.dividends_net += net_amount,
@@ -407,6 +424,22 @@ fn build_income_summary(conn: &rusqlite::Connection, year: i32) -> Result<Vec<In
     let mut summary: Vec<IncomeByType> = by_ticker.into_values().collect();
     summary.sort_by(|a, b| a.ticker.cmp(&b.ticker));
     Ok(summary)
+}
+
+fn format_cnpj(value: Option<&str>) -> Option<String> {
+    let raw = value?;
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 14 {
+        return Some(raw.to_string());
+    }
+    Some(format!(
+        "{}.{}.{}/{}-{}",
+        &digits[0..2],
+        &digits[2..5],
+        &digits[5..8],
+        &digits[8..12],
+        &digits[12..14]
+    ))
 }
 
 async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {

@@ -201,6 +201,10 @@ pub fn resolve_asset_type_with_name(ticker: &str, name: Option<&str>) -> Result<
         return Ok(map_record_to_asset_type(record));
     }
 
+    if let Some(asset_type) = registry_asset_type_lookup(&normalized)? {
+        return Ok(Some(asset_type));
+    }
+
     if cache_is_stale(&cache_dir)? {
         if let Err(err) = refresh_b3_tickers(true) {
             tracing::warn!("Failed to refresh B3 tickers list: {}", err);
@@ -223,6 +227,75 @@ pub fn resolve_asset_type_with_name(ticker: &str, name: Option<&str>) -> Result<
     }
 
     Ok(None)
+}
+
+fn registry_asset_type_lookup(ticker: &str) -> Result<Option<AssetType>> {
+    let conn = match crate::db::open_db(None) {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!("Registry lookup failed to open DB: {}", err);
+            return Ok(None);
+        }
+    };
+
+    if let Some(entry) = crate::db::get_asset_registry_by_ticker(&conn, "MAIS_RETORNO", ticker)? {
+        return Ok(Some(entry.asset_type));
+    }
+
+    if should_refresh_registry(&conn)? {
+        if let Err(err) = refresh_registry_and_wait() {
+            tracing::warn!("Mais Retorno registry refresh failed: {}", err);
+        } else if let Some(entry) =
+            crate::db::get_asset_registry_by_ticker(&conn, "MAIS_RETORNO", ticker)?
+        {
+            return Ok(Some(entry.asset_type));
+        }
+    }
+
+    Ok(None)
+}
+
+fn should_refresh_registry(conn: &rusqlite::Connection) -> Result<bool> {
+    use chrono::{DateTime, Duration, Utc};
+
+    let last = crate::db::get_metadata(conn, "registry_maisretorno_refreshed_at")?;
+    let Some(last) = last else {
+        return Ok(true);
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(&last) else {
+        return Ok(true);
+    };
+    let last = parsed.with_timezone(&Utc);
+    Ok(Utc::now().signed_duration_since(last) > Duration::days(1))
+}
+
+fn refresh_registry_and_wait() -> Result<()> {
+    let handle = std::thread::spawn(refresh_registry_blocking);
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("Mais Retorno refresh thread panicked")),
+    }
+}
+
+fn refresh_registry_blocking() -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let conn = crate::db::open_db(None)?;
+        let sources = crate::scraping::maisretorno::select_sources(None);
+        let printer = crate::ui::progress::ProgressPrinter::new(false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let progress_handle = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                printer.handle_event(crate::ui::progress::ProgressEvent::from_message(&msg));
+            }
+        });
+
+        let _stats =
+            crate::scraping::maisretorno::sync_registry(&conn, &sources, false, Some(tx)).await?;
+        let _ = progress_handle.await;
+        crate::ui::progress::clear_progress_line();
+        Ok(())
+    })
 }
 
 pub fn ambima_debenture_lookup(ticker: &str) -> Result<Option<AssetType>> {

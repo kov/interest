@@ -207,6 +207,26 @@ Algorithm in `tax/cost_basis.rs`:
 //   3. Reduce total_cost by cost_basis and total_qty by sold_qty
 ```
 
+#### 10. Asset Metadata, Registry, and Synthetic Tickers
+
+**Asset type resolution order**: B3 CSV cache → Mais Retorno registry → Ambima scrape fallback. This is implemented in `src/tickers/mod.rs::resolve_asset_type_with_name()` and relies on the registry being populated in `asset_registry`.
+
+**Mais Retorno registry**:
+- Sync is shared between explicit `assets sync-maisretorno` and auto-refresh triggered by unknown asset lookups.
+- Refresh is throttled via metadata key `registry_maisretorno_refreshed_at` (24h).
+- Progress is reported via the shared spinner/progress channel when running in a TTY.
+
+**Bond name parsing (debentures)**:
+- Mais Retorno list entries for debentures use a full name like `ELET23 - DEBENTURE ...`.
+- We split on `" - "` and store:
+  - `ticker`: prefix (e.g., `ELET23`)
+  - `name`: remainder (full debenture name + maturity)
+
+**Tesouro Direto synthetic tickers**:
+- Synthetic ticker is derived from name via `src/tesouro.rs::ticker_from_name()`.
+- Normalization drops month components like `01/2005` → `2005`.
+- Example: `Tesouro Prefixado 01/2005` → `TESOURO_PREFIXADO_2005`.
+
 **Critical**: Process transactions in chronological order (`ORDER BY trade_date ASC`).
 
 #### 4. Auto-Adjustment of Manual Transactions

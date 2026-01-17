@@ -559,6 +559,18 @@ pub enum AssetsCommands {
         /// Ticker symbol
         ticker: String,
     },
+
+    /// Sync Mais Retorno asset metadata
+    #[command(name = "sync-maisretorno")]
+    SyncMaisRetorno {
+        /// Asset type to filter (STOCK, FII, FIAGRO, FI_INFRA, etc.)
+        #[arg(long = "type")]
+        asset_type: Option<String>,
+
+        /// Fetch only (do not write to the registry)
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
