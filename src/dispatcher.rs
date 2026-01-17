@@ -125,6 +125,10 @@ async fn dispatch_import(action: crate::commands::ImportAction, json_output: boo
 }
 
 async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
+    use rust_decimal::Decimal;
+    use serde::Serialize;
+    use tabled::{settings::Style, Table, Tabled};
+
     info!("Generating IRPF annual report for {}", year);
 
     // Initialize database
@@ -139,18 +143,14 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
         tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
     };
 
-    if report.monthly_summaries.is_empty() {
-        println!(
-            "\n{} No transactions found for year {}\n",
-            "ℹ".blue().bold(),
-            year
-        );
-        return Ok(());
-    }
+    let income_summary = build_income_summary(&conn, year)?;
+    let has_income = income_summary
+        .iter()
+        .any(|entry| entry.dividends_net > Decimal::ZERO || entry.jcp_net > Decimal::ZERO);
 
     if json_output {
         // Emit concise JSON suitable for tests and scripting
-        #[derive(serde::Serialize)]
+        #[derive(Serialize)]
         struct MonthlySummaryJson {
             month: String,
             sales: rust_decimal::Decimal,
@@ -171,6 +171,26 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
             })
             .collect();
 
+        #[derive(Serialize)]
+        struct IncomeSummaryJson {
+            ticker: String,
+            asset_type: String,
+            dividends_net: rust_decimal::Decimal,
+            jcp_net: rust_decimal::Decimal,
+            total_net: rust_decimal::Decimal,
+        }
+
+        let income: Vec<IncomeSummaryJson> = income_summary
+            .iter()
+            .map(|entry| IncomeSummaryJson {
+                ticker: entry.ticker.clone(),
+                asset_type: entry.asset_type.as_str().to_string(),
+                dividends_net: entry.dividends_net,
+                jcp_net: entry.jcp_net,
+                total_net: entry.dividends_net + entry.jcp_net,
+            })
+            .collect();
+
         let payload = serde_json::json!({
             "year": year,
             "annual_total_sales": report.annual_total_sales,
@@ -178,6 +198,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
             "annual_total_loss": report.annual_total_loss,
             "annual_total_tax": report.annual_total_tax,
             "monthly_summaries": monthly,
+            "income_summary": income,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -187,6 +208,15 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
             "📊".cyan().bold(),
             year
         );
+    }
+
+    if report.monthly_summaries.is_empty() && !has_income {
+        println!(
+            "\n{} No transactions found for year {}\n",
+            "ℹ".blue().bold(),
+            year
+        );
+        return Ok(());
     }
 
     // Show prior-year carryforward losses if any
@@ -202,53 +232,116 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
         println!();
     }
 
-    // Monthly breakdown
-    println!("{}", "Monthly Summary:".bold());
-    for summary in &report.monthly_summaries {
-        println!("\n  {}:", summary.month_name.bold());
+    if !report.monthly_summaries.is_empty() {
+        // Monthly breakdown
+        println!("{}", "Monthly Summary:".bold());
+        for summary in &report.monthly_summaries {
+            println!("\n  {}:", summary.month_name.bold());
+            println!(
+                "    Sales:  {}",
+                format_currency(summary.total_sales).cyan()
+            );
+            println!(
+                "    Profit: {}",
+                format_currency(summary.total_profit).green()
+            );
+            println!("    Loss:   {}", format_currency(summary.total_loss).red());
+            println!("    Tax:    {}", format_currency(summary.tax_due).yellow());
+        }
+
+        // Annual totals
+        println!("\n{} Annual Totals:", "📈".cyan().bold());
         println!(
-            "    Sales:  {}",
-            format_currency(summary.total_sales).cyan()
+            "  Total Sales:  {}",
+            format_currency(report.annual_total_sales).cyan()
         );
         println!(
-            "    Profit: {}",
-            format_currency(summary.total_profit).green()
+            "  Total Profit: {}",
+            format_currency(report.annual_total_profit).green()
         );
-        println!("    Loss:   {}", format_currency(summary.total_loss).red());
-        println!("    Tax:    {}", format_currency(summary.tax_due).yellow());
+        println!(
+            "  Total Loss:   {}",
+            format_currency(report.annual_total_loss).red()
+        );
+        println!(
+            "  {} {}\n",
+            "Total Tax:".bold(),
+            format_currency(report.annual_total_tax).yellow().bold()
+        );
+
+        // Losses to carry forward
+        if !report.losses_to_carry_forward.is_empty() {
+            println!("{} Losses to Carry Forward:", "📋".yellow().bold());
+            for (category, loss) in &report.losses_to_carry_forward {
+                println!(
+                    "  {}: {}",
+                    category.display_name(),
+                    format_currency(*loss).yellow()
+                );
+            }
+            println!();
+        }
     }
 
-    // Annual totals
-    println!("\n{} Annual Totals:", "📈".cyan().bold());
-    println!(
-        "  Total Sales:  {}",
-        format_currency(report.annual_total_sales).cyan()
-    );
-    println!(
-        "  Total Profit: {}",
-        format_currency(report.annual_total_profit).green()
-    );
-    println!(
-        "  Total Loss:   {}",
-        format_currency(report.annual_total_loss).red()
-    );
-    println!(
-        "  {} {}\n",
-        "Total Tax:".bold(),
-        format_currency(report.annual_total_tax).yellow().bold()
-    );
-
-    // Losses to carry forward
-    if !report.losses_to_carry_forward.is_empty() {
-        println!("{} Losses to Carry Forward:", "📋".yellow().bold());
-        for (category, loss) in &report.losses_to_carry_forward {
-            println!(
-                "  {}: {}",
-                category.display_name(),
-                format_currency(*loss).yellow()
-            );
+    if has_income {
+        #[derive(Tabled)]
+        struct IncomeRow {
+            #[tabled(rename = "Ticker")]
+            ticker: String,
+            #[tabled(rename = "Asset Type")]
+            asset_type: String,
+            #[tabled(rename = "Dividends (Net)")]
+            dividends: String,
+            #[tabled(rename = "JCP (Net)")]
+            jcp: String,
+            #[tabled(rename = "Total (Net)")]
+            total: String,
         }
-        println!();
+
+        let rows: Vec<IncomeRow> = income_summary
+            .iter()
+            .filter_map(|entry| {
+                let total = entry.dividends_net + entry.jcp_net;
+                if total <= Decimal::ZERO {
+                    return None;
+                }
+                Some(IncomeRow {
+                    ticker: entry.ticker.clone(),
+                    asset_type: entry.asset_type.as_str().to_string(),
+                    dividends: if entry.dividends_net > Decimal::ZERO {
+                        format_currency(entry.dividends_net)
+                    } else {
+                        "-".to_string()
+                    },
+                    jcp: if entry.jcp_net > Decimal::ZERO {
+                        format_currency(entry.jcp_net)
+                    } else {
+                        "-".to_string()
+                    },
+                    total: format_currency(total),
+                })
+            })
+            .collect();
+
+        if !rows.is_empty() {
+            let total_dividends: Decimal = income_summary.iter().map(|e| e.dividends_net).sum();
+            let total_jcp: Decimal = income_summary.iter().map(|e| e.jcp_net).sum();
+            let total_all = total_dividends + total_jcp;
+            let mut table_rows = rows;
+            table_rows.push(IncomeRow {
+                ticker: "TOTAL".to_string(),
+                asset_type: "TOTAL".to_string(),
+                dividends: format_currency(total_dividends),
+                jcp: format_currency(total_jcp),
+                total: format_currency(total_all),
+            });
+
+            println!("{} Dividends & JCP Received:", "💵".cyan().bold());
+            let mut table = Table::new(table_rows);
+            let table = table.with(Style::rounded());
+            println!("{table}");
+            println!();
+        }
     }
 
     if export_csv {
@@ -260,6 +353,60 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
     }
 
     Ok(())
+}
+
+#[derive(Clone)]
+struct IncomeByType {
+    ticker: String,
+    asset_type: db::AssetType,
+    dividends_net: rust_decimal::Decimal,
+    jcp_net: rust_decimal::Decimal,
+}
+
+fn build_income_summary(conn: &rusqlite::Connection, year: i32) -> Result<Vec<IncomeByType>> {
+    use chrono::NaiveDate;
+    use rust_decimal::Decimal;
+    use std::collections::HashMap;
+
+    let from_date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+    let to_date = NaiveDate::from_ymd_opt(year, 12, 31).unwrap();
+    let events = db::get_income_events_with_assets(conn, Some(from_date), Some(to_date), None)?;
+
+    let tracked_types = [
+        db::AssetType::Fii,
+        db::AssetType::FiInfra,
+        db::AssetType::Fiagro,
+        db::AssetType::Stock,
+        db::AssetType::Etf,
+        db::AssetType::Bdr,
+    ];
+
+    let tracked_set: std::collections::HashSet<db::AssetType> =
+        tracked_types.iter().copied().collect();
+    let mut by_ticker: HashMap<String, IncomeByType> = HashMap::new();
+    for (event, asset) in events {
+        if !tracked_set.contains(&asset.asset_type) {
+            continue;
+        }
+        let entry = by_ticker
+            .entry(asset.ticker.clone())
+            .or_insert(IncomeByType {
+                ticker: asset.ticker.clone(),
+                asset_type: asset.asset_type,
+                dividends_net: Decimal::ZERO,
+                jcp_net: Decimal::ZERO,
+            });
+        let net_amount = event.total_amount - event.withholding_tax;
+        match event.event_type {
+            db::IncomeEventType::Dividend => entry.dividends_net += net_amount,
+            db::IncomeEventType::Jcp => entry.jcp_net += net_amount,
+            _ => {}
+        }
+    }
+
+    let mut summary: Vec<IncomeByType> = by_ticker.into_values().collect();
+    summary.sort_by(|a, b| a.ticker.cmp(&b.ticker));
+    Ok(summary)
 }
 
 async fn dispatch_tax_summary(year: i32, _json_output: bool) -> Result<()> {
