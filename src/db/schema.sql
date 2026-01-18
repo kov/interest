@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
     event_date DATE NOT NULL,        -- Announcement date
     ex_date DATE NOT NULL,           -- Date adjustment takes effect
     quantity_adjustment TEXT NOT NULL, -- Share quantity to add/subtract (stored as Decimal text, sign convention: + = add, - = subtract)
-    source TEXT,                     -- 'BRAPI', 'MANUAL', 'B3', 'MOVIMENTACAO'
+    source TEXT,                     -- 'YAHOO', 'MANUAL', 'B3', 'MOVIMENTACAO'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS price_history (
     high_price DECIMAL(15,4),
     low_price DECIMAL(15,4),
     volume BIGINT,
-    source TEXT,                     -- 'YAHOO', 'BRAPI'
+    source TEXT,                     -- 'YAHOO'
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
     UNIQUE(asset_id, price_date)
@@ -263,7 +263,7 @@ CREATE TABLE IF NOT EXISTS income_events (
     total_amount DECIMAL(15,4) NOT NULL,
     withholding_tax DECIMAL(15,4) DEFAULT 0,  -- Tax withheld at source
     is_quota_pre_2026 BOOLEAN,           -- Track quota vintage for tax rules
-    source TEXT,                         -- 'BRAPI', 'CEI', 'MANUAL'
+    source TEXT,                         -- 'YAHOO', 'CEI', 'MANUAL'
     notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE

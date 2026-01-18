@@ -1,12 +1,10 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# Agent guidance
 
 ## Project Overview
 
 Interest is a dual-mode (CLI + interactive TUI) tool for tracking Brazilian B3 stock exchange investments with automatic price updates, average cost basis calculations, performance tracking, and tax reporting. Written in Rust, it handles complex Brazilian tax rules including swing trade/day trade distinctions, fund quota vintage tracking (pre/post-2026), corporate action adjustments, and historical portfolio snapshots.
 
-**Recent Evolution** (January 2026): The project has undergone a significant architectural overhaul to support both traditional CLI commands and an interactive terminal UI (TUI) mode. The TUI provides a REPL-style interface with readline support, while sharing the same business logic core with the CLI.
+The project has undergone a significant architectural overhaul to support both traditional CLI commands and an interactive terminal UI (TUI) mode. The TUI provides a REPL-style interface with readline support, while sharing the same business logic core with the CLI.
 
 ## Commands
 
@@ -104,9 +102,8 @@ src/
 │   ├── darf.rs           - DARF payment generation
 │   ├── irpf.rs           - Annual IRPF report
 │   └── loss_carryforward.rs - Loss offset tracking
-├── pricing/      - Price fetching from Yahoo Finance & Brapi.dev
-│   ├── yahoo.rs  - Yahoo Finance integration
-│   └── brapi.rs  - Brapi.dev fallback
+├── pricing/      - Price fetching from Yahoo Finance
+│   └── yahoo.rs  - Yahoo Finance integration
 ├── reports/      - Portfolio and performance reports
 │   ├── portfolio.rs - Portfolio calculation with snapshot support
 │   └── performance.rs - Performance tracking with TWR calculation
@@ -117,7 +114,7 @@ src/
 │   ├── event_loop.rs    - Event loop skeleton (TODO: full implementation)
 │   └── overlays.rs      - Overlay system (TODO: file pickers, dialogs)
 ├── scraping/     - Web scraping utilities
-│   └── investing.rs - Investing.com scraper (TODO)
+│   └── maisretorno.rs - maisretorno.com scraper
 ├── error.rs      - Custom error types
 ├── term_contracts.rs - Term contract handling
 ├── utils/        - Shared utilities
@@ -128,7 +125,6 @@ src/
 ### Data Flow
 
 1. **User Input**:
-
    - TUI Mode (default): `cargo run` → `launch_tui()` → readline REPL → `parse_command()` → `dispatch_command()`
    - CLI Mode: `cargo run -- <cmd>` → clap parsing → `main()` → legacy handlers → calls same business logic
 
@@ -187,13 +183,7 @@ CREATE TABLE corporate_action_adjustments (
 );
 ```
 
-**Why**: Prevents double-adjustment when reapplying actions. Safe to run `actions apply` multiple times.
-
-**Implementation pattern** in `corporate_actions/mod.rs`:
-
-1. Check if adjustment exists in junction table
-2. If not, apply adjustment and record it
-3. If yes, skip (already adjusted)
+**Note**: This junction table approach is from an older implementation that physically modified transactions in the database. The current system applies corporate actions at query-time during portfolio/tax calculations via `apply_forward_qty_adjustments()`, so transactions in the database stay unadjusted. See `designs/FIXEDSPLITS.md` for details.
 
 #### 3. Average Cost Basis Matching
 
@@ -212,39 +202,47 @@ Algorithm in `tax/cost_basis.rs`:
 **Asset type resolution order**: B3 CSV cache → Mais Retorno registry → Ambima scrape fallback. This is implemented in `src/tickers/mod.rs::resolve_asset_type_with_name()` and relies on the registry being populated in `asset_registry`.
 
 **Mais Retorno registry**:
+
 - Sync is shared between explicit `assets sync-maisretorno` and auto-refresh triggered by unknown asset lookups.
 - Refresh is throttled via metadata key `registry_maisretorno_refreshed_at` (24h).
 - Progress is reported via the shared spinner/progress channel when running in a TTY.
 
 **Bond name parsing (debentures)**:
+
 - Mais Retorno list entries for debentures use a full name like `ELET23 - DEBENTURE ...`.
 - We split on `" - "` and store:
   - `ticker`: prefix (e.g., `ELET23`)
   - `name`: remainder (full debenture name + maturity)
 
 **Tesouro Direto synthetic tickers**:
+
 - Synthetic ticker is derived from name via `src/tesouro.rs::ticker_from_name()`.
 - Normalization drops month components like `01/2005` → `2005`.
 - Example: `Tesouro Prefixado 01/2005` → `TESOURO_PREFIXADO_2005`.
 
 **Critical**: Process transactions in chronological order (`ORDER BY trade_date ASC`).
 
-#### 4. Auto-Adjustment of Manual Transactions
+#### 4. Query-Time Corporate Action Application
 
-When user adds historical transaction in `handle_transaction_add()`:
+**Current implementation:** Corporate actions are applied during calculations (portfolio, tax, performance), not when transactions are added.
+
+**How it works:**
 
 ```rust
-// 1. Insert transaction with original values
-db::insert_transaction(&conn, &transaction)?;
-
-// 2. Find corporate actions that occurred AFTER this trade
-// 3. Apply them in chronological order
-let actions_applied = corporate_actions::apply_actions_to_transaction(&conn, tx_id)?;
-
-// 4. User sees: "Auto-applied 2 corporate action(s)"
+// When calculating portfolio (src/reports/portfolio.rs):
+// 1. Load transactions in chronological order
+// 2. Load corporate actions for the asset
+// 3. For each transaction date, apply forward adjustments:
+crate::corporate_actions::apply_forward_qty_adjustments(
+    &mut position.quantity,
+    &actions,
+    &mut action_idx,
+    tx.trade_date,
+);
+// 4. Database transactions stay unchanged
 ```
 
-**User experience**: Enter original pre-split quantities; system handles adjustments automatically.
+**User experience**: Enter original pre-split quantities. When viewing portfolio or generating reports, the system automatically applies adjustments on-the-fly. No manual "apply" step needed.
 
 #### 5. Import Format Auto-Detection
 
@@ -553,7 +551,8 @@ cargo test --test generate_test_files         # Generate fixtures (use --ignored
 - Example: a 1:2 split is stored as `quantity_adjustment = 50` when the pre-split position was 50 → post-split 100. The model applies the absolute adjustment forward-only from the ex-date.
 - Total cost is preserved: new quantity increases, average price decreases proportionally (cost unchanged).
 - Rationale: Brazilian tax flows use average-cost basis (not FIFO). Fixed absolute adjustments match what CEI/Movimentação exports provide and keep average-cost math correct for tax and portfolio.
-- Query-time application: database transactions stay unadjusted; forward-only adjustments are applied when calculating portfolio, performance, and tax, ensuring idempotency and no double-application.
+- **Query-time application**: Database transactions stay unadjusted. Forward-only adjustments are applied during portfolio/tax/performance calculations via `apply_forward_qty_adjustments()`, ensuring idempotency and no double-application.
+- See `designs/FIXEDSPLITS.md` for the design rationale behind this approach.
 
 ## TUI Development Workflow
 
@@ -694,7 +693,6 @@ Add more indexes if queries become slow (use `EXPLAIN QUERY PLAN`).
 ### Price APIs
 
 1. **Yahoo Finance**: Primary, `ticker.SA` format (e.g., `PETR4.SA`)
-2. **Brapi.dev**: Fallback, Brazilian focus, **no BDR corporate actions**
 
 Rate limiting handled by client code (no auth tokens needed as of 2026).
 

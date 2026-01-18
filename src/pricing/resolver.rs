@@ -2,7 +2,7 @@
 //!
 //! This module automatically resolves missing price data by:
 //! 1. Detecting gaps in price_history table
-//! 2. Choosing optimal strategy (B3 COTAHIST bulk vs Yahoo/Brapi API)
+//! 2. Choosing optimal strategy (B3 COTAHIST bulk vs Yahoo API)
 //! 3. Downloading and importing data
 //! 4. Gracefully handling failures with degraded service
 //!
@@ -261,7 +261,7 @@ where
                     need_update_assets.len()
                 )));
                 tracing::info!(
-                    "Fetching current prices for {} assets from Yahoo/Brapi",
+                    "Fetching current prices for {} assets from Yahoo",
                     need_update_assets.len()
                 );
                 fetch_current_prices_with_progress(conn, &need_update_assets, progress).await?;
@@ -290,7 +290,7 @@ where
                 priceable_assets.len()
             )));
             tracing::info!(
-                "Fetching current prices for {} assets from Yahoo/Brapi",
+                "Fetching current prices for {} assets from Yahoo",
                 priceable_assets.len()
             );
             fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
@@ -457,7 +457,7 @@ where
         }
     }
 
-    // Filter out assets that we know don't have prices available from Yahoo/Brapi
+    // Filter out assets that we know don't have prices available from Yahoo
     // (bonds, government bonds - these need different pricing sources)
     let priceable_assets: Vec<Asset> = need_current_prices_assets
         .into_iter()
@@ -471,7 +471,7 @@ where
             priceable_assets.len()
         )));
         tracing::info!(
-            "Fetching current prices for {} assets from Yahoo/Brapi",
+            "Fetching current prices for {} assets from Yahoo",
             priceable_assets.len()
         );
         fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
@@ -494,7 +494,7 @@ async fn import_gov_bond_prices(
     .map_err(|err| anyhow!("Failed to import Tesouro prices: {}", err))?
 }
 
-/// Check if an asset can be priced via Yahoo Finance or Brapi.dev APIs.
+/// Check if an asset can be priced via Yahoo Finance APIs.
 /// Bonds and government bonds need different pricing sources (not yet implemented).
 /// FIXME: this is a hack that should be mostly fixed by parsing asset types properly.
 pub(crate) fn is_priceable_asset(asset: &Asset) -> bool {

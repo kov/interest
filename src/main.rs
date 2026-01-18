@@ -17,8 +17,7 @@ mod utils;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    runner, ActionCommands, Cli, Commands, InconsistenciesCommands, PriceCommands, TaxCommands,
-    TransactionCommands,
+    runner, Cli, Commands, InconsistenciesCommands, PriceCommands, TaxCommands, TransactionCommands,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -104,19 +103,6 @@ async fn main() -> Result<()> {
                     PriceCommands::History { ticker, from, to } => {
                         handle_price_history(&ticker, &from, &to).await
                     }
-                },
-
-                Commands::Actions { action } => match action {
-                    ActionCommands::Scrape {
-                        ticker,
-                        url,
-                        name,
-                        save,
-                    } => handle_action_scrape(&ticker, url.as_deref(), name.as_deref(), save).await,
-                    ActionCommands::Update => handle_actions_update().await,
-                    _ => Err(anyhow::anyhow!(
-                        "Action command should be handled by the shared dispatcher"
-                    )),
                 },
 
                 Commands::Transactions { action } => match action {
@@ -994,7 +980,7 @@ async fn handle_price_update() -> Result<()> {
                     high_price: None,
                     low_price: None,
                     volume: None,
-                    source: "YAHOO/BRAPI".to_string(),
+                    source: "YAHOO".to_string(),
                     created_at: chrono::Utc::now(),
                 };
 
@@ -1112,240 +1098,6 @@ async fn handle_price_history(ticker: &str, from: &str, to: &str) -> Result<()> 
         "✓".green().bold(),
         prices.len()
     );
-
-    Ok(())
-}
-
-/// Handle corporate actions update
-async fn handle_actions_update() -> Result<()> {
-    use colored::Colorize;
-
-    info!("Updating corporate actions");
-
-    // Initialize database
-    db::init_database(None)?;
-    let conn = db::open_db(None)?;
-
-    // Get all assets
-    let assets = db::get_all_assets(&conn)?;
-
-    if assets.is_empty() {
-        println!("{} No assets found in database", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    println!(
-        "\n{} Fetching corporate actions for {} assets\n",
-        "→".cyan().bold(),
-        assets.len()
-    );
-
-    let mut total_actions = 0;
-    let mut total_events = 0;
-
-    for asset in &assets {
-        print!("  {} {}... ", asset.ticker, "→".cyan());
-
-        match pricing::brapi::fetch_quote(&asset.ticker, true).await {
-            Ok((_price, actions_opt, events_opt)) => {
-                let mut count = 0;
-
-                // Store corporate actions
-                if let Some(actions) = actions_opt {
-                    for brapi_action in actions {
-                        // Quantity-based model cannot infer absolute adjustments from ratios without holdings
-                        // Store as zero adjustment for now (placeholder)
-                        let action = db::CorporateAction {
-                            id: None,
-                            asset_id: asset.id.unwrap(),
-                            action_type: brapi_action.action_type,
-                            event_date: brapi_action.approved_date,
-                            ex_date: brapi_action.ex_date,
-                            quantity_adjustment: rust_decimal::Decimal::ZERO,
-                            source: "BRAPI".to_string(),
-                            notes: brapi_action.remarks,
-                            created_at: chrono::Utc::now(),
-                        };
-
-                        db::insert_corporate_action(&conn, &action)?;
-                        count += 1;
-                    }
-                    total_actions += count;
-                }
-
-                // Store income events
-                if let Some(events) = events_opt {
-                    for brapi_event in events {
-                        let event_type = brapi_event
-                            .event_type
-                            .parse::<db::IncomeEventType>()
-                            .unwrap_or(db::IncomeEventType::Dividend);
-
-                        let event = db::IncomeEvent {
-                            id: None,
-                            asset_id: asset.id.unwrap(),
-                            event_date: brapi_event.payment_date,
-                            ex_date: brapi_event.ex_date,
-                            event_type,
-                            amount_per_quota: brapi_event.amount,
-                            total_amount: brapi_event.amount, // Will be calculated based on holdings
-                            withholding_tax: rust_decimal::Decimal::ZERO,
-                            is_quota_pre_2026: None,
-                            source: "BRAPI".to_string(),
-                            notes: brapi_event.remarks,
-                            created_at: chrono::Utc::now(),
-                        };
-
-                        db::insert_income_event(&conn, &event)?;
-                        total_events += 1;
-                    }
-                }
-
-                if count > 0 {
-                    println!("{} {} actions", "✓".green(), count);
-                } else {
-                    println!("{}", "✓".green());
-                }
-            }
-            Err(e) => {
-                println!("{} {}", "✗".red(), e);
-            }
-        }
-    }
-
-    println!(
-        "\n{} Corporate actions update complete!",
-        "✓".green().bold()
-    );
-    println!("  Actions: {}", total_actions.to_string().green());
-    println!("  Events: {}", total_events.to_string().green());
-
-    Ok(())
-}
-
-/// Handle scrape corporate actions from investing.com
-async fn handle_action_scrape(
-    ticker: &str,
-    url: Option<&str>,
-    name: Option<&str>,
-    save: bool,
-) -> Result<()> {
-    use anyhow::Context;
-    use colored::Colorize;
-
-    info!(
-        "Scraping corporate actions for {} from investing.com",
-        ticker
-    );
-
-    // Initialize database to get asset info
-    db::init_database(None)?;
-    let conn = db::open_db(None)?;
-
-    // Get or create asset
-    let asset_type = db::AssetType::Unknown;
-    let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
-
-    // Determine URL
-    let scrape_url = if let Some(u) = url {
-        u.to_string()
-    } else {
-        // Build URL automatically using provided name or fallback to ticker
-        let company_name = if let Some(n) = name {
-            // Save provided name to database for future use
-            conn.execute(
-                "UPDATE assets SET name = ?1 WHERE id = ?2",
-                rusqlite::params![n, asset_id],
-            )?;
-            n.to_string()
-        } else {
-            // Fallback: use ticker as company name
-            ticker.to_string()
-        };
-
-        let auto_url = crate::scraping::InvestingScraper::build_splits_url(ticker, &company_name);
-        println!("{} Auto-built URL from company name:", "🔗".cyan().bold());
-        println!("  {}", auto_url.dimmed());
-        println!("  If this URL is incorrect, provide the correct one with --url\n");
-        auto_url
-    };
-
-    println!(
-        "\n{} Launching headless browser to scrape: {}",
-        "🌐".cyan().bold(),
-        scrape_url
-    );
-    println!("  This may take 10-30 seconds to bypass Cloudflare...\n");
-
-    // Create scraper and fetch data
-    let scraper = crate::scraping::InvestingScraper::new()
-        .context("Failed to create scraper. Ensure Chrome/Chromium is installed.")?;
-
-    let mut actions = scraper
-        .scrape_corporate_actions(&scrape_url, &scrape_url)
-        .context("Failed to scrape corporate actions")?;
-
-    if actions.is_empty() {
-        println!(
-            "{} No corporate actions found on the page",
-            "ℹ".yellow().bold()
-        );
-        return Ok(());
-    }
-
-    // Set asset_id for all actions
-    for action in &mut actions {
-        action.asset_id = asset_id;
-    }
-
-    // Display scraped actions
-    println!(
-        "{} Found {} corporate action(s):\n",
-        "✓".green().bold(),
-        actions.len()
-    );
-
-    for action in &actions {
-        println!(
-            "  {} {} ({} shares) on {}",
-            match action.action_type {
-                db::CorporateActionType::Split => "📈",
-                db::CorporateActionType::ReverseSplit => "📉",
-                db::CorporateActionType::Bonus => "🎁",
-                db::CorporateActionType::CapitalReturn => "💰",
-            },
-            action.action_type.as_str().cyan(),
-            action.quantity_adjustment,
-            action.ex_date.format("%Y-%m-%d")
-        );
-    }
-
-    if save {
-        println!("\n{} Saving to database...", "💾".cyan().bold());
-
-        let mut saved_count = 0;
-
-        for action in actions {
-            db::insert_corporate_action(&conn, &action)?;
-            saved_count += 1;
-        }
-
-        println!("\n{} Saved {} action(s)", "✓".green().bold(), saved_count);
-
-        if saved_count > 0 {
-            println!(
-                "\n{} Run this command to apply the actions:",
-                "→".blue().bold()
-            );
-            println!("  interest actions apply {}", ticker);
-        }
-    } else {
-        println!(
-            "\n{} Actions not saved. Use --save flag to save to database",
-            "ℹ".blue().bold()
-        );
-    }
-    println!();
 
     Ok(())
 }

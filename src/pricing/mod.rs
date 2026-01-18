@@ -1,6 +1,5 @@
-// Pricing module - Yahoo Finance and Brapi.dev API clients
+// Pricing module - Yahoo Finance API client
 
-pub mod brapi;
 pub mod resolver;
 pub mod tesouro;
 pub mod yahoo;
@@ -63,40 +62,20 @@ impl PriceFetcher {
 
         // Fetch from Yahoo Finance (primary)
         info!("Fetching fresh price for {} from Yahoo Finance", ticker);
-        let price_data = yahoo::fetch_current_price(ticker).await;
+        let price_data = yahoo::fetch_current_price(ticker)
+            .await
+            .context("Yahoo Finance price fetch failed")?;
 
-        match price_data {
-            Ok(data) => {
-                // Cache the price
-                let mut cache = self.cache.lock().unwrap();
-                cache.insert(
-                    ticker.to_string(),
-                    CacheEntry {
-                        price: data.price,
-                        timestamp: Utc::now(),
-                    },
-                );
-                Ok(data.price)
-            }
-            Err(e) => {
-                // Fallback to Brapi.dev
-                info!("Yahoo Finance failed, trying Brapi.dev: {}", e);
-                let (brapi_data, _, _) = brapi::fetch_quote(ticker, false)
-                    .await
-                    .context("Both Yahoo Finance and Brapi.dev failed")?;
-
-                // Cache the price
-                let mut cache = self.cache.lock().unwrap();
-                cache.insert(
-                    ticker.to_string(),
-                    CacheEntry {
-                        price: brapi_data.price,
-                        timestamp: Utc::now(),
-                    },
-                );
-                Ok(brapi_data.price)
-            }
-        }
+        // Cache the price
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(
+            ticker.to_string(),
+            CacheEntry {
+                price: price_data.price,
+                timestamp: Utc::now(),
+            },
+        );
+        Ok(price_data.price)
     }
 
     /// Clear cache

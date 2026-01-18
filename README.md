@@ -1,665 +1,934 @@
 # Interest - Brazilian B3 Investment Tracker
 
-A command-line tool for tracking Brazilian stock exchange investments (B3) with automatic price updates, performance analysis, and tax calculations.
+A command-line tool for tracking investments on the Brazilian B3 stock exchange. Interest handles your complete investment workflow: import transactions from B3 exports, track your portfolio in real-time, calculate performance metrics, manage corporate actions (splits, renames, spin-offs), and generate accurate tax reports following Brazilian IRPF rules.
 
-## Features
+**Key Features:**
+- 📊 Real-time portfolio tracking with automatic price updates
+- 📈 Performance analytics (MTD, QTD, YTD, custom periods)
+- 💰 Income tracking (dividends, JCP, amortization)
+- 🧾 Brazilian tax calculations (swing trade, day trade, IRPF reports)
+- 🔄 Corporate action management (splits, renames, mergers, spin-offs)
+- 📥 Import from B3/CEI Excel exports (Negociação, Movimentação, IRPF PDFs)
+- 🎯 Interactive TUI with command history and tab completion
 
-### ✅ Implemented
+**Target Audience:** Brazilian investors trading on B3 who need accurate cost basis tracking and tax reporting.
 
-- **Transaction Import**: Import from B3/CEI Excel/CSV exports
-- **Manual Transaction Entry**: Add buy/sell transactions manually with auto-adjustment
-- **Portfolio Tracking**: Real-time portfolio with P&L calculations using average cost
-- **Price Updates**: Fetch current prices from Yahoo Finance and Brapi.dev
-- **Corporate Actions**: Manual entry and automatic adjustment of splits/reverse splits/bonuses
-- **Idempotent Application**: Safe to reapply corporate actions without double-adjustment
-- **Auto-Adjustment**: New historical transactions automatically adjusted for splits
-- **Average Cost Basis**: Accurate cost basis calculations for tax purposes
-- **Tax Calculations**: Swing trade tax calculations (15% on net profit)
-- **Asset Types**: Stocks, Real Estate Funds (FII), Agribusiness Funds (FIAGRO), Infrastructure Funds (FI-INFRA)
-
-### 🚧 Planned (See TODO)
-
-- Day trade tax calculations (20%)
-- IRPF annual report generation
-- Dividend/income tracking with amortization
-- Historical price fetching
-- Headless browser for web scraping corporate actions from investing.com
-- Import from movimentacao files
-- IRPF PDF import for pre-CEI data
+---
 
 ## Installation
 
 ### Prerequisites
 
-- Rust 1.70+ (for building from source)
-- SQLite 3.x (for database)
+- **Rust 1.70+** for building from source ([Install Rust](https://rustup.rs/))
+- **SQLite 3.x** (usually pre-installed on Linux/macOS)
 
 ### Building
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/your-username/interest
 cd interest
 cargo build --release
 ```
 
-The binary will be at `target/release/interest`.
+The compiled binary will be at `./target/release/interest`.
 
-## Quick Start
+### Quick Test
 
 ```bash
-# 1. Import transactions from CEI export
-interest import negociacao-2026-01-01.xlsx
+# Launch interactive mode
+./target/release/interest
 
-# 2. View your portfolio
+# Or test a command
+./target/release/interest help
+```
+
+---
+
+## Getting Started: Complete Setup Workflow
+
+Follow these 6 steps to set up Interest with your investment data. This workflow handles the common case where you have pre-2020 positions (before B3's complete digital records began).
+
+### Step 1: Add Opening Balances
+
+**Why:** B3's "Negociação" exports only have complete data from 2020 onwards. For any positions you held before 2020, you'll need to add opening balances manually.
+
+**Choose a reference date:** Pick a date in 2019 (e.g., `2019-12-31`) and use it consistently for all opening balances.
+
+**Add your positions:**
+```bash
+# Syntax: interest transactions add <TICKER> buy <QUANTITY> <PRICE> <DATE>
+
+# Example: Add opening balances for stocks and FIIs
+interest transactions add PETR4 buy 200 28.50 2019-12-31
+interest transactions add VALE3 buy 150 52.30 2019-12-31
+interest transactions add XPLG11 buy 50 120.00 2019-12-31
+interest transactions add HGLG11 buy 75 135.50 2019-12-31
+```
+
+**Attention:** the price should be your average purchase price, not the market price.
+
+### Step 2: Export Data from B3
+
+**Navigate to B3 Investor Portal:**
+1. Go to https://www.investidor.b3.com.br/
+2. Log in with your CPF and password
+3. Go to **"Extratos e Informativos"** → **"Negociação de Ativos"**
+
+**Export both files:**
+
+**File 1: Negociação de Ativos** (Trades)
+- Set date range: From your opening balance date (e.g., 2020-01-01) to today
+- Click **"Exportar"** and choose **Excel** format
+- Save - let's call this `negociacao.xlsx`
+
+**File 2: Movimentação** (Corporate Actions & Income)
+- Go to **"Extratos e Informativos"** → **"Movimentação"**
+- Set the same date range
+- Click **"Exportar"** and choose **Excel** format
+- Save - let's call this `movimentacao.xlsx`
+
+### Step 3: Import Negociação (Trades)
+
+Import your trades first to establish your transaction history.
+
+**Preview first (recommended):**
+```bash
+interest import negociacao.xlsx --dry-run
+```
+
+This shows what would be imported without actually saving anything.
+
+**Import for real:**
+```bash
+interest import negociacao.xlsx
+```
+
+**What gets imported:**
+- All buy/sell transactions
+- Trade dates and settlement dates
+- Fees and brokerage costs
+- Asset types (auto-detected from ticker suffixes)
+
+**Duplicate detection:** The tool automatically skips duplicate transactions, so it's safe to re-import the same file.
+
+### Step 4: Import Movimentação (Corporate Events)
+
+Now import corporate actions, dividends, and other events.
+
+```bash
+interest import movimentacao.xlsx
+```
+
+**What gets imported:**
+- Dividends and JCP (Juros sobre Capital Próprio)
+- Stock splits and bonuses
+- Subscription rights and conversions
+- Transfers and other corporate events
+
+**Note:** Some events (like subscription conversions without cost basis) may create **inconsistencies** that you'll need to resolve in the next step.
+
+### Step 5: Resolve Inconsistencies
+
+Some imported events may have missing information. Interest tracks these as "inconsistencies" that you can resolve interactively.
+
+**Resolve with guided experience (recommended):**
+```bash
+interest inconsistencies resolve
+```
+
+The tool will prompt you interactively for required fields (price, fees, dates, etc.). This is easier than trying to guess which fields are needed.
+
+**Check for open issues:**
+```bash
+interest inconsistencies list --open
+```
+
+**Common issue types:**
+- **MissingCostBasis**: Subscription conversions where the original cost isn't in the B3 export
+- **MissingPurchaseHistory**: Sales without matching purchase records (usually pre-2020 positions)
+- **InvalidTicker**: Tickers that couldn't be auto-detected
+
+**View details for a specific issue:**
+```bash
+interest inconsistencies show 42
+```
+
+**Advanced: Set fields directly if you know what's needed:**
+```bash
+interest inconsistencies resolve 42 --set price_per_unit=18.75 --set fees=5.00
+```
+
+**Ignore if not relevant:**
+```bash
+interest inconsistencies ignore 42 --reason "Duplicate entry from old statement"
+```
+
+### Step 6: Add Corporate Actions Manually (If Needed)
+
+**Good news:** Most corporate actions are automatically imported from B3 Movimentação files. You typically only need to add corporate actions manually for **rare events** that B3 doesn't track well.
+
+**Common cases requiring manual entry:**
+
+**Ticker Renames:**
+```bash
+# Via Varejo became Casas Bahia and changed ticker from VIIA3 to BHIA3
+interest actions rename add VIIA3 BHIA3 2023-01-15
+```
+
+**Spin-offs:**
+```bash
+# GPA (Pão de Açúcar) spun off Assaí as a separate company
+# You need to specify how many ASAI3 shares you got and allocate cost (value per share * number of shares)
+interest actions spinoff add PCAR3 ASAI3 2021-03-01 100 5000
+```
+
+**Mergers:**
+```bash
+# B2W (BTOW3) and Americanas (AMER3) merged into Lojas Americanas (LAME3)
+# You need to specify how many LAME3 shares you got and allocate cost (value per share * number of shares)
+interest actions merger add BTOW3 LAME3 2021-05-01 200 12000
+interest actions merger add AMER3 LAME3 2021-05-01 150 8000
+```
+
+**Verify:**
+```bash
+interest actions rename list
+interest actions spinoff list
+interest actions merger list
+```
+
+---
+
+## Daily Operations
+
+### View Your Portfolio
+
+**Full portfolio with current prices:**
+```bash
 interest portfolio show
-
-# 3. Add a corporate action (if needed)
-interest actions add A1MD34 reverse-split 10:1 2022-11-22 --notes "From investing.com"
-interest actions apply A1MD34
-
-# 4. Add a missing historical transaction (enter original pre-split values)
-interest transactions add A1MD34 buy 1000 50 2020-01-15 --notes "Pre-CEI purchase"
-# → Auto-adjusted to 100 @ R$500 based on the 10:1 reverse split
-
-# 5. Update prices
-interest prices update
 ```
 
-### Formatting & Color Output
+**Filter by asset type:**
+```bash
+interest portfolio show --asset-type fii
+interest portfolio show --asset-type stock
+interest portfolio show --asset-type fiagro
+```
 
-- Use `--no-color` to disable ANSI colors (useful for piping).
-- Colors are disabled automatically when output is piped.
+**Historical snapshot (portfolio as of a specific date):**
+```bash
+interest portfolio show --at 2024-12-31
+interest portfolio show --at 2024-06
+interest portfolio show --at 2023
+```
 
-## Database
+The output includes:
+- Current quantity and average cost basis
+- Current market price
+- Position value and unrealized P&L (amount and %)
+- Total portfolio value and summary by asset type
 
-**Location:** `~/.interest/data.db` (SQLite database)
+### Check Performance
 
-### Schema Overview
+**Common time periods:**
+```bash
+# Year-to-date
+interest performance show YTD
 
-**Core Tables:**
+# Month-to-date
+interest performance show MTD
 
-- `assets` - Ticker definitions (ticker, asset_type, name)
-- `transactions` - Buy/sell records with average cost tracking
-- `corporate_actions` - Splits, reverse splits, bonuses
-- `corporate_action_adjustments` - **Junction table** tracking which transactions were adjusted
-- `price_history` - Daily OHLCV price data
-- `positions` - Current holdings (cached for performance)
-- `tax_events` - Monthly tax calculations
-- `income_events` - Dividends, amortization, JCP
+# Quarter-to-date
+interest performance show QTD
 
-### Key Design Decisions
+# Last 12 months
+interest performance show 1Y
 
-1. **Decimal Precision**
+# All time (since first transaction)
+interest performance show ALL
 
-   - All monetary values stored as TEXT (Decimal strings) for exact precision
-   - Never use floating point (`f64`) for financial calculations
-   - SQLite type affinity handled with `ValueRef` pattern matching
+# Specific year
+interest performance show 2024
+```
 
-2. **Corporate Action Tracking**
+**Custom date range:**
+```bash
+interest performance show 2024-01-01:2024-12-31
+interest performance show 2024-06:2024-12
+```
 
-   - Junction table prevents double-adjustment
-   - Tracks: action_id, transaction_id, old/new quantity/price
-   - Enables idempotent application
+Performance metrics include Time-Weighted Return (TWR), absolute gains, and breakdown by asset type.
 
-3. **Foreign Keys**
+### View Income (Dividends & JCP)
 
-   - Enabled for referential integrity
-   - Cascading deletes where appropriate
+**Summary by asset:**
+```bash
+interest income show
+interest income show 2024
+```
 
-4. **Indexes**
-   - On all frequently queried columns (asset_id, trade_date, ticker)
-   - Composite indexes for common join patterns
+**Detailed events for a year:**
+```bash
+interest income detail 2024
+```
 
-## Commands
+**Filter by specific asset:**
+```bash
+interest income detail 2024 --asset XPLG11
+```
 
-### Import
+**Monthly breakdown:**
+```bash
+# Monthly totals for a year
+interest income summary 2024
+
+# All years
+interest income summary
+```
+
+### Generate Tax Reports
+
+**Annual IRPF report:**
+```bash
+interest tax report 2024
+```
+
+This generates a complete report including:
+- Monthly swing trade tax calculations
+- Loss carryforward tracking
+- Bens e Direitos (assets held on Dec 31)
+- Income received (dividends, JCP)
+- Transactions summary
+
+**Export to CSV for spreadsheet import:**
+```bash
+interest tax report 2024 --export
+```
+
+**Quick summary (condensed view):**
+```bash
+interest tax summary 2024
+```
+
+---
+
+## Common Operations
+
+### Manage Assets
+
+**List all assets:**
+```bash
+interest assets list
+```
+
+**Filter by type:**
+```bash
+interest assets list --type fii
+interest assets list --type stock
+interest assets list --type bdr
+```
+
+**Show details for a specific asset:**
+```bash
+interest assets show PETR4
+```
+
+**Set or update asset type:**
+```bash
+interest assets set-type XPLG11 fii
+```
+
+**Set or update asset name:**
+```bash
+interest assets set-name XPLG11 "XP Logística FII"
+```
+
+**Sync with Mais Retorno registry:**
+
+This is usually performed automatically for you as needed.
 
 ```bash
-# Import from Excel/CSV
-interest import <file.xlsx>
+# Preview what would be synced
+interest assets sync-maisretorno --dry-run
 
-# Dry run (preview without saving)
-interest import <file.xlsx> --dry-run
+# Actually sync
+interest assets sync-maisretorno
+
+# Sync only specific asset type
+interest assets sync-maisretorno --type fii
 ```
 
-**Supported formats:**
+### Update Ticker Registry
 
-- B3/CEI "Negociação de Ativos" Excel exports
-- CSV exports from CEI
+The ticker registry caches metadata about B3 tickers (asset types, names). It refreshes automatically if needed, but you can manually update it.
 
-**Duplicate detection:** Automatically skips duplicate transactions based on `(asset_id, trade_date, transaction_type, quantity)`.
+**Check cache status:**
+```bash
+interest tickers status
+```
 
-### Manual Transactions
+**Force refresh:**
+```bash
+interest tickers refresh --force
+```
+
+**List unknown tickers:**
+```bash
+interest tickers list-unknown
+```
+
+**Manually resolve a ticker:**
+```bash
+interest tickers resolve XPTO11 --type fii
+```
+
+### Import Historical Prices (B3 COTAHIST)
+
+For accurate historical performance calculations, complete price history is imported on demand from B3's COTAHIST files and cached (see relevant directories at the bottom). You can also manage that manually.
+
+**Import specific year:**
+```bash
+interest prices import-b3 2024
+```
+
+The tool downloads the COTAHIST file from B3 and imports all daily prices.
+
+**Import from local file:**
+```bash
+interest prices import-b3-file ~/Downloads/COTAHIST_A2024.ZIP
+```
+
+**Clear cached price data:**
+```bash
+interest prices clear-cache 2024
+```
+
+---
+
+## Corporate Actions Reference
+
+Quick reference for all corporate action types. Remember: most splits are imported automatically from B3 Movimentação files, so manual entry is typically only needed for renames, spin-offs, and mergers.
+
+### Splits & Reverse-Splits
+
+**Add a split (quantity increases):**
+```bash
+# Add 100 shares per share held
+interest actions split add PETR4 100 2022-03-15
+```
+
+**Add a reverse-split (quantity decreases):**
+```bash
+# 10:1 reverse split (1000 shares become 100, so -900 adjustment)
+interest actions split add A1MD34 -900 2022-11-22
+```
+
+**List all splits:**
+```bash
+interest actions split list
+```
+
+**List splits for specific ticker:**
+```bash
+interest actions split list PETR4
+```
+
+**Remove a split:**
+```bash
+interest actions split remove 5
+```
+
+### Renames
+
+**Add a ticker rename:**
+```bash
+interest actions rename add VIIA3 BHIA3 2023-01-15
+```
+
+**List all renames:**
+```bash
+interest actions rename list
+```
+
+**List renames for specific ticker:**
+```bash
+interest actions rename list VIIA3
+```
+
+**Remove a rename:**
+```bash
+interest actions rename remove 3
+```
+
+### Bonuses
+
+**Add bonus shares:**
+```bash
+# 10% bonus (50 additional shares per 100 held)
+interest actions bonus add ITSA4 50 2023-05-10 --notes "10% bonus declared"
+```
+
+**List bonuses:**
+```bash
+interest actions bonus list
+interest actions bonus list ITSA4
+```
+
+**Remove a bonus:**
+```bash
+interest actions bonus remove 7
+```
+
+### Spin-offs & Mergers
+
+**Add a spin-off (company splits into two entities):**
+```bash
+# Syntax: spinoff add <FROM> <TO> <DATE> <QUANTITY> <ALLOCATED_COST>
+interest actions spinoff add PCAR3 ASAI3 2021-03-01 100 5000 --notes "Assaí spin-off"
+
+# Optional: add cash component
+interest actions spinoff add PCAR3 ASAI3 2021-03-01 100 5000 --cash 250.00
+```
+
+**Add a merger (two companies combine):**
+```bash
+# Syntax: merger add <FROM> <TO> <DATE> <QUANTITY> <ALLOCATED_COST>
+interest actions merger add BTOW3 LAME3 2021-05-01 200 12000 --notes "B2W merger"
+interest actions merger add AMER3 LAME3 2021-05-01 150 8000 --notes "Americanas merger"
+
+# Optional: add cash component
+interest actions merger add BTOW3 LAME3 2021-05-01 200 12000 --cash 500.00
+```
+
+**List spin-offs and mergers:**
+```bash
+interest actions spinoff list
+interest actions merger list
+
+# Filter by ticker
+interest actions spinoff list PCAR3
+interest actions merger list BTOW3
+```
+
+**Remove:**
+```bash
+interest actions spinoff remove 8
+interest actions merger remove 9
+```
+
+### How Corporate Actions Work
+
+Corporate actions are applied **automatically** during portfolio and tax calculations. When you view your portfolio or generate a tax report, the system:
+
+1. Reads your transactions from the database (unchanged)
+2. Applies split/rename/merger adjustments in chronological order
+3. Shows you the adjusted quantities and prices
+
+**Key benefits:**
+- No separate "apply" step needed - just add the action and it works
+- Database transactions stay unchanged (easier to debug and audit)
+- No risk of double-adjustment bugs
+- Automatic recalculation whenever you view reports
+
+---
+
+## Files & Directories
+
+### Database Location
+
+```
+~/.interest/data.db
+```
+
+This SQLite database contains all your data:
+- Transactions (buys, sells)
+- Assets (tickers, types, names)
+- Corporate actions (splits, renames, mergers)
+- Price history
+- Income events (dividends, JCP)
+- Portfolio snapshots
+- Tax calculations
+
+**Backup your database regularly:**
+```bash
+# Create timestamped backup
+cp ~/.interest/data.db ~/.interest/data.db.backup-$(date +%Y%m%d)
+
+# Before major changes (reimport, bulk edits)
+cp ~/.interest/data.db ~/.interest/data.db.backup-pre-import
+```
+
+**Inspect with SQLite CLI:**
+```bash
+sqlite3 ~/.interest/data.db "SELECT * FROM assets LIMIT 10"
+sqlite3 ~/.interest/data.db "SELECT * FROM transactions ORDER BY trade_date DESC LIMIT 20"
+sqlite3 ~/.interest/data.db "SELECT ticker, quantity, trade_date FROM transactions WHERE ticker = 'PETR4'"
+```
+
+### Cache Directories
+
+Cache location varies by operating system (following XDG standards via the `dir_spec` crate):
+
+- **Linux**: `~/.cache/interest/`
+- **macOS**: `~/Library/Caches/interest/`
+- **Windows**: `%LOCALAPPDATA%\interest\cache\`
+
+**Cache subdirectories:**
+- `tickers/` - B3 ticker registry (CSV from B3 website, refreshed daily)
+- `cotahist/` - B3 historical price data (yearly COTAHIST ZIP files)
+- `tesouro/` - Tesouro Direto bond pricing data
+
+**Clearing cache:**
+It's safe to delete cache directories at any time. Data will be re-downloaded automatically when needed.
 
 ```bash
-interest transactions add <ticker> <buy|sell> <quantity> <price> <date> [OPTIONS]
+# Linux
+rm -rf ~/.cache/interest/
 
-Options:
-  --fees <amount>    Transaction fees/brokerage (default: 0)
-  --notes <text>     Optional notes about the transaction
+# macOS
+rm -rf ~/Library/Caches/interest/
 
-Examples:
-  # Simple purchase
-  interest transactions add PETR4 buy 100 25.50 2018-06-15
-
-  # With fees and notes
-  interest transactions add MXRF11 sell 50 120.00 2023-08-20 --fees 5.00 --notes "Partial exit"
-
-  # Pre-split purchase (will be auto-adjusted if split exists)
-  interest transactions add A1MD34 buy 1000 50 2020-01-15
-  # → Automatically adjusted to 100 @ R$500 if 10:1 reverse split was applied
+# Windows PowerShell
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\interest\cache"
 ```
 
-**Important:** When adding historical transactions:
+**Reference:** See https://docs.rs/dir_spec/latest/dir_spec/fn.cache_home.html for details on platform-specific cache paths.
 
-- **Enter the original quantities and prices** (as you remember them)
-- The system automatically applies any corporate actions that occurred after the trade date
-- No need to calculate post-split values yourself
-
-### Corporate Actions
-
-```bash
-interest actions add <ticker> <type> <ratio> <ex-date> [--notes <text>]
-
-Types:
-  split           Stock split (e.g., 1:2 means each share becomes 2)
-  reverse-split   Reverse split (e.g., 10:1 means 10 shares become 1)
-  bonus           Bonus shares (e.g., 10:11 means 10% bonus)
-
-Examples:
-  # Regular split (1 share becomes 2)
-  interest actions add PETR4 split 1:2 2022-03-15
-
-  # Reverse split (10 shares become 1)
-  interest actions add A1MD34 reverse-split 10:1 2022-11-22 --notes "From investing.com"
-
-  # Bonus shares (10% increase)
-  interest actions add ITSA4 bonus 10:11 2023-05-10
-
-# Apply corporate actions (adjusts all relevant transactions)
-interest actions apply <ticker>    # Apply to specific ticker
-interest actions apply             # Apply all unapplied actions
-
-# List corporate actions
-interest actions list              # All actions
-interest actions list PETR4        # Filter by ticker
-```
-
-**How Corporate Actions Work:**
-
-1. **Add the action** with the ex-date (when it becomes effective)
-2. **Apply it** - adjusts all transactions before ex-date:
-   - `new_quantity = old_quantity × (ratio_to / ratio_from)`
-   - `new_price = old_price × (ratio_from / ratio_to)`
-   - **Total cost remains unchanged** (critical for tax calculations)
-3. **New transactions are auto-adjusted** - when you add historical transactions later, they're automatically adjusted based on their date
-4. **Idempotent** - safe to reapply, won't double-adjust (tracked via junction table)
-
-**Example: 10:1 Reverse Split**
-
-```bash
-# You bought 1000 shares at R$50 before the split
-# Then a 10:1 reverse split happened on 2022-11-22
-
-# Step 1: Add and apply the corporate action
-interest actions add A1MD34 reverse-split 10:1 2022-11-22
-interest actions apply A1MD34
-
-# Step 2: Add your historical purchase (original values)
-interest transactions add A1MD34 buy 1000 50 2020-01-15
-# ℹ Auto-applied 1 corporate action(s) to this transaction
-# Database now shows: 100 shares @ R$500 (total cost R$50,000 unchanged)
-
-# Step 3: Safe to reapply (idempotency test)
-interest actions apply A1MD34
-# ℹ No unapplied corporate actions found (no double-adjustment!)
-```
-
-### Portfolio
-
-```bash
-# Show complete portfolio
-interest portfolio show
-
-# Filter by asset type
-interest portfolio show --asset-type FII
-interest portfolio show --asset-type STOCK
-
-# Performance over time (TODO)
-interest portfolio performance --period 1y
-```
-
-**Output includes:**
-
-- Ticker, quantity, average cost, current price
-- Current value, unrealized P&L (amount and %)
-- Total portfolio value and P&L
-
-**Calculations:**
-
-- Uses average cost basis for sales
-- Automatically accounts for corporate actions
-- Real-time prices from Yahoo Finance/Brapi.dev
-
-### Prices
-
-```bash
-# Update all prices from Yahoo Finance and Brapi.dev
-interest prices update
-
-# Fetch historical prices for a ticker (TODO)
-interest prices history PETR4 --from 2023-01-01 --to 2023-12-31
-```
-
-**Price sources:**
-
-1. **Yahoo Finance** - Primary (ticker.SA suffix)
-2. **Brapi.dev** - Fallback for Brazilian stocks
-3. **Note:** BDRs may not have corporate action data in Brapi.dev
-
-### Tax
-
-```bash
-# Calculate monthly swing trade tax
-interest tax calculate 12/2025
-
-# Generate annual IRPF report (TODO)
-interest tax report 2025
-
-# Show monthly tax summary for a year (TODO)
-interest tax summary 2025
-```
-
-## Asset Types
-
-The tool auto-detects asset types from ticker suffixes:
-
-| Type         | Ticker Pattern | Example        | Tax Treatment                                                                        |
-| ------------ | -------------- | -------------- | ------------------------------------------------------------------------------------ |
-| **STOCK**    | Ends in 3-6    | PETR4, VALE3   | Swing: 15%, R$20k/month exempt                                                       |
-| **FII**      | Ends in 11     | MXRF11, HGLG11 | Pre-2026 quotas: exempt dividends, 20% gains<br>Post-2026: 5% dividends, 17.5% gains |
-| **FIAGRO**   | Ends in 11     | AGRO11         | Same as FII                                                                          |
-| **FI-INFRA** | Ends in 11     | IFRA11         | Same as FII                                                                          |
-| **BDR**      | Ends in 34     | A1MD34 (AMD)   | Special handling, limited API data                                                   |
-
-**Manual override:** Asset type can be modified directly in the database if auto-detection is incorrect.
-
-## Brazilian Tax Rules (2025-2026)
-
-### Swing Trade Tax
-
-**Rate:** 15% on monthly net profit (may become 17.5% if new law passes)
-
-**Exemption:**
-
-- **Stocks only**: Sales below R$20,000/month
-- **FII/FIAGRO/FI-INFRA**: No exemption
-
-**Calculation method:**
-
-1. Sum all sales for the month by asset type
-2. Calculate profit/loss for each sale using average cost basis
-3. Net profit = total profits - total losses
-4. Apply exemption (stocks only)
-5. Tax = net profit × 15%
-
-**Loss carryforward:** Losses can offset future gains within the same asset class (stocks, FII, etc.) but not across classes.
-
-**Payment:** DARF code 6015, due by last business day of following month.
-
-### Day Trade Tax (TODO)
-
-**Rate:** 20% flat on net profit, no exemption threshold
-
-**Detection:** Buy and sell of same ticker on same trade_date
-
-### IRPF Annual Report (TODO)
-
-**Required reporting:**
-
-- All transactions (buys/sells) with dates and values
-- Monthly tax paid (DARFs submitted)
-- Current holdings as of December 31 (Bens e Direitos section)
-- Dividend and rental income received
-- Amortization received (reduces cost basis)
-
-### Fund Income Tax (2026 New Rules)
-
-**FII/FIAGRO/FI-INFRA:**
-
-- **Quotas issued ≤ 2025:**
-  - Dividends: Tax-exempt
-  - Capital gains: 20%
-- **Quotas issued ≥ 2026:**
-  - Dividends: 5% (withheld at source)
-  - Capital gains: 17.5%
-
-**Amortization (Capital Return):**
-
-- 20% tax withheld at source
-- **Reduces cost basis** of your investment
-- Not counted as income, but lowers future capital gains
-
-**Tracking:** The `quota_issuance_date` field (or `settlement_date` for purchases) determines which tax rules apply.
-
-## Design Decisions & Assumptions
-
-### 1. Data Precision
-
-**Assumption:** Financial calculations require exact decimal precision to avoid rounding errors in tax calculations.
-
-**Implementation:**
-
-- All prices, quantities, and monetary values use `rust_decimal::Decimal`
-- Never use `f64` for financial calculations
-- Database stores decimals as TEXT to preserve precision
-- SQLite type affinity handled with `ValueRef` pattern matching
-
-**Why:** Even 0.01 cent errors compound over thousands of transactions and can lead to incorrect tax calculations.
-
-### 2. Average Cost Basis
-
-**Assumption:** Cost basis is calculated using average cost per asset.
-
-**Implementation:**
-
-- Transactions processed in chronological order (by `trade_date`)
-- Earliest purchases matched against sales first
-- Proportional cost basis calculated for partial sales
-
-**Example:**
-
-```
-Portfolio: Buy 100 @ R$10 = R$1,000
-           Buy 50 @ R$15 = R$750
-
-Sell 75 shares:
-  ├─ Takes all 100 from first lot? No, only 75 needed
-  ├─ Cost basis: (75/100) × R$1,000 = R$750
-  └─ Remaining: 25 shares @ R$10, 50 shares @ R$15
-```
-
-### 3. Corporate Actions - Junction Table Tracking
-
-**Problem:** Previously, reapplying a corporate action would double-adjust transactions (e.g., 1000 → 100 → 10).
-
-**Solution:** Junction table `corporate_action_adjustments` records every adjustment:
-
-- Tracks: `(action_id, transaction_id)` pair
-- Stores: old/new quantity, old/new price
-- Prevents: Double-adjustment on reapply
-
-**Benefits:**
-
-- **Idempotent:** Can reapply actions safely
-- **Auditable:** Know exactly which transactions were adjusted
-- **Reversible:** Could implement undo if needed
-
-### 4. Auto-Adjustment of Manual Transactions
-
-**Assumption:** Users naturally remember original (pre-split) quantities when adding historical transactions.
-
-**Implementation:**
-When adding a manual transaction:
-
-1. Insert with user-provided quantity/price
-2. Find all applied corporate actions with `ex_date > trade_date`
-3. Apply them in chronological order
-4. Update transaction with final adjusted values
-5. Record adjustments in junction table
-
-**Example:**
-
-```bash
-# User adds pre-split purchase
-interest transactions add A1MD34 buy 1000 50 2020-01-15
-
-# System finds 10:1 reverse split (ex-date 2022-11-22)
-# Automatically adjusts: 1000 @ R$50 → 100 @ R$500
-# User sees: "ℹ Auto-applied 1 corporate action(s)"
-```
-
-**Why:** Users shouldn't need to mentally calculate post-split values or remember which splits have been applied.
-
-### 5. CEI Data Limitations
-
-**Assumption:** CEI only provides 5 years of transaction history (nothing before ~2019).
-
-**Workarounds:**
-
-1. **Manual transaction entry** for pre-2019 data
-2. **Potential IRPF PDF import** (TODO) - annual tax declarations have full history
-3. **Other sources** (TODO) - broker statements, personal records
-
-**Impact:** Users with long positions need to manually add old transactions.
-
-### 6. Transaction Source Tracking
-
-**Implementation:** `source` field on every transaction:
-
-- `CEI` - Imported from CEI export
-- `MANUAL` - Manually added by user
-- `B3_PORTAL` - Future: Direct B3 integration
-- `IRPF` - Future: Extracted from tax declaration PDFs
-
-**Why:**
-
-- Debug data quality issues
-- Understand data provenance
-- Prioritize which sources to trust on duplicates
-
-### 7. Corporate Actions Data Sources
-
-**Challenges:**
-
-- **Brapi.dev:** Has data for Brazilian stocks, **but NOT for BDRs** (e.g., A1MD34 = AMD)
-- **Investing.com:** Has comprehensive data but **no API** (Cloudflare protection blocks scraping)
-- **Yahoo Finance:** Provides adjusted prices but not raw corporate action events
-
-**Current solution:** Manual entry (`interest actions add`)
-
-**Future solutions (TODO):**
-
-- Headless browser (Puppeteer/Playwright) to scrape investing.com
-- B3 official data API (if they provide one)
-- CSV import for bulk entry from investing.com exports
-
-### 8. Duplicate Detection
-
-**Assumption:** Same asset, date, type, and quantity = duplicate transaction.
-
-**Implementation:** Before inserting, check:
-
-```sql
-SELECT COUNT(*) FROM transactions
-WHERE asset_id = ? AND trade_date = ?
-  AND transaction_type = ? AND quantity = ?
-```
-
-**Edge case:** Buying the same quantity of the same stock twice on the same day is rare enough to treat as duplicate.
-
-**Future improvement:** Could add `--force` flag to override duplicate check.
-
-### 9. Settlement Date and Quota Vintage
-
-**Brazilian stock settlement:** T+2 (trade date + 2 business days)
-
-**Why it matters for funds:**
-
-- Quotas issued in 2025 or earlier: Old tax rules (exempt dividends)
-- Quotas issued in 2026 or later: New tax rules (5% dividend tax)
-- Determined by `settlement_date` or `quota_issuance_date`
-
-**Implementation:**
-
-- CEI imports include `settlement_date` from export
-- Manual entries default to same as `trade_date`
-- TODO: Track quota vintage for accurate tax calculations
-
-### 10. Day Trading Detection
-
-**Assumption:** Buy and sell of same ticker on same `trade_date` = day trade.
-
-**Implementation:** `is_day_trade` boolean flag on transactions.
-
-**Future:** Separate tax calculation (20% flat rate, no exemption).
-
-**Edge case:** Multiple buys/sells same day with net position = swing trade? (Research needed)
-
-### 11. Database Schema Versioning
-
-**Current approach:**
-
-- Schema version tracked in `metadata` table (`schema_version = 1`)
-- Schema SQL in `src/db/schema.sql`
-- Executed on first run or when database doesn't exist
-
-**Future migrations:**
-
-1. Increment `schema_version` in new schema.sql
-2. Add migration SQL in `src/db/migrations/v2.sql`
-3. Check version on startup, run migrations if needed
-4. Update metadata table
-
-**Current schema version:** 1
-
-### 12. Price Data Caching
-
-**Implementation:** Prices stored in `price_history` table with `price_date`.
-
-**Cache strategy:**
-
-- Check `price_history` for today's date first
-- Only fetch from API if not cached or stale
-- TODO: Add configurable TTL (time-to-live)
-
-**Why:** Avoid excessive API calls, respect rate limits, faster portfolio calculations.
+---
 
 ## Troubleshooting
 
-### "Insufficient purchase history" Error
+### "Insufficient Purchase History" Error
 
+**Error message:**
 ```
-Error: A1MD34: Insufficient purchase history: Selling 100 units but only 6.1 available.
+Error: PETR4: Insufficient purchase history: Selling 100 units but only 50 available.
 ```
 
 **Causes:**
-
-1. Missing pre-2019 transactions (CEI limitation)
-2. Shares from term contracts/transfers not in export
-3. Corporate action not applied (quantities still pre-split)
-4. Short selling (not supported)
+1. Missing pre-2020 transactions (B3 Negociação limitation)
+2. Corporate action not applied (quantities still pre-split)
+3. Subscription rights or transfers not imported
+4. Pre-CEI data not entered manually
 
 **Solutions:**
 
+**Add missing historical purchases:**
 ```bash
-# Solution 1: Add missing historical purchases (enter original quantities)
-interest transactions add A1MD34 buy 1000 50 2018-01-15 --notes "Pre-CEI purchase"
-
-# Solution 2: Apply corporate action if you haven't yet
-interest actions add A1MD34 reverse-split 10:1 2022-11-22
-interest actions apply A1MD34
-
-# Solution 3: Check if action was already applied
-sqlite3 ~/.interest/data.db "SELECT * FROM corporate_actions WHERE asset_id = (SELECT id FROM assets WHERE ticker = 'A1MD34')"
+interest transactions add PETR4 buy 100 25.50 2018-06-15
 ```
 
-### Double-Adjusted Transactions
-
-**Symptoms:** Prices/quantities way off (e.g., R$5000 instead of R$50).
-
-**Cause:** Corporate action applied multiple times in older versions without junction table tracking.
-
-**Solution:** Reset and reimport with current version:
-
+**Check if corporate actions are recorded:**
 ```bash
-# Backup current database
-cp ~/.interest/data.db ~/.interest/data.db.backup
+# List splits for this ticker
+interest actions split list PETR4
 
-# Delete and reimport
-rm ~/.interest/data.db
-interest import negociacao-2026-01-01.xlsx
+# If the split exists, it's already being applied automatically during calculations
+# If it doesn't exist, add it with: interest actions split add PETR4 <adjustment> <date>
+```
 
-# Re-add corporate actions
-interest actions add A1MD34 reverse-split 10:1 2022-11-22
-interest actions apply A1MD34
+**Review inconsistencies:**
+```bash
+interest inconsistencies list --open --asset PETR4
+```
 
-# Re-add manual transactions (they'll auto-adjust correctly)
-interest transactions add A1MD34 buy 1000 50 2020-01-15
+### Unknown Ticker Error
+
+**Error message:**
+```
+Error: Unknown ticker: XPTO11
+```
+
+**Causes:**
+- Ticker not in B3 registry cache
+- Ticker delisted or recently listed
+- Typo in ticker symbol
+
+**Solutions:**
+
+**Refresh ticker cache:**
+```bash
+interest tickers refresh --force
+```
+
+**Manually resolve ticker:**
+```bash
+# If you know it's a FII
+interest tickers resolve XPTO11 --type fii
+
+# Or add it directly as an asset
+interest assets add XPTO11 --type fii --name "XPTO Fundo Imobiliário"
+```
+
+**Check for typos:**
+```bash
+# List all known assets
+interest assets list | grep XPTO
 ```
 
 ### Price Fetch Failures
 
-**Yahoo Finance 404:**
+**Warning message:**
+```
+Warning: Failed to fetch price for PETR4: 404 Not Found
+```
 
-```
-Error: Failed to fetch price for PETR4: 404 Not Found
-```
+**Causes:**
+- Ticker delisted, suspended, or renamed
+- Temporary API issue (Yahoo Finance)
+- BDR without Brazilian listing data
 
 **Solutions:**
 
-- Verify ticker format (should be TICKER.SA, e.g., PETR4.SA) - automatic in code
-- Some tickers may not be listed on Yahoo Finance
-- Try Brapi.dev as fallback (automatic)
-
-**Brapi.dev errors:**
-
-- No authentication required as of 2026-01
-- BDRs may not have complete data (especially corporate actions)
-
-### SQLite Type Affinity Issues
-
-**Problem:** Decimal values read as wrong type from database.
-
-**Cause:** SQLite stores numbers differently based on value:
-
-- Whole numbers (100) → INTEGER
-- Decimals (100.50) → TEXT or REAL
-
-**Solution:** All readers use `ValueRef` pattern matching to handle all three types:
-
-```rust
-match row.get_ref(idx)? {
-    ValueRef::Text(bytes) => Decimal::from_str(s)?,
-    ValueRef::Integer(i) => Decimal::from(i),
-    ValueRef::Real(f) => Decimal::try_from(f)?,
-    _ => Err(...)
-}
+**Retry (APIs can be temporarily unavailable):**
+```bash
+interest portfolio show
 ```
 
-**Prevention:** Store all decimals as TEXT strings.
+**Use historical prices from COTAHIST:**
+```bash
+interest prices import-b3 2024
+```
 
-## Contributing
+**Check ticker validity:**
+```bash
+interest tickers status
+interest assets show PETR4
+```
 
-See `TODO` file for planned features.
+**For delisted tickers:**
+```bash
+# You can still view historical data
+interest portfolio show --at 2023-12-31
+```
 
-When contributing:
+### Inconsistency Won't Resolve
 
-1. **Never use `f64`** for financial calculations - always use `Decimal`
-2. **Write tests** for tax calculations and average cost logic
-3. **Document assumptions** in code comments
-4. **Update this README** for new features or design decisions
+**Error message:**
+```
+Error: Missing required field: price_per_unit
+```
 
-## Architecture
+**Cause:** Tried to resolve an inconsistency without providing all required data.
 
-**Language:** Rust (2021 edition)
+**Solution:**
 
-**Key Dependencies:**
+**View full details to see what's needed:**
+```bash
+interest inconsistencies show 42
+```
 
-- `rusqlite` - SQLite database (considered Limbo but stuck with SQLite)
-- `clap` - CLI framework with derive macros
-- `rust_decimal` - Precise financial arithmetic
-- `reqwest` - HTTP client for price APIs
-- `calamine` - Excel file parsing
-- `csv` - CSV parsing
-- `chrono` - Date/time handling
-- `tabled` - CLI table formatting
-- `colored` - Terminal colors
+**Use guided resolution (recommended):**
+```bash
+interest inconsistencies resolve 42
+```
+
+The tool will prompt for each required field.
+
+**Or provide all fields at once:**
+```bash
+interest inconsistencies resolve 42 \
+  --set price_per_unit=18.75 \
+  --set fees=12.34 \
+  --set trade_date=2023-08-02
+```
+
+### Import Detects Duplicates
+
+**Message:**
+```
+Skipped 15 duplicate transactions
+```
+
+**Cause:** You're re-importing a file that was already imported, or importing overlapping date ranges.
+
+**Behavior:** This is **normal and safe**. The tool automatically skips duplicate transactions based on:
+- Same ticker
+- Same trade date
+- Same transaction type (buy/sell)
+- Same quantity
+
+**No action needed** - duplicates are silently skipped to avoid double-counting.
+
+---
+
+## Advanced Usage
+
+### Interactive TUI Mode
+
+**Launch interactive mode (default when no command given):**
+```bash
+interest
+
+# Or explicitly
+cargo run
+```
+
+**Features:**
+- Command history (use ↑/↓ arrows)
+- Tab completion for commands and tickers
+- Progress indicators for long operations (imports, price fetches)
+- Multi-line editing
+
+**Exit:**
+```
+exit
+quit
+q
+```
+
+### JSON Output for Scripting
+
+Most commands support `--json` flag for machine-readable output:
+
+**Portfolio as JSON:**
+```bash
+interest portfolio show --json > portfolio.json
+```
+
+**Tax report as JSON:**
+```bash
+interest tax report 2024 --json > tax-2024.json
+```
+
+**Income details as JSON:**
+```bash
+interest income detail 2024 --json > income-2024.json
+```
+
+**Parse with jq:**
+```bash
+# Extract only FII positions
+interest portfolio show --json | jq '.positions[] | select(.asset_type == "FII")'
+
+# Get total portfolio value
+interest portfolio show --json | jq '.summary.total_value'
+```
+
+### Dry-Run Mode
+
+Preview changes before committing:
+
+**Import preview:**
+```bash
+interest import negociacao.xlsx --dry-run
+```
+
+Shows what would be imported (transactions, new assets, duplicates) without saving to database.
+
+**Asset sync preview:**
+```bash
+interest assets sync-maisretorno --dry-run
+```
+
+Shows what assets would be added/updated from Mais Retorno registry.
+
+### Cash Flow Analysis
+
+Track money in/out of your portfolio:
+
+**Show cash flows for a period:**
+```bash
+# Specific year
+interest cash-flow show 2024
+
+# Year-to-date
+interest cash-flow show YTD
+
+# All time
+interest cash-flow show ALL
+
+# Custom range
+interest cash-flow show 2024-01:2024-06
+```
+
+**Get statistics:**
+```bash
+interest cash-flow stats YTD
+```
+
+Shows:
+- Total inflows (purchases)
+- Total outflows (sales, fees)
+- Net cash flow
+- Number of transactions
+
+---
+
+## Tips & Best Practices
+
+1. **Always use `--dry-run` first** when importing large files to preview what will change
+
+2. **Backup your database regularly** before major operations:
+   ```bash
+   cp ~/.interest/data.db ~/.interest/data.db.backup-$(date +%Y%m%d)
+   ```
+
+3. **Resolve inconsistencies promptly** - they can block accurate tax calculations and portfolio valuations
+
+4. **Keep corporate actions up-to-date** - check [Investing.com](https://investing.com) or B3 announcements for splits, mergers, and spin-offs
+
+5. **Use historical dates carefully** - Brazilian tax rules changed in 2026 for FII/FIAGRO quotas (5% dividend tax on post-2026 quotas)
+
+6. **Verify your portfolio after imports** - check that quantities and values make sense:
+   ```bash
+   interest portfolio show
+   ```
+
+7. **Export tax reports early** - don't wait until the April IRPF deadline. Generate reports monthly to catch issues early:
+   ```bash
+   interest tax report 2024 --export
+   ```
+
+8. **Use JSON output for automation** - integrate with scripts, dashboards, or spreadsheets:
+   ```bash
+   interest portfolio show --json | jq '.summary.total_value'
+   ```
+
+---
+
+## Getting Help
+
+**Show command help:**
+```bash
+interest help
+```
+
+**In interactive mode:**
+```
+help
+?
+```
+
+**Report issues or request features:**
+- GitHub Issues: https://github.com/your-username/interest/issues
+- Check existing issues before creating new ones
+- Include error messages and relevant command output
+
+---
+
+## What's Not Included in This Guide
+
+This README focuses on **using** the Interest tool. For **developers**:
+
+> **For Developers:** Architecture details, design decisions, and contribution guidelines are in [`CLAUDE.md`](CLAUDE.md). That file covers:
+> - Module structure and data flow
+> - Design patterns (decimal precision, idempotency, average cost basis)
+> - Database schema and migration strategy
+> - Testing strategy and fixtures
+> - TUI development workflow
+> - Common pitfalls and how to avoid them
+
+---
 
 ## License
 
 MIT
 
+---
+
 ## Credits
 
-Built with Claude Code (Anthropic) and OpenAI Codex.
+Built by [Gustavo Noronha Silva](https://github.com/kov) with assistance from:
+   Claude Code (Anthropic)
+   Codex (OpenAI)

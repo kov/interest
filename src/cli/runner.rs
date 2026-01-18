@@ -224,8 +224,6 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
                     ticker: ticker.clone(),
                 },
             })),
-            crate::cli::ActionCommands::Scrape { .. } => Ok(None),
-            crate::cli::ActionCommands::Update => Ok(None),
         },
         Commands::Inconsistencies { action } => match action {
             crate::cli::InconsistenciesCommands::List {

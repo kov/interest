@@ -281,27 +281,6 @@ pub enum ActionCommands {
         /// Ticker symbol (optional, applies all if not specified)
         ticker: Option<String>,
     },
-
-    /// Scrape corporate actions from investing.com
-    Scrape {
-        /// Ticker symbol (e.g., A1MD34)
-        ticker: String,
-
-        /// investing.com URL (optional, will auto-build from asset name)
-        #[arg(short, long)]
-        url: Option<String>,
-
-        /// Company name for URL building (optional, uses database if not provided)
-        #[arg(short, long)]
-        name: Option<String>,
-
-        /// Save scraped actions to database
-        #[arg(short, long)]
-        save: bool,
-    },
-
-    /// Update corporate actions from API
-    Update,
 }
 
 #[derive(Subcommand)]
