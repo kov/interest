@@ -17,33 +17,36 @@ use rustyline::error::ReadlineError;
 
 #[allow(dead_code)] // Kept for Phase 3+ TUI implementation
 const COMMAND_PATTERNS: &[&[&str]] = &[
-    &["import"],
+    // View & inspect
     &["portfolio", "show"],
     &["performance", "show"],
-    &["tax", "report"],
-    &["tax", "summary"],
     &["income", "show"],
     &["income", "detail"],
-    &["income", "summary"],
+    &["assets", "show"],
+    &["inspect"],
+    // Import & sync
+    &["import"],
+    &["import-irpf"],
     &["prices", "import-b3"],
-    &["prices", "import-b3-file"],
-    &["prices", "clear-cache"],
+    &["assets", "sync-maisretorno"],
+    // Resolve & reconcile
     &["inconsistencies", "list"],
-    &["inconsistencies", "show"],
     &["inconsistencies", "resolve"],
-    &["inconsistencies", "ignore"],
-    &["tickers", "refresh"],
-    &["tickers", "status"],
     &["tickers", "list-unknown"],
     &["tickers", "resolve"],
+    // Manage & maintain
     &["assets", "list"],
-    &["assets", "show"],
     &["assets", "add"],
     &["assets", "set-type"],
     &["assets", "set-name"],
-    &["assets", "rename"],
-    &["assets", "remove"],
-    &["assets", "sync-maisretorno"],
+    &["transactions", "add"],
+    &["actions", "split"],
+    // Reports & tax
+    &["tax", "report"],
+    &["tax", "summary"],
+    // Utilities & session
+    &["prices", "clear-cache"],
+    &["tickers", "status"],
     &["help"],
     &["exit"],
     &["quit"],

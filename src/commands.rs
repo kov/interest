@@ -34,6 +34,8 @@ pub enum Command {
     Assets { action: AssetsAction },
     /// Show help
     Help,
+    /// Show help for a specific command: `help <command>`
+    HelpTarget(String),
     /// Exit/quit
     Exit,
 }
@@ -1282,7 +1284,14 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 }),
             }
         }
-        "help" | "?" => Ok(Command::Help),
+        "help" | "?" => {
+            // If a target command follows, return HelpTarget to allow the
+            // TUI to render subcommand-specific help via clap.
+            if let Some(target) = parts.next() {
+                return Ok(Command::HelpTarget(target.to_string()));
+            }
+            Ok(Command::Help)
+        }
         "exit" | "quit" | "q" => Ok(Command::Exit),
         _ => Err(CommandParseError {
             message: format!(

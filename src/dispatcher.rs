@@ -20,6 +20,7 @@ mod tickers;
 use crate::utils::format_currency;
 use crate::{db, tax};
 use anyhow::Result;
+use clap::CommandFactory;
 use colored::Colorize;
 use tracing::info;
 
@@ -40,55 +41,40 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
         Command::Tickers { action } => tickers::dispatch_tickers(action, json_output).await,
         Command::Assets { action } => assets::dispatch_assets(action, json_output).await,
         Command::Help => {
-            println!("Help: interest <command> [options]");
-            println!("\nAvailable commands:");
-            println!("  import <file>              - Import transactions");
-            println!(
-                "  portfolio show [--at DATE] - Show portfolio (DATE: YYYY-MM-DD|YYYY-MM|YYYY)"
-            );
-            println!(
-                "  performance show <P>       - Show performance (P: MTD|QTD|YTD|1Y|ALL|from:to)"
-            );
-            println!(
-                "  cash-flow show [P]         - Show cash flow (P: MTD|QTD|YTD|1Y|ALL|YYYY|from:to)"
-            );
-            println!(
-                "  cash-flow stats [P]        - Show cash flow statistics (P: MTD|QTD|YTD|1Y|ALL|YYYY|from:to)"
-            );
-            println!("  tax report <year>          - Generate tax report");
-            println!("  tax summary <year>         - Show tax summary");
-            println!("  income show [year]         - Show income summary by asset");
-            println!("  income detail [year]       - Show detailed income events");
-            println!(
-                "  income summary [year]      - Show yearly totals (or monthly if year given)"
-            );
-            println!("  actions rename <...>       - Manage asset renames");
-            println!("  actions split <...>        - Manage splits/reverse splits");
-            println!("  actions bonus <...>        - Manage bonus actions");
-            println!("  actions spinoff <...>      - Manage spin-off exchanges");
-            println!("  actions merger <...>       - Manage merger exchanges");
-            println!("  prices import-b3 <year>    - Import B3 COTAHIST data for year");
-            println!("  prices import-b3-file <p>  - Import COTAHIST from local ZIP file");
-            println!("  prices clear-cache [year]  - Clear B3 COTAHIST cache");
-            println!("  inconsistencies list       - List inconsistencies");
-            println!("  inconsistencies show <id>  - Show inconsistency details");
-            println!("  inconsistencies resolve    - Resolve inconsistency");
-            println!("  inconsistencies ignore     - Ignore inconsistency");
-            println!("  tickers refresh            - Refresh B3 tickers cache");
-            println!("  tickers status             - Show tickers cache status");
-            println!("  tickers list-unknown        - List unknown assets");
-            println!("  tickers resolve             - Resolve unknown assets");
-            println!("  assets list                 - List assets");
-            println!("  assets show <ticker>        - Show asset details");
-            println!("  assets add <ticker>         - Add an asset");
-            println!("  assets set-type <t> <type>  - Set asset type");
-            println!("  assets set-name <t> <name>  - Set asset name");
-            println!("  assets rename <old> <new>   - Rename ticker (correction only)");
-            println!("  assets remove <ticker>      - Remove asset and all data");
-            println!("  assets sync-maisretorno     - Sync Mais Retorno asset metadata");
-            println!("  help                       - Show this help");
-            println!("  exit                       - Exit application");
+            // Use the shared help renderer for consistent top-level help output
+            let opts = crate::cli::help::RenderOpts::default();
+            crate::cli::help::render_help(std::io::stdout(), &opts)?;
             Ok(())
+        }
+        Command::HelpTarget(target) => {
+            // Delegate to clap to render subcommand-specific help (e.g., `tax`).
+            // First verify the subcommand exists so we can show a friendly
+            // message when it does not.
+            let cmd = crate::cli::Cli::command();
+            let found = cmd
+                .get_subcommands()
+                .any(|s| s.get_name() == target.as_str());
+
+            if !found {
+                println!(
+                    "Unknown command: '{}'. Type 'help' for available commands.",
+                    target
+                );
+                return Ok(());
+            }
+
+            // Build a small argv that requests help for the target subcommand
+            // and let clap produce the properly formatted help text.
+            let argv = vec!["interest", target.as_str(), "--help"];
+            match cmd.try_get_matches_from(argv) {
+                // If clap parsed it without triggering help display, nothing to show.
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // clap returns an Err that prints help/version messages; display it.
+                    println!("{}", e);
+                    Ok(())
+                }
+            }
         }
         Command::Exit => {
             std::process::exit(0);

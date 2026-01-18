@@ -35,11 +35,8 @@ RUST_LOG=debug cargo test test_name -- --nocapture
 ### Running the Tool
 
 ```bash
-# Launch interactive TUI mode (default if no command given)
-cargo run
-
-# Or explicit TUI launch
-./target/debug/interest
+# Use the `interactive` subcommand to start the TUI
+cargo run -- interactive
 
 # Traditional CLI mode - provide a command
 cargo run -- portfolio show
@@ -283,15 +280,6 @@ pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()>
     match command {
         Command::PortfolioShow { filter } => dispatch_portfolio_show(filter, json_output).await,
         // ... all commands route to same business logic
-    }
-}
-
-// main.rs - Entry point
-fn main() {
-    if no_cli_args {
-        launch_tui().await  // Interactive mode
-    } else {
-        // Traditional CLI mode (via clap, calls same handlers)
     }
 }
 ```
@@ -554,41 +542,6 @@ cargo test --test generate_test_files         # Generate fixtures (use --ignored
 - **Query-time application**: Database transactions stay unadjusted. Forward-only adjustments are applied during portfolio/tax/performance calculations via `apply_forward_qty_adjustments()`, ensuring idempotency and no double-application.
 - See `designs/FIXEDSPLITS.md` for the design rationale behind this approach.
 
-## TUI Development Workflow
-
-The TUI is being built incrementally following the plan in `INCREMENTAL_TUI_PLAN.md`. Current status:
-
-**Phase 1-2 (COMPLETE)**: Foundation + Command Layer
-
-- ✅ Custom error types in `error.rs`
-- ✅ Validation extraction in `importers/validation.rs`
-- ✅ Command enum + parser in `commands.rs`
-- ✅ Dispatcher in `dispatcher.rs`
-- ✅ CLI refactored to use new command layer
-
-**Phase 3 (IN PROGRESS)**: TUI Infrastructure
-
-- ✅ Basic readline REPL in `ui/mod.rs`
-- ✅ Readline wrapper with completion in `ui/readline.rs`
-- ✅ Crossterm rendering helpers in `ui/crossterm_engine.rs`
-- 🚧 Overlays system in `ui/overlays.rs` (skeleton exists, needs file picker)
-- 🚧 Event loop in `ui/event_loop.rs` (skeleton exists, needs overlay routing)
-
-**Phase 4 (PLANNED)**: Easy Commands → TUI
-
-- Portfolio show, tax report, performance show
-- All will reuse existing dispatcher handlers
-
-**Phase 5 (PLANNED)**: Import Workflow
-
-- Interactive file picker, streaming preview, validation overlays
-- Most complex command to port
-
-**Phase 6 (PLANNED)**: Performance Tracking Features
-
-- See `PERFORMANCE_TRACKING_PLAN.md` for details
-- Snapshot backfilling, live dashboard, B3 COTAHIST import
-
 ### Testing TUI in Development
 
 ```bash
@@ -706,17 +659,14 @@ Current support: IRPF 2019 (year 2018 data).
 
 ### 1. TUI vs Pure CLI
 
-**Decision**: Build interactive TUI as primary interface, keep CLI for scripting/automation.
+**Decision**: Build CLI as primary interface, TUI will evolve as we go.
 
-**Rationale**:
+**Rationale for adding TUI**:
 
 - Better UX for everyday use (no need to remember exact command syntax)
 - Readline completion reduces typing
 - Future: overlays for file picking, validation, data entry
-- CLI still available via `cargo run -- <command>` for scripts/automation
 - Both modes share 100% of business logic (zero duplication)
-
-**Implementation**: See `INCREMENTAL_TUI_PLAN.md` for phased rollout plan.
 
 ### 2. Custom Command Parser vs Clap
 
@@ -771,8 +721,6 @@ Current support: IRPF 2019 (year 2018 data).
 
 ## Files to Check Before Modifying
 
-- **TUI/CLI architecture**: Review `INCREMENTAL_TUI_PLAN.md` before adding commands
-- **Performance tracking**: Review `PERFORMANCE_TRACKING_PLAN.md` before adding metrics
 - **Tax calculations**: Review `README.md` section on Brazilian tax rules
 - **Database schema**: Check `src/db/schema.sql` before adding columns/tables
 - **Corporate actions**: Review `README.md` section on idempotency design

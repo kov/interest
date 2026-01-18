@@ -54,6 +54,24 @@ fn json_success<T: Serialize>(data: T) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // If user requested top-level help exactly (e.g., `interest -h` or
+    // `interest --help`), render the shared help and exit. Do NOT
+    // intercept help when a subcommand is present (e.g., `interest tax --help`)
+    // so clap can show subcommand-specific help.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() == 2 && (raw_args[1] == "-h" || raw_args[1] == "--help") {
+        let opts = crate::cli::help::RenderOpts::default();
+        crate::cli::help::render_help(std::io::stdout(), &opts)?;
+        return Ok(());
+    }
+
+    // Support legacy-style `interest help` (no subcommand) and `interest ?`.
+    if raw_args.len() == 2 && (raw_args[1] == "help" || raw_args[1] == "?") {
+        let opts = crate::cli::help::RenderOpts::default();
+        crate::cli::help::render_help(std::io::stdout(), &opts)?;
+        return Ok(());
+    }
+
     // Parse CLI first to configure logging and color
     let cli = Cli::parse();
 
@@ -77,11 +95,14 @@ async fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
-    // Default to interactive mode if no command given
+    // If no command is given, print the top-level help instead of
+    // automatically launching the interactive TUI.
     let command = match cli.command {
         Some(cmd) => cmd,
         None => {
-            return interest::ui::launch_tui().await;
+            let opts = crate::cli::help::RenderOpts::default();
+            crate::cli::help::render_help(std::io::stdout(), &opts)?;
+            return Ok(());
         }
     };
 
