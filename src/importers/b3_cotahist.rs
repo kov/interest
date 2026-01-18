@@ -95,7 +95,106 @@ fn get_cotahist_url(year: i32) -> String {
     format!("{}/COTAHIST_A{}.ZIP", B3_COTAHIST_BASE_URL, year)
 }
 
+/// Get the modification time of a cached COTAHIST file as Unix timestamp
+fn get_cache_file_mtime(year: i32) -> Result<Option<i64>> {
+    let cache_dir = get_cotahist_cache_dir()?;
+    let zip_path = cache_dir.join(format!("COTAHIST_A{}.ZIP", year));
+
+    if !zip_path.exists() {
+        return Ok(None);
+    }
+
+    let metadata = std::fs::metadata(&zip_path).context("Failed to read cache file metadata")?;
+    let mtime = metadata
+        .modified()
+        .context("Failed to get file modification time")?
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("Invalid file modification time")?
+        .as_secs() as i64;
+
+    Ok(Some(mtime))
+}
+
+/// Check if we should check for COTAHIST updates (>1 day since last check)
+fn should_check_for_updates(year: i32) -> Result<bool> {
+    let conn = crate::db::open_db(None)?;
+    let key = format!("cotahist_last_checked_{}", year);
+    let last_checked = crate::db::get_metadata(&conn, &key)?;
+
+    match last_checked {
+        None => Ok(true), // Never checked, should check
+        Some(timestamp_str) => {
+            let last_checked_ts: i64 = timestamp_str
+                .parse()
+                .context("Invalid timestamp in metadata")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("System time error")?
+                .as_secs() as i64;
+            let one_day = 86400; // seconds in a day
+
+            Ok(now - last_checked_ts > one_day)
+        }
+    }
+}
+
+/// Mark that we checked for COTAHIST updates (stores current timestamp)
+fn mark_last_checked(year: i32) -> Result<()> {
+    let conn = crate::db::open_db(None)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("System time error")?
+        .as_secs();
+    let key = format!("cotahist_last_checked_{}", year);
+    crate::db::set_metadata(&conn, &key, &now.to_string())
+}
+
+/// Check if a COTAHIST file has been imported (based on mtime)
+///
+/// Pass a connection to use a specific database (for tests), or None for the default database
+pub fn has_cotahist_been_imported_with_conn(
+    year: i32,
+    conn_opt: Option<&Connection>,
+) -> Result<bool> {
+    let current_mtime = match get_cache_file_mtime(year)? {
+        Some(mt) => mt,
+        None => return Ok(false), // No cache file
+    };
+
+    let key = format!("cotahist_imported_{}_mtime", year);
+
+    let stored_mtime = match conn_opt {
+        Some(conn) => crate::db::get_metadata(conn, &key)?,
+        None => {
+            let conn = crate::db::open_db(None)?;
+            crate::db::get_metadata(&conn, &key)?
+        }
+    };
+
+    match stored_mtime {
+        Some(stored) => Ok(stored == current_mtime.to_string()),
+        None => Ok(false), // Never imported
+    }
+}
+
+/// Mark that a COTAHIST file has been imported (stores file's current mtime)
+pub fn mark_cotahist_imported(year: i32) -> Result<()> {
+    let conn = crate::db::open_db(None)?;
+    let mtime = get_cache_file_mtime(year)?
+        .ok_or_else(|| anyhow!("Cache file not found for year {}", year))?;
+
+    let key = format!("cotahist_imported_{}_mtime", year);
+    crate::db::set_metadata(&conn, &key, &mtime.to_string())
+}
+
 /// Download COTAHIST file for a year and cache it (synchronous)
+///
+/// Implements conditional downloads using If-Modified-Since:
+/// - If cache exists and < 1 day since last check: use cache
+/// - If cache exists and > 1 day since last check: do conditional GET
+///   - If 304 Not Modified: use cache, mtime unchanged
+///   - If 200 OK: download new file, mtime updates automatically
+/// - If no cache or force_redownload: do full download
 pub fn download_cotahist_year(
     year: i32,
     force_redownload: bool,
@@ -106,8 +205,115 @@ pub fn download_cotahist_year(
 
     // Check cache first
     if !force_redownload && zip_path.exists() {
-        tracing::debug!("Using cached COTAHIST for year {}: {:?}", year, zip_path);
+        // Check if we should do a conditional GET to see if file was updated
+        let should_check = should_check_for_updates(year).unwrap_or(true);
 
+        if should_check {
+            tracing::debug!(
+                "Checking for COTAHIST {} updates (>1 day since last check)",
+                year
+            );
+
+            // Get current file mtime for If-Modified-Since header
+            let metadata =
+                std::fs::metadata(&zip_path).context("Failed to read cache file metadata")?;
+            let mtime = metadata
+                .modified()
+                .context("Failed to get file modification time")?;
+
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+                .build()
+                .context("Failed to create HTTP client")?;
+
+            let download_url = get_cotahist_url(year);
+
+            // Attempt conditional download with If-Modified-Since
+            let response = client
+                .get(&download_url)
+                .header("If-Modified-Since", httpdate::fmt_http_date(mtime))
+                .send();
+
+            // Mark that we checked (regardless of outcome)
+            if let Err(e) = mark_last_checked(year) {
+                tracing::warn!("Failed to mark last checked for year {}: {}", year, e);
+            }
+
+            match response {
+                Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
+                    // File unchanged on server, use cache
+                    // mtime stays the same → won't trigger re-import
+                    tracing::debug!("COTAHIST {} not modified on server, using cache", year);
+
+                    if let Some(callback) = progress_callback {
+                        callback(&DownloadProgress {
+                            stage: DownloadStage::Complete,
+                            year,
+                            records_processed: 0,
+                            total_records: None,
+                        });
+                    }
+
+                    return Ok(zip_path);
+                }
+                Ok(resp) if resp.status().is_success() => {
+                    // New data available, update cache
+                    // This will naturally update the file's mtime → triggers re-import
+                    tracing::info!("COTAHIST {} has updates on server, refreshing cache", year);
+
+                    if let Some(ref callback) = progress_callback {
+                        callback(&DownloadProgress {
+                            stage: DownloadStage::Downloading,
+                            year,
+                            records_processed: 0,
+                            total_records: None,
+                        });
+                    }
+
+                    let bytes = resp.bytes().context("Failed to read download response")?;
+
+                    tracing::debug!("Downloaded {} bytes for year {}", bytes.len(), year);
+
+                    // Save to cache (this updates mtime automatically)
+                    std::fs::write(&zip_path, bytes)
+                        .context("Failed to write COTAHIST to cache")?;
+
+                    tracing::debug!("Updated cached COTAHIST to: {:?}", zip_path);
+
+                    if let Some(callback) = progress_callback {
+                        callback(&DownloadProgress {
+                            stage: DownloadStage::Complete,
+                            year,
+                            records_processed: 0,
+                            total_records: None,
+                        });
+                    }
+
+                    return Ok(zip_path);
+                }
+                Ok(resp) => {
+                    // Other status code (e.g., 404, 403), fall back to cache
+                    tracing::warn!(
+                        "Failed to check for updates (status {}), using cached COTAHIST {}",
+                        resp.status(),
+                        year
+                    );
+                }
+                Err(e) => {
+                    // Network error, fall back to cache
+                    tracing::warn!(
+                        "Network error checking for updates ({}), using cached COTAHIST {}",
+                        e,
+                        year
+                    );
+                }
+            }
+        } else {
+            // Checked recently (< 1 day ago), use cache without HTTP request
+            tracing::debug!("Using cached COTAHIST {} (checked recently)", year);
+        }
+
+        // Use cache
         if let Some(callback) = progress_callback {
             callback(&DownloadProgress {
                 stage: DownloadStage::Complete,
@@ -120,12 +326,13 @@ pub fn download_cotahist_year(
         return Ok(zip_path);
     }
 
+    // No cache or force_redownload - do full download
     // Create cache directory if needed
     std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
 
     // Construct direct download URL
     let download_url = get_cotahist_url(year);
-    tracing::debug!("Downloading COTAHIST from: {}", download_url);
+    tracing::info!("Downloading COTAHIST {} (no cache)", year);
 
     // Download file
     if let Some(ref callback) = progress_callback {
@@ -136,8 +343,6 @@ pub fn download_cotahist_year(
             total_records: None,
         });
     }
-
-    tracing::debug!("Downloading COTAHIST from: {}", download_url);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
@@ -167,6 +372,11 @@ pub fn download_cotahist_year(
     std::fs::write(&zip_path, bytes).context("Failed to write COTAHIST to cache")?;
 
     tracing::debug!("Cached COTAHIST to: {:?}", zip_path);
+
+    // Mark that we checked
+    if let Err(e) = mark_last_checked(year) {
+        tracing::warn!("Failed to mark last checked for year {}: {}", year, e);
+    }
 
     if let Some(callback) = progress_callback {
         callback(&DownloadProgress {
@@ -508,6 +718,11 @@ pub fn import_cotahist_year(
     let inserted = import_records_to_db(conn, &records, progress_callback, year)?;
 
     tracing::info!("Imported {} new price records for year {}", inserted, year);
+
+    // Mark that we've imported this version of the file (stores mtime)
+    if let Err(e) = mark_cotahist_imported(year) {
+        tracing::warn!("Failed to mark COTAHIST {} as imported: {}", year, e);
+    }
 
     Ok(inserted)
 }

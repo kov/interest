@@ -27,6 +27,7 @@ tokio = { version = "1.40", features = ["full"] }
 
 # HTTP client for price APIs
 reqwest = { version = "0.13", features = ["json", "blocking"] }
+httpdate = "1.0"  # For If-Modified-Since header formatting
 
 # Headless browser for web scraping (investing.com, etc.)
 headless_chrome = "1.0"

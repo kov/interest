@@ -78,7 +78,14 @@ pub fn import_tesouro_csv(
 
     let csv_path = refresh_tesouro_csv(false)?;
     let content = fs::read_to_string(&csv_path).context("Failed to read Tesouro CSV file")?;
-    import_tesouro_csv_from_content(conn, assets, start_date, end_date, &content)
+    let count = import_tesouro_csv_from_content(conn, assets, start_date, end_date, &content)?;
+
+    // Mark that we've imported this version of the file (stores mtime)
+    if let Err(e) = mark_tesouro_imported() {
+        tracing::warn!("Failed to mark Tesouro CSV as imported: {}", e);
+    }
+
+    Ok(count)
 }
 
 #[allow(dead_code)]
@@ -291,6 +298,66 @@ fn cache_is_stale(csv_path: &Path) -> Result<bool> {
         .duration_since(modified)
         .unwrap_or(Duration::from_secs(0));
     Ok(age.as_secs() > (CACHE_MAX_AGE_HOURS as u64) * 3600)
+}
+
+/// Get the modification time of the cached Tesouro CSV file as Unix timestamp
+fn get_cache_file_mtime() -> Result<Option<i64>> {
+    let cache_dir = get_tesouro_cache_dir()?;
+    let csv_path = cache_dir.join(CACHE_FILENAME);
+
+    if !csv_path.exists() {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(&csv_path).context("Failed to read Tesouro CSV metadata")?;
+    let mtime = metadata
+        .modified()
+        .context("Failed to get file modification time")?
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("Invalid file modification time")?
+        .as_secs() as i64;
+
+    Ok(Some(mtime))
+}
+
+/// Check if the Tesouro CSV has been imported (based on mtime)
+///
+/// Pass a connection to use a specific database (for tests), or None for the default database
+pub fn has_tesouro_been_imported_with_conn(conn_opt: Option<&Connection>) -> Result<bool> {
+    let current_mtime = match get_cache_file_mtime()? {
+        Some(mt) => mt,
+        None => return Ok(false), // No cache file
+    };
+
+    let key = "tesouro_csv_imported_mtime";
+
+    let stored_mtime = match conn_opt {
+        Some(conn) => crate::db::get_metadata(conn, key)?,
+        None => {
+            let conn = crate::db::open_db(None)?;
+            crate::db::get_metadata(&conn, key)?
+        }
+    };
+
+    match stored_mtime {
+        Some(stored) => Ok(stored == current_mtime.to_string()),
+        None => Ok(false), // Never imported
+    }
+}
+
+/// Check if the Tesouro CSV has been imported (uses default database)
+pub fn has_tesouro_been_imported() -> Result<bool> {
+    has_tesouro_been_imported_with_conn(None)
+}
+
+/// Mark that the Tesouro CSV has been imported (stores file's current mtime)
+pub fn mark_tesouro_imported() -> Result<()> {
+    let conn = crate::db::open_db(None)?;
+    let mtime =
+        get_cache_file_mtime()?.ok_or_else(|| anyhow!("Tesouro CSV cache file not found"))?;
+
+    let key = "tesouro_csv_imported_mtime";
+    crate::db::set_metadata(&conn, key, &mtime.to_string())
 }
 
 fn import_tesouro_csv_from_content(
