@@ -185,27 +185,33 @@ pub fn resolve_asset_type_with_name(ticker: &str, name: Option<&str>) -> Result<
     let csv_path = cache_dir.join(CACHE_FILENAME);
     if !csv_path.exists() {
         if let Err(err) = refresh_b3_tickers(true) {
-            tracing::warn!("Failed to download B3 tickers list: {}", err);
-            return Ok(None);
+            tracing::warn!(
+                "Failed to download B3 tickers list (will try Mais Retorno fallback): {}",
+                err
+            );
+            // Continue to fallback; don't return early
         }
     }
 
-    let map = get_cached_map(&cache_dir)?;
-    if let Some(record) = map.get(&lookup_ticker) {
-        return Ok(map_record_to_asset_type(record));
-    }
-    if let Some(record) = find_record_by_name(&map, &lookup_ticker, name) {
-        return Ok(map_record_to_asset_type(record));
-    }
-    if let Some(record) = find_record_by_prefix(&map, &lookup_ticker) {
-        return Ok(map_record_to_asset_type(record));
+    // Only try to use B3 cache if it exists
+    if csv_path.exists() {
+        let map = get_cached_map(&cache_dir)?;
+        if let Some(record) = map.get(&lookup_ticker) {
+            return Ok(map_record_to_asset_type(record));
+        }
+        if let Some(record) = find_record_by_name(&map, &lookup_ticker, name) {
+            return Ok(map_record_to_asset_type(record));
+        }
+        if let Some(record) = find_record_by_prefix(&map, &lookup_ticker) {
+            return Ok(map_record_to_asset_type(record));
+        }
     }
 
     if let Some(asset_type) = registry_asset_type_lookup(&normalized)? {
         return Ok(Some(asset_type));
     }
 
-    if cache_is_stale(&cache_dir)? {
+    if csv_path.exists() && cache_is_stale(&cache_dir)? {
         if let Err(err) = refresh_b3_tickers(true) {
             tracing::warn!("Failed to refresh B3 tickers list: {}", err);
         } else {
