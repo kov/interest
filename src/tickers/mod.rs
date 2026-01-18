@@ -70,26 +70,53 @@ pub fn refresh_b3_tickers(force: bool) -> Result<PathBuf> {
     }
 
     let today = Local::now().date_naive();
-    let (bytes, download_url) = download_b3_tickers(today)?;
+    let max_retries = 5;
 
-    let tmp_path = cache_dir.join(format!("{}.tmp", CACHE_FILENAME));
-    fs::write(&tmp_path, &bytes).context("Failed to write B3 tickers file")?;
-    fs::rename(&tmp_path, &csv_path).context("Failed to finalize B3 tickers cache file")?;
+    for attempt in 0..max_retries {
+        let date = today - chrono::Duration::days(attempt as i64);
+        match download_b3_tickers(date) {
+            Ok((bytes, download_url)) => {
+                let tmp_path = cache_dir.join(format!("{}.tmp", CACHE_FILENAME));
+                fs::write(&tmp_path, &bytes).context("Failed to write B3 tickers file")?;
+                fs::rename(&tmp_path, &csv_path)
+                    .context("Failed to finalize B3 tickers cache file")?;
 
-    let meta = TickersMeta {
-        fetched_at: Utc::now(),
-        source_url: download_url,
-    };
-    let meta_path = cache_dir.join(META_FILENAME);
-    fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)
-        .context("Failed to write tickers metadata")?;
+                let meta = TickersMeta {
+                    fetched_at: Utc::now(),
+                    source_url: download_url,
+                };
+                let meta_path = cache_dir.join(META_FILENAME);
+                fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)
+                    .context("Failed to write tickers metadata")?;
 
-    {
-        let mut guard = cache_guard();
-        *guard = None;
+                {
+                    let mut guard = cache_guard();
+                    *guard = None;
+                }
+
+                return Ok(csv_path);
+            }
+            Err(err) => {
+                if attempt < max_retries - 1 {
+                    tracing::debug!(
+                        "B3 tickers not available for {} (attempt {}/{}): {}",
+                        date.format("%Y-%m-%d"),
+                        attempt + 1,
+                        max_retries,
+                        err
+                    );
+                } else {
+                    return Err(err).context(format!(
+                        "Failed to download B3 tickers after {} attempts ({})",
+                        max_retries,
+                        date.format("%Y-%m-%d")
+                    ));
+                }
+            }
+        }
     }
 
-    Ok(csv_path)
+    unreachable!()
 }
 
 pub fn read_cache_meta(cache_dir: Option<&Path>) -> Result<Option<TickersMetaInfo>> {
