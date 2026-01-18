@@ -265,10 +265,10 @@ async fn sync_maisretorno(
     }
 
     let printer = crate::ui::progress::ProgressPrinter::new(json_output);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ui::progress::ProgressEvent>();
     let progress_handle = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            printer.handle_event(crate::ui::progress::ProgressEvent::from_message(&msg));
+        while let Some(event) = rx.recv().await {
+            printer.handle_event(&event);
         }
     });
 

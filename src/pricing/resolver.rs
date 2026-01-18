@@ -156,36 +156,38 @@ where
     let priceable_asset_ids: Vec<i64> = priceable_assets.iter().filter_map(|a| a.id).collect();
 
     if priceable_asset_ids.is_empty() && gov_bond_assets.is_empty() {
-        progress(&ProgressEvent::from_message("✓ No price updates needed"));
+        progress(&ProgressEvent::Success {
+            message: "No price updates needed".to_string(),
+        });
         tracing::debug!("No priceable assets in portfolio, skipping resolution");
         return Ok(());
     }
 
     if current_only {
         if !gov_bond_assets.is_empty() {
-            progress(&ProgressEvent::from_message(
-                "Importing Tesouro Direto recent prices...",
-            ));
+            progress(&ProgressEvent::Spinner {
+                message: "Importing Tesouro Direto recent prices...".to_string(),
+            });
             let recent_start = today - chrono::Duration::days(365);
             let count =
                 import_gov_bond_prices(gov_bond_assets.clone(), recent_start, today).await?;
-            progress(&ProgressEvent::from_message(&format!(
-                "✓ Imported {} Tesouro prices",
-                count
-            )));
+            progress(&ProgressEvent::Success {
+                message: format!("Imported {} Tesouro prices", count),
+            });
         }
 
         if priceable_asset_ids.is_empty() {
-            progress(&ProgressEvent::from_message("✓ Tesouro prices updated"));
+            progress(&ProgressEvent::Success {
+                message: "Tesouro prices updated".to_string(),
+            });
             return Ok(());
         }
 
         // Fast path: check if we already have recent prices for all *priceable* assets
         // If we have prices from yesterday or today, skip the expensive COTAHIST parsing
-        progress(&ProgressEvent::from_message(&format!(
-            "Checking {} assets...",
-            priceable_asset_ids.len()
-        )));
+        progress(&ProgressEvent::Spinner {
+            message: format!("Checking {} assets...", priceable_asset_ids.len()),
+        });
 
         let placeholders = priceable_asset_ids
             .iter()
@@ -212,7 +214,9 @@ where
 
         let priceable_count = priceable_asset_ids.len() as i64;
         if has_recent_prices == priceable_count {
-            progress(&ProgressEvent::from_message("✓ All prices are up to date!"));
+            progress(&ProgressEvent::Success {
+                message: "All prices are up to date!".to_string(),
+            });
             tracing::debug!(
                 "All {} priceable assets have recent prices (since {}), skipping resolution",
                 priceable_count,
@@ -256,16 +260,17 @@ where
                 .collect();
 
             if !need_update_assets.is_empty() {
-                progress(&ProgressEvent::from_message(&format!(
-                    "Fetching prices for {} assets...",
-                    need_update_assets.len()
-                )));
+                progress(&ProgressEvent::Spinner {
+                    message: format!("Fetching prices for {} assets...", need_update_assets.len()),
+                });
                 tracing::info!(
                     "Fetching current prices for {} assets from Yahoo",
                     need_update_assets.len()
                 );
                 fetch_current_prices_with_progress(conn, &need_update_assets, progress).await?;
-                progress(&ProgressEvent::from_message("✓ Price updates complete!"));
+                progress(&ProgressEvent::Success {
+                    message: "Price updates complete!".to_string(),
+                });
             }
             return Ok(());
         }
@@ -285,16 +290,17 @@ where
         );
 
         if !priceable_assets.is_empty() {
-            progress(&ProgressEvent::from_message(&format!(
-                "Fetching prices for {} assets...",
-                priceable_assets.len()
-            )));
+            progress(&ProgressEvent::Spinner {
+                message: format!("Fetching prices for {} assets...", priceable_assets.len()),
+            });
             tracing::info!(
                 "Fetching current prices for {} assets from Yahoo",
                 priceable_assets.len()
             );
             fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
-            progress(&ProgressEvent::from_message("✓ Price updates complete!"));
+            progress(&ProgressEvent::Success {
+                message: "Price updates complete!".to_string(),
+            });
         }
         return Ok(());
     }
@@ -312,7 +318,7 @@ where
         sorted_years.sort();
 
         // Use a channel to communicate progress from parallel tasks to the main thread
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
 
         // Use JoinSet for parallel processing of multiple years
         let mut join_set = JoinSet::new();
@@ -323,57 +329,33 @@ where
             join_set.spawn_blocking(move || {
                 // Create a callback that forwards progress events with display mode info
                 let callback = |progress_event: &b3_cotahist::DownloadProgress| {
-                    use b3_cotahist::{DisplayMode, DownloadStage};
+                    use b3_cotahist::DownloadStage;
 
-                    let (msg, display_mode) = match progress_event.stage {
-                        DownloadStage::Downloading => (
-                            format!("⬇️  Downloading COTAHIST {}...", progress_event.year),
-                            DisplayMode::Spinner,
-                        ),
-                        DownloadStage::Decompressing => (
-                            format!("📦 Decompressing COTAHIST {}...", progress_event.year),
-                            DisplayMode::Spinner,
-                        ),
-                        DownloadStage::Parsing => {
-                            // Show parsing progress with percentage
-                            let msg_text = if progress_event.display_mode == DisplayMode::Persist {
-                                format!(
-                                    "✓ Parsed {} prices from COTAHIST {}",
-                                    progress_event.records_processed, progress_event.year
-                                )
-                            } else if let Some(total) = progress_event.total_records {
-                                let pct = if total > 0 {
-                                    progress_event.records_processed * 100 / total
-                                } else {
-                                    0
-                                };
-                                format!(
-                                    "📝 Parsing COTAHIST {} ({}/{}  {}%)",
-                                    progress_event.year,
-                                    progress_event.records_processed,
-                                    total,
-                                    pct
-                                )
-                            } else {
-                                format!("📝 Parsing COTAHIST {}...", progress_event.year)
-                            };
-                            (msg_text, progress_event.display_mode.clone())
-                        }
-                        DownloadStage::Complete => (
-                            format!(
-                                "✓ Imported {} prices for {}",
+                    let event = match progress_event.stage {
+                        DownloadStage::Downloading => ProgressEvent::Downloading {
+                            resource: format!("COTAHIST {}", progress_event.year),
+                        },
+                        DownloadStage::Decompressing => ProgressEvent::Decompressing {
+                            file: format!("COTAHIST {}", progress_event.year),
+                        },
+                        DownloadStage::Parsing => ProgressEvent::Parsing {
+                            file: format!("COTAHIST {}", progress_event.year),
+                            progress: progress_event.total_records.map(|total| {
+                                crate::ui::progress::ProgressData {
+                                    current: progress_event.records_processed,
+                                    total: Some(total),
+                                }
+                            }),
+                        },
+                        DownloadStage::Complete => ProgressEvent::Success {
+                            message: format!(
+                                "Imported {} prices for {}",
                                 progress_event.records_processed, progress_event.year
                             ),
-                            DisplayMode::Persist,
-                        ),
+                        },
                     };
 
-                    // Send progress message through channel
-                    let prefixed_msg = match display_mode {
-                        DisplayMode::Persist => format!("__PERSIST__:{}", msg),
-                        DisplayMode::Spinner => msg,
-                    };
-                    let _ = tx.send(prefixed_msg);
+                    let _ = tx.send(event);
                 };
 
                 // Open a fresh connection for this task
@@ -406,7 +388,9 @@ where
                         } else {
                             "import failed"
                         };
-                        let _ = tx.send(format!("__PERSIST__:❌ COTAHIST {}: {}", year, reason));
+                        let _ = tx.send(ProgressEvent::Error {
+                            message: format!("COTAHIST {}: {}", year, reason),
+                        });
                         tracing::warn!("Failed to import COTAHIST for {}: {}", year, e);
                         // Continue - graceful degradation
                     }
@@ -417,27 +401,21 @@ where
         // Drop the main tx so the receiver knows when all tasks are done
         drop(tx);
 
-        // Create a task that collects progress messages while join_set completes
-        let progress_future = async {
-            while let Some(msg) = rx.recv().await {
-                progress(&ProgressEvent::from_message(&msg));
-            }
-        };
-
-        // Run both concurrently: collect progress messages and wait for tasks
-        tokio::select! {
-            _ = progress_future => {
-                // Progress finished first, wait for remaining tasks
-                while let Some(_result) = join_set.join_next().await {
-                    // Tasks handle errors internally
+        // Concurrently wait for tasks and drain progress messages
+        loop {
+            tokio::select! {
+                Some(result) = join_set.join_next() => {
+                    // Task completed, continue
+                    let _ = result;
                 }
-            }
-            _ = async {
-                while let Some(_result) = join_set.join_next().await {
-                    // Tasks handle errors internally
+                Some(event) = rx.recv() => {
+                    // Progress event received, display it
+                    progress(&event);
                 }
-            } => {
-                // All tasks finished before progress channel closed
+                else => {
+                    // Both join_set and channel are exhausted
+                    break;
+                }
             }
         }
     }
@@ -445,15 +423,14 @@ where
     if !gov_bond_assets.is_empty() && start_date < today {
         let historical_end = if end_date < today { end_date } else { today };
         if start_date <= historical_end {
-            progress(&ProgressEvent::from_message(
-                "Importing Tesouro Direto historical prices...",
-            ));
+            progress(&ProgressEvent::Spinner {
+                message: "Importing Tesouro Direto historical prices...".to_string(),
+            });
             let count =
                 import_gov_bond_prices(gov_bond_assets.clone(), start_date, historical_end).await?;
-            progress(&ProgressEvent::from_message(&format!(
-                "✓ Imported {} Tesouro historical prices",
-                count
-            )));
+            progress(&ProgressEvent::Success {
+                message: format!("Imported {} Tesouro historical prices", count),
+            });
         }
     }
 
@@ -466,16 +443,17 @@ where
 
     // Fetch current prices via API (requires async runtime)
     if !priceable_assets.is_empty() {
-        progress(&ProgressEvent::from_message(&format!(
-            "Fetching prices for {} assets...",
-            priceable_assets.len()
-        )));
+        progress(&ProgressEvent::Spinner {
+            message: format!("Fetching prices for {} assets...", priceable_assets.len()),
+        });
         tracing::info!(
             "Fetching current prices for {} assets from Yahoo",
             priceable_assets.len()
         );
         fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
-        progress(&ProgressEvent::from_message("✓ Price updates complete!"));
+        progress(&ProgressEvent::Success {
+            message: "Price updates complete!".to_string(),
+        });
     }
 
     Ok(())
@@ -601,19 +579,21 @@ where
         match fetch_result {
             Ok(price) => {
                 successful_prices.push((asset_id, price));
-                let msg = format!(
-                    "{} → {} ({}/{})",
-                    ticker,
-                    format_currency(price),
-                    completed,
-                    total
-                );
-                progress(&ProgressEvent::from_message(&msg));
+                progress(&ProgressEvent::TickerResult {
+                    ticker: ticker.clone(),
+                    price: Ok(format_currency(price)),
+                    current: completed,
+                    total,
+                });
                 tracing::debug!("Fetched price for {}: {}", ticker, price);
             }
             Err(e) => {
-                let msg = format!("{} → failed ({}/{})", ticker, completed, total);
-                progress(&ProgressEvent::from_message(&msg));
+                progress(&ProgressEvent::TickerResult {
+                    ticker: ticker.clone(),
+                    price: Err("failed".to_string()),
+                    current: completed,
+                    total,
+                });
                 tracing::warn!("Failed to fetch price for {}: {}", ticker, e);
             }
         }

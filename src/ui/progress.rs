@@ -5,29 +5,69 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// Typed progress events for UI rendering and persistence
+/// Progress tracking data for operations with countable steps
 #[derive(Debug, Clone)]
-pub enum ProgressEvent {
-    /// A single line of progress; `persist=true` means the message should be
-    /// printed as a permanent line (newline), otherwise it's transient (spinner line).
-    Line { text: String, persist: bool },
+pub struct ProgressData {
+    pub current: usize,
+    pub total: Option<usize>,
 }
 
-impl ProgressEvent {
-    /// Create a Line event parsing the legacy string convention (__PERSIST__:prefix)
-    pub fn from_message(msg: &str) -> Self {
-        if let Some(content) = msg.strip_prefix("__PERSIST__:") {
-            ProgressEvent::Line {
-                text: content.to_string(),
-                persist: true,
-            }
+impl ProgressData {
+    /// Format progress data as string: "(N/M)" or "(N)" if total unknown
+    fn format(&self) -> String {
+        if let Some(total) = self.total {
+            let percentage = if total > 0 {
+                (self.current * 100) / total
+            } else {
+                0
+            };
+            format!("({}/{} {}%)", self.current, total, percentage)
         } else {
-            ProgressEvent::Line {
-                text: msg.to_string(),
-                persist: false,
-            }
+            format!("({})", self.current)
         }
     }
+}
+
+/// Semantic progress events for UI rendering
+#[derive(Debug, Clone)]
+pub enum ProgressEvent {
+    /// Operation completed successfully - persisted with green ✓
+    Success { message: String },
+
+    /// Operation failed - persisted with red ✗
+    Error { message: String },
+
+    /// Informational message - persisted with blue ℹ
+    Info { message: String },
+
+    /// Downloading resource - transient spinner with 📥
+    Downloading { resource: String },
+
+    /// Decompressing file - transient spinner with 📦
+    Decompressing { file: String },
+
+    /// Parsing file - transient spinner with 📝
+    Parsing {
+        file: String,
+        progress: Option<ProgressData>,
+    },
+
+    /// Recomputing/recalculating - transient spinner with ↻
+    Recomputing {
+        what: String,
+        progress: Option<ProgressData>,
+    },
+
+    /// Individual ticker price fetch result - persisted
+    TickerResult {
+        ticker: String,
+        price: Result<String, String>, // Ok(price) or Err(reason)
+        current: usize,
+        total: usize,
+    },
+
+    /// Generic transient spinner message (fallback for uncategorized updates)
+    Spinner { message: String },
 }
 
 #[derive(Debug)]
@@ -75,82 +115,78 @@ impl ProgressPrinter {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn start(&self) {
+    pub fn handle_event(&self, event: &ProgressEvent) {
         if !self.enabled {
             return;
         }
-        if let Ok(mut state) = self.state.lock() {
-            state.active = true;
+
+        match event {
+            ProgressEvent::Success { message } => {
+                // Don't finish operation - just persist the message
+                // The spinner keeps running until printer is dropped
+                self.persist_line(&format!("{} {}", "✓".green(), message));
+            }
+            ProgressEvent::Error { message } => {
+                // Don't finish operation - just persist the message
+                // The spinner keeps running until printer is dropped
+                self.persist_line(&format!("{} {}", "✗".red(), message));
+            }
+            ProgressEvent::Info { message } => {
+                self.persist_line(&format!("{} {}", "ℹ".blue(), message));
+            }
+            ProgressEvent::Downloading { resource } => {
+                self.update_spinner(&format!("📥 Downloading {}...", resource));
+            }
+            ProgressEvent::Decompressing { file } => {
+                self.update_spinner(&format!("📦 Decompressing {}...", file));
+            }
+            ProgressEvent::Parsing { file, progress } => {
+                let msg = if let Some(p) = progress {
+                    format!("📝 Parsing {} {}", file, p.format())
+                } else {
+                    format!("📝 Parsing {}...", file)
+                };
+                self.update_spinner(&msg);
+            }
+            ProgressEvent::Recomputing { what, progress } => {
+                let msg = if let Some(p) = progress {
+                    format!("↻ Recomputing {} {}", what, p.format())
+                } else {
+                    format!("↻ Recomputing {}...", what)
+                };
+                self.update_spinner(&msg);
+            }
+            ProgressEvent::TickerResult {
+                ticker,
+                price,
+                current,
+                total,
+            } => {
+                let result_str = match price {
+                    Ok(p) => format!("{} → {} ({}/{})", ticker, p, current, total),
+                    Err(reason) => format!("{} → {} ({}/{})", ticker, reason, current, total),
+                };
+                self.persist_line(&result_str);
+            }
+            ProgressEvent::Spinner { message } => {
+                self.update_spinner(message);
+            }
         }
     }
 
-    #[allow(dead_code)]
-    pub fn stop(&self) {
-        if !self.enabled {
-            return;
-        }
-        if let Ok(mut state) = self.state.lock() {
-            state.active = false;
-        }
-    }
-
-    pub fn update(&self, message: &str) {
-        if !self.enabled {
-            return;
-        }
+    /// Internal: Update spinner message (transient)
+    fn update_spinner(&self, message: &str) {
         if let Ok(mut state) = self.state.lock() {
             state.message = message.to_string();
             state.active = true;
         }
     }
 
-    pub fn persist(&self, message: &str) {
-        if !self.enabled {
-            return;
-        }
+    /// Internal: Persist a line to output (permanent)
+    fn persist_line(&self, formatted_message: &str) {
         clear_line();
-        let formatted = if message.starts_with("✓") {
-            message.green().to_string()
-        } else if message.starts_with("❌") || message.starts_with("✗") {
-            message.red().to_string()
-        } else if message.starts_with("ℹ") {
-            message.blue().to_string()
-        } else {
-            message.to_string()
-        };
-        println!("{}", formatted);
+        println!("{}", formatted_message);
         let _ = io::stdout().flush();
-    }
-
-    pub fn finish(&self, success: bool, message: &str) {
-        if !self.enabled {
-            return;
-        }
-        if let Ok(mut state) = self.state.lock() {
-            state.finished = true;
-            state.active = false;
-        }
-        let icon = if success {
-            "✓".green().to_string()
-        } else {
-            "✗".red().to_string()
-        };
-        clear_line();
-        println!("{} {}", icon, message);
-        let _ = io::stdout().flush();
-    }
-
-    pub fn handle_event(&self, event: ProgressEvent) {
-        match event {
-            ProgressEvent::Line { text, persist } => {
-                if persist {
-                    self.persist(&text);
-                } else {
-                    self.update(&text);
-                }
-            }
-        }
     }
 }
 
@@ -217,13 +253,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progress_event_parses_persist_prefix() {
-        let event = ProgressEvent::from_message("__PERSIST__:hello");
-        match event {
-            ProgressEvent::Line { text, persist } => {
-                assert_eq!(text, "hello");
-                assert!(persist);
-            }
-        }
+    fn progress_data_formats_with_percentage() {
+        let data = ProgressData {
+            current: 25,
+            total: Some(100),
+        };
+        assert_eq!(data.format(), "(25/100 25%)");
+    }
+
+    #[test]
+    fn progress_data_formats_without_total() {
+        let data = ProgressData {
+            current: 42,
+            total: None,
+        };
+        assert_eq!(data.format(), "(42)");
     }
 }

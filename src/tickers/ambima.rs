@@ -10,7 +10,9 @@ pub fn is_debenture(ticker: &str) -> Result<bool> {
     let url = format!("{}/{}/caracteristicas", AMBIMA_BASE_URL, ticker);
     let prefix = format!("Checking if {} is a bond: ", ticker);
     let printer = ProgressPrinter::new(false);
-    printer.update(&format!("{}Opening Ambima page", prefix));
+    printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+        message: format!("{}Opening Ambima page", prefix),
+    });
     let browser = headless_chrome::Browser::default()
         .context("Failed to start headless Chrome for Ambima lookup")?;
     let tab = browser
@@ -19,7 +21,9 @@ pub fn is_debenture(ticker: &str) -> Result<bool> {
 
     tab.navigate_to(&url)
         .context("Failed to navigate Ambima page")?;
-    printer.update(&format!("{}Waiting for Ambima page shell", prefix));
+    printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+        message: format!("{}Waiting for Ambima page shell", prefix),
+    });
     tab.wait_for_element_with_custom_timeout("body", Duration::from_secs(5))
         .context("Timed out waiting for Ambima body")?;
 
@@ -29,25 +33,30 @@ pub fn is_debenture(ticker: &str) -> Result<bool> {
     {
         let html = tab.get_content().context("Failed to read Ambima HTML")?;
         if is_not_found_page(&html) {
-            printer.finish(false, &format!("{} not found on Ambima", ticker));
+            printer.handle_event(&crate::ui::progress::ProgressEvent::Info {
+                message: format!("{} not found on Ambima", ticker),
+            });
             return Ok(false);
         }
     }
 
-    printer.update(&format!("{}Waiting for Ambima debenture details", prefix));
+    printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+        message: format!("{}Waiting for Ambima debenture details", prefix),
+    });
     let html = wait_for_ambima_details(&tab, ticker, &printer, &prefix)?;
     let details = parse_debenture_details(&html, Some(ticker));
     if let Some(details) = details {
-        printer.finish(
-            true,
-            &format!(
+        printer.handle_event(&crate::ui::progress::ProgressEvent::Success {
+            message: format!(
                 "{} is a bond expiring on {} ({})",
                 details.ticker, details.maturity_date, details.remuneration
             ),
-        );
+        });
         Ok(true)
     } else {
-        printer.finish(false, &format!("{} not found on Ambima", ticker));
+        printer.handle_event(&crate::ui::progress::ProgressEvent::Info {
+            message: format!("{} not found on Ambima", ticker),
+        });
         Ok(false)
     }
 }
@@ -247,7 +256,9 @@ fn wait_for_ambima_details(
         let html = tab.get_content().context("Failed to read Ambima HTML")?;
         if is_not_found_page(&html) {
             tracing::debug!("Ambima check {} found not-found page", ticker);
-            printer.update(&format!("{}Ambima not found page detected", prefix));
+            printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+                message: format!("{}Ambima not found page detected", prefix),
+            });
             return Ok(html);
         }
         let lower = html.to_ascii_lowercase();
@@ -262,15 +273,17 @@ fn wait_for_ambima_details(
             has_remuneracao,
             has_card
         );
-        printer.update(&format!(
-            "{}Ambima details (agenda={}, remuneracao={}, card={}, attempt {}/{})",
-            prefix,
-            has_agenda,
-            has_remuneracao,
-            has_card,
-            attempts + 1,
-            max_attempts
-        ));
+        printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+            message: format!(
+                "{}Ambima details (agenda={}, remuneracao={}, card={}, attempt {}/{})",
+                prefix,
+                has_agenda,
+                has_remuneracao,
+                has_card,
+                attempts + 1,
+                max_attempts
+            ),
+        });
 
         if has_agenda && has_remuneracao {
             return Ok(html);
@@ -281,14 +294,15 @@ fn wait_for_ambima_details(
                 "Ambima check {} bailing early (no agenda/remuneracao)",
                 ticker
             );
-            printer.update(&format!("{}No Ambima debenture markers found yet", prefix));
+            printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+                message: format!("{}No Ambima debenture markers found yet", prefix),
+            });
             return Ok(html);
         }
         if attempts >= max_attempts {
-            printer.update(&format!(
-                "{}Timed out waiting for Ambima debenture details",
-                prefix
-            ));
+            printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+                message: format!("{}Timed out waiting for Ambima debenture details", prefix),
+            });
             return Ok(html);
         }
         std::thread::sleep(delay);

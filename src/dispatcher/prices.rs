@@ -19,54 +19,40 @@ pub async fn dispatch_prices(
             let mut conn = db::open_db(None)?;
 
             let printer = crate::ui::progress::ProgressPrinter::new(json_output);
-            printer.persist(&format!("📥 Importing B3 COTAHIST for year {}...", year));
+            printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
+                message: format!("Importing B3 COTAHIST for year {}...", year),
+            });
 
             // Create progress callback
             let callback = |progress: &b3_cotahist::DownloadProgress| {
-                use b3_cotahist::{DisplayMode, DownloadStage};
+                use b3_cotahist::DownloadStage;
 
-                let stage_msg = match progress.stage {
-                    DownloadStage::Downloading => {
-                        format!("📥 Downloading COTAHIST {} ZIP", progress.year)
-                    }
+                let event = match progress.stage {
+                    DownloadStage::Downloading => crate::ui::progress::ProgressEvent::Downloading {
+                        resource: format!("COTAHIST {} ZIP", progress.year),
+                    },
                     DownloadStage::Decompressing => {
-                        format!("📦 Decompressing COTAHIST {}", progress.year)
-                    }
-                    DownloadStage::Parsing => {
-                        if let Some(total) = progress.total_records {
-                            if progress.records_processed.is_multiple_of(50000)
-                                || progress.records_processed == total
-                            {
-                                let pct = (progress.records_processed as f64 / total as f64 * 100.0)
-                                    as usize;
-                                format!(
-                                    "📝 Parsing COTAHIST {} ({}/{}  {}%)",
-                                    progress.year, progress.records_processed, total, pct
-                                )
-                            } else {
-                                return;
-                            }
-                        } else {
-                            format!(
-                                "📝 Parsing COTAHIST {} ({})",
-                                progress.year, progress.records_processed
-                            )
+                        crate::ui::progress::ProgressEvent::Decompressing {
+                            file: format!("COTAHIST {}", progress.year),
                         }
                     }
-                    _ => "".to_string(),
-                };
-
-                let event = match progress.display_mode {
-                    DisplayMode::Persist => crate::ui::progress::ProgressEvent::Line {
-                        text: stage_msg,
-                        persist: true,
+                    DownloadStage::Parsing => crate::ui::progress::ProgressEvent::Parsing {
+                        file: format!("COTAHIST {}", progress.year),
+                        progress: progress.total_records.map(|total| {
+                            crate::ui::progress::ProgressData {
+                                current: progress.records_processed,
+                                total: Some(total),
+                            }
+                        }),
                     },
-                    DisplayMode::Spinner => crate::ui::progress::ProgressEvent::Line {
-                        text: stage_msg,
-                        persist: false,
+                    DownloadStage::Complete => crate::ui::progress::ProgressEvent::Success {
+                        message: format!(
+                            "Imported {} prices for {}",
+                            progress.records_processed, progress.year
+                        ),
                     },
                 };
-                printer.handle_event(event);
+                printer.handle_event(&event);
             };
 
             let cb_ref: &dyn Fn(&b3_cotahist::DownloadProgress) = &callback;
@@ -78,19 +64,22 @@ pub async fn dispatch_prices(
                 let imported =
                     b3_cotahist::import_records_to_db(&mut conn, &records, Some(cb_ref), year)?;
                 let assets: HashSet<String> = records.into_iter().map(|r| r.ticker).collect();
-                printer.finish(
-                    true,
-                    &format!(
+                printer.handle_event(&crate::ui::progress::ProgressEvent::Success {
+                    message: format!(
                         "Imported COTAHIST {}: {} assets, {} prices",
                         year,
                         assets.len(),
                         imported
                     ),
-                );
+                });
                 Ok(())
             })() {
                 Ok(_) => {}
-                Err(e) => printer.finish(false, &format!("Import failed for {}: {}", year, e)),
+                Err(e) => {
+                    printer.handle_event(&crate::ui::progress::ProgressEvent::Error {
+                        message: format!("Import failed for {}: {}", year, e),
+                    });
+                }
             }
 
             Ok(())

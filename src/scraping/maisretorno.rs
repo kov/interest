@@ -92,7 +92,7 @@ pub fn select_sources(asset_type: Option<AssetType>) -> Vec<&'static MaisRetorno
 pub async fn fetch_registry_entries(
     client: &Client,
     sources: &[&MaisRetornoListSource],
-    progress_tx: Option<mpsc::UnboundedSender<String>>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::ui::progress::ProgressEvent>>,
 ) -> Result<(Vec<AssetRegistryEntry>, Vec<SourceFetchStats>)> {
     let mut entries = Vec::new();
     let mut per_source = Vec::new();
@@ -100,12 +100,13 @@ pub async fn fetch_registry_entries(
         let source_label = source_label(source.url);
         send_progress(
             &progress_tx,
-            format!(
-                "Fetching {} {} page 1...",
-                source.asset_type.as_str(),
-                source_label
-            ),
-            false,
+            crate::ui::progress::ProgressEvent::Spinner {
+                message: format!(
+                    "Fetching {} {} page 1...",
+                    source.asset_type.as_str(),
+                    source_label
+                ),
+            },
         );
         let page = 1;
         let url = build_page_url(source.url, page);
@@ -130,14 +131,15 @@ pub async fn fetch_registry_entries(
                     let _permit = permit;
                     send_progress(
                         &tx,
-                        format!(
-                            "Fetching {} {} page {}/{}",
-                            asset_type.as_str(),
-                            source_label,
-                            page,
-                            total_pages
-                        ),
-                        false,
+                        crate::ui::progress::ProgressEvent::Spinner {
+                            message: format!(
+                                "Fetching {} {} page {}/{}",
+                                asset_type.as_str(),
+                                source_label,
+                                page,
+                                total_pages
+                            ),
+                        },
                     );
                     let url = build_page_url(source_url, page);
                     let html = fetch_html(&client, &url).await?;
@@ -155,25 +157,27 @@ pub async fn fetch_registry_entries(
                     Ok(Err(err)) => {
                         send_progress(
                             &progress_tx,
-                            format!(
-                                "❌ {} {} page error: {}",
-                                source.asset_type.as_str(),
-                                source_label,
-                                err
-                            ),
-                            true,
+                            crate::ui::progress::ProgressEvent::Error {
+                                message: format!(
+                                    "{} {} page error: {}",
+                                    source.asset_type.as_str(),
+                                    source_label,
+                                    err
+                                ),
+                            },
                         );
                     }
                     Err(err) => {
                         send_progress(
                             &progress_tx,
-                            format!(
-                                "❌ {} {} page task failed: {}",
-                                source.asset_type.as_str(),
-                                source_label,
-                                err
-                            ),
-                            true,
+                            crate::ui::progress::ProgressEvent::Error {
+                                message: format!(
+                                    "{} {} page task failed: {}",
+                                    source.asset_type.as_str(),
+                                    source_label,
+                                    err
+                                ),
+                            },
                         );
                     }
                 }
@@ -189,15 +193,16 @@ pub async fn fetch_registry_entries(
         per_source.push(source_stats.clone());
         send_progress(
             &progress_tx,
-            format!(
-                "✓ Fetched {} {} data - {} page{}, {} entries.",
-                source_stats.asset_type.as_str(),
-                source_stats.label,
-                source_stats.pages,
-                if source_stats.pages == 1 { "" } else { "s" },
-                source_stats.entries
-            ),
-            true,
+            crate::ui::progress::ProgressEvent::Success {
+                message: format!(
+                    "Fetched {} {} data - {} page{}, {} entries.",
+                    source_stats.asset_type.as_str(),
+                    source_stats.label,
+                    source_stats.pages,
+                    if source_stats.pages == 1 { "" } else { "s" },
+                    source_stats.entries
+                ),
+            },
         );
 
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -453,14 +458,12 @@ fn parse_bond_name(raw: &str) -> (String, Option<String>) {
     }
 }
 
-fn send_progress(tx: &Option<mpsc::UnboundedSender<String>>, message: String, persist: bool) {
+fn send_progress(
+    tx: &Option<mpsc::UnboundedSender<crate::ui::progress::ProgressEvent>>,
+    event: crate::ui::progress::ProgressEvent,
+) {
     if let Some(tx) = tx {
-        let payload = if persist {
-            format!("__PERSIST__:{}", message)
-        } else {
-            message
-        };
-        let _ = tx.send(payload);
+        let _ = tx.send(event);
     }
 }
 
@@ -488,12 +491,13 @@ pub async fn sync_registry(
     conn: &rusqlite::Connection,
     sources: &[&MaisRetornoListSource],
     dry_run: bool,
-    progress_tx: Option<mpsc::UnboundedSender<String>>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::ui::progress::ProgressEvent>>,
 ) -> Result<SyncStats> {
     send_progress(
         &progress_tx,
-        "Refreshing asset data from MaisRetorno...".to_string(),
-        true,
+        crate::ui::progress::ProgressEvent::Spinner {
+            message: "Refreshing asset data from MaisRetorno...".to_string(),
+        },
     );
     let client = Client::new();
     let (entries, _per_source) =

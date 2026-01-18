@@ -33,15 +33,6 @@ pub struct CotahistRecord {
     pub volume: i64,
 }
 
-/// Controls whether a progress update should be displayed on spinner or persisted to terminal
-#[derive(Debug, Clone, PartialEq)]
-pub enum DisplayMode {
-    /// Update only the spinner status (no newline, in-place)
-    Spinner,
-    /// Persist to terminal with newline
-    Persist,
-}
-
 /// Progress information for COTAHIST downloads
 #[derive(Debug, Clone)]
 pub struct DownloadProgress {
@@ -49,7 +40,6 @@ pub struct DownloadProgress {
     pub year: i32,
     pub records_processed: usize,
     pub total_records: Option<usize>,
-    pub display_mode: DisplayMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +114,6 @@ pub fn download_cotahist_year(
                 year,
                 records_processed: 0,
                 total_records: None,
-                display_mode: DisplayMode::Persist,
             });
         }
 
@@ -145,7 +134,6 @@ pub fn download_cotahist_year(
             year,
             records_processed: 0,
             total_records: None,
-            display_mode: DisplayMode::Spinner,
         });
     }
 
@@ -186,7 +174,6 @@ pub fn download_cotahist_year(
             year,
             records_processed: 0,
             total_records: None,
-            display_mode: DisplayMode::Persist,
         });
     }
 
@@ -298,7 +285,6 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
             year,
             records_processed: 0,
             total_records: None,
-            display_mode: DisplayMode::Spinner,
         });
     }
 
@@ -322,7 +308,6 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
             year,
             records_processed: 0,
             total_records: Some(contents.lines().count()),
-            display_mode: DisplayMode::Spinner,
         });
     }
 
@@ -338,17 +323,11 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
         // Report progress every 10000 lines
         if let Some(ref callback) = progress_callback {
             if idx % 10000 == 0 || idx == total_lines - 1 {
-                let display_mode = if idx == total_lines - 1 {
-                    DisplayMode::Persist // Final parsing update - persist to terminal
-                } else {
-                    DisplayMode::Spinner // Intermediate updates - spinner only
-                };
                 callback(&DownloadProgress {
                     stage: DownloadStage::Parsing,
                     year,
                     records_processed: idx + 1,
                     total_records: Some(total_lines),
-                    display_mode,
                 });
             }
         }
@@ -360,7 +339,6 @@ pub fn parse_cotahist_file<P: AsRef<Path>>(
             year,
             records_processed: records.len(),
             total_records: Some(total_lines),
-            display_mode: DisplayMode::Persist,
         });
     }
 
@@ -507,7 +485,6 @@ pub fn import_records_to_db(
             year,
             records_processed: inserted,
             total_records: Some(records.len()),
-            display_mode: DisplayMode::Persist,
         });
     }
 

@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::reports::portfolio::calculate_allocation;
-use crate::ui::progress::ProgressPrinter;
+use crate::ui::progress::{ProgressEvent, ProgressPrinter};
 use crate::utils::format_currency;
 use crate::{cli, db, reports};
 
@@ -102,7 +102,6 @@ pub async fn dispatch_portfolio_show(
             if !assets_with_positions.is_empty() {
                 let total = priceable_assets.len();
                 let printer = ProgressPrinter::new(json_output);
-                let mut completed = 0usize;
                 let price_range = if let Some(date) = historical_date {
                     (date, date)
                 } else {
@@ -110,47 +109,23 @@ pub async fn dispatch_portfolio_show(
                 };
 
                 // Show initial spinner
-                printer.update(&format!("Fetching prices 0/{}...", total));
+                printer.handle_event(&ProgressEvent::Spinner {
+                    message: format!("Fetching prices 0/{}...", total),
+                });
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
                     &assets_with_positions,
                     price_range,
                     |event| {
-                        // Map typed event to legacy display values
-                        let (raw_text, should_persist) = match event {
-                            crate::ui::progress::ProgressEvent::Line { text, persist } => {
-                                (text.clone(), *persist)
-                            }
-                        };
-                        let msg_content = raw_text.as_str();
-
-                        // Check if this is a ticker result (contains "→")
-                        if let Some(count) = crate::dispatcher::parse_progress_count(msg_content) {
-                            completed = count;
-                            // Print ticker result, re-draw spinner message
-                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
-                                text: msg_content.to_string(),
-                                persist: true,
+                        // For ticker results, also update the spinner with current count
+                        if let ProgressEvent::TickerResult { current, total, .. } = event {
+                            printer.handle_event(event);
+                            printer.handle_event(&ProgressEvent::Spinner {
+                                message: format!("Fetching prices {}/{}...", current, total),
                             });
-                            printer.update(&format!("Fetching prices {}/{}...", completed, total));
-                        } else if should_persist {
-                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
-                                text: msg_content.to_string(),
-                                persist: true,
-                            });
-
-                            printer.update(&format!("Fetching prices {}/{}...", completed, total));
                         } else {
-                            // Be permissive for non-persistent progress messages: show any
-                            // transient activity so the user sees progress instead of a
-                            // stagnant spinner.
-                            if !msg_content.trim().is_empty() {
-                                printer.handle_event(crate::ui::progress::ProgressEvent::Line {
-                                    text: raw_text,
-                                    persist: should_persist,
-                                });
-                            }
+                            printer.handle_event(event);
                         }
                     },
                 )
@@ -161,7 +136,9 @@ pub async fn dispatch_portfolio_show(
                     Ok::<(), anyhow::Error>(())
                 })?;
 
-                printer.finish(true, "Price resolution complete");
+                printer.handle_event(&ProgressEvent::Success {
+                    message: "Price resolution complete".to_string(),
+                });
 
                 // Recompute the portfolio now that current prices have been fetched
                 // so displayed values (Price, Value, P&L) reflect the latest data.

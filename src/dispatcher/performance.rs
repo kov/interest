@@ -1,6 +1,6 @@
 //! Performance command dispatcher implementation
 
-use crate::ui::progress::ProgressPrinter;
+use crate::ui::progress::{ProgressEvent, ProgressPrinter};
 use crate::utils::{format_currency, format_currency_aligned};
 use crate::{db, reports};
 use anyhow::{anyhow, Result};
@@ -86,52 +86,25 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
             if !json_output && !skip_price_fetch {
                 let total = priceable_assets.len();
                 let printer = ProgressPrinter::new(json_output);
-                let mut completed = 0usize;
 
                 // Show initial spinner
-                printer.update(&format!("Fetching prices 0/{}...", total));
+                printer.handle_event(&ProgressEvent::Spinner {
+                    message: format!("Fetching prices 0/{}...", total),
+                });
 
                 crate::pricing::resolver::ensure_prices_available_with_progress(
                     &mut conn,
                     &assets,
                     (price_start, today),
                     |event| {
-                        let (raw_text, should_persist) = match event {
-                            crate::ui::progress::ProgressEvent::Line { text, persist } => {
-                                (text.clone(), *persist)
-                            }
-                        };
-                        let msg = raw_text.as_str();
-
-                        // Check if this is a ticker result (contains "→")
-                        if msg.contains("→") {
-                            // Parse completion count from message like "TICKER → R$ XX.XX (N/M)"
-                            if let Some(paren_start) = msg.rfind('(') {
-                                if let Some(slash) = msg[paren_start..].find('/') {
-                                    if let Ok(n) =
-                                        msg[paren_start + 1..paren_start + slash].parse::<usize>()
-                                    {
-                                        completed = n;
-                                    }
-                                }
-                            }
-
-                            // Print ticker result, re-draw spinner message
-                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
-                                text: msg.to_string(),
-                                persist: true,
-                            });
-                            printer.update(&format!("Fetching prices {}/{}...", completed, total));
-                        } else if msg.starts_with("✓") {
-                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
-                                text: msg.to_string(),
-                                persist: true,
+                        // For ticker results, also update the spinner with current count
+                        if let ProgressEvent::TickerResult { current, total, .. } = event {
+                            printer.handle_event(event);
+                            printer.handle_event(&ProgressEvent::Spinner {
+                                message: format!("Fetching prices {}/{}...", current, total),
                             });
                         } else {
-                            printer.handle_event(crate::ui::progress::ProgressEvent::Line {
-                                text: raw_text,
-                                persist: should_persist,
-                            });
+                            printer.handle_event(event);
                         }
                     },
                 )

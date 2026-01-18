@@ -1396,10 +1396,14 @@ impl TaxProgressPrinter {
                     .target_year
                     .map(|t| (t - from_year + 1).max(1) as usize)
                     .unwrap_or(1);
-                self.printer.update(&format!(
-                    "↻ Recomputing snapshots {}/{} (starting {})",
-                    self.completed_years, self.total_years, from_year
-                ));
+                self.printer
+                    .handle_event(&crate::ui::progress::ProgressEvent::Recomputing {
+                        what: format!("snapshots (starting {})", from_year),
+                        progress: Some(crate::ui::progress::ProgressData {
+                            current: self.completed_years,
+                            total: Some(self.total_years),
+                        }),
+                    });
             }
             tax::ReportProgress::RecomputedYear { year } => {
                 if self.in_progress {
@@ -1407,37 +1411,32 @@ impl TaxProgressPrinter {
                     let from = self.from_year.unwrap_or(year);
                     if Some(year) == self.target_year {
                         self.printer
-                            .finish(true, &format!("Snapshots updated {}→{}", from, year));
+                            .handle_event(&crate::ui::progress::ProgressEvent::Success {
+                                message: format!("Snapshots updated {}→{}", from, year),
+                            });
                         self.in_progress = false;
                     } else {
-                        self.printer.update(&format!(
-                            "↻ Recomputing snapshots {}/{} (year {})",
-                            self.completed_years, self.total_years, year
-                        ));
+                        self.printer.handle_event(
+                            &crate::ui::progress::ProgressEvent::Recomputing {
+                                what: format!("snapshots (year {})", year),
+                                progress: Some(crate::ui::progress::ProgressData {
+                                    current: self.completed_years,
+                                    total: Some(self.total_years),
+                                }),
+                            },
+                        );
                     }
                 }
             }
             tax::ReportProgress::TargetCacheHit { year } => {
                 self.printer
-                    .persist(&format!("✓ Cache hit for {}; using cached carry", year));
+                    .handle_event(&crate::ui::progress::ProgressEvent::Success {
+                        message: format!("Cache hit for {}; using cached carry", year),
+                    });
             }
             _ => {}
         }
     }
-}
-
-/// Parse a progress message to extract the completion count.
-/// Messages like "TICKER → R$ XX.XX (N/M)" return Some(N).
-/// Returns None if the message doesn't match the expected format.
-fn parse_progress_count(msg: &str) -> Option<usize> {
-    if !msg.contains("→") {
-        return None;
-    }
-    let paren_start = msg.rfind('(')?;
-    let slash_offset = msg[paren_start..].find('/')?;
-    msg[paren_start + 1..paren_start + slash_offset]
-        .parse()
-        .ok()
 }
 
 #[cfg(test)]
@@ -1469,31 +1468,5 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_progress_count_valid() {
-        assert_eq!(parse_progress_count("PETR4 → R$ 35.50 (1/35)"), Some(1));
-        assert_eq!(parse_progress_count("HGLG11 → R$ 156.99 (15/35)"), Some(15));
-        assert_eq!(
-            parse_progress_count("VALE3 → R$ 58.20 (100/100)"),
-            Some(100)
-        );
-    }
-
-    #[test]
-    fn test_parse_progress_count_failed() {
-        assert_eq!(parse_progress_count("PETR4 → failed (5/35)"), Some(5));
-    }
-
-    #[test]
-    fn test_parse_progress_count_no_arrow() {
-        assert_eq!(parse_progress_count("Checking 35 assets..."), None);
-        assert_eq!(parse_progress_count("✓ All prices are up to date!"), None);
-    }
-
-    #[test]
-    fn test_parse_progress_count_no_parens() {
-        assert_eq!(parse_progress_count("PETR4 → R$ 35.50"), None);
     }
 }
