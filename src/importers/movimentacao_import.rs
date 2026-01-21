@@ -16,7 +16,10 @@ pub fn import_movimentacao_entries(
     track_state: bool,
 ) -> Result<crate::importers::ImportStats> {
     let receipt_index = build_subscription_receipts_index(&entries);
-    let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
+    let trades: Vec<_> = entries
+        .iter()
+        .filter(|e| e.is_trade() || e.is_resgate())
+        .collect();
     let mut actions: Vec<_> = entries.iter().filter(|e| e.is_corporate_action()).collect();
     actions.sort_by_key(|e| e.date);
 
@@ -51,6 +54,34 @@ pub fn import_movimentacao_entries(
                 continue;
             }
         };
+
+        if entry.is_resgate() {
+            let asset = match db::get_asset_by_ticker(conn, ticker) {
+                Ok(Some(asset)) => asset,
+                Ok(None) => {
+                    warn!("Asset {} not found after upsert", ticker);
+                    errors += 1;
+                    continue;
+                }
+                Err(e) => {
+                    warn!("Error loading asset {}: {}", ticker, e);
+                    errors += 1;
+                    continue;
+                }
+            };
+
+            if !matches!(
+                asset.asset_type,
+                db::AssetType::Bond | db::AssetType::GovBond
+            ) {
+                warn!(
+                    "Skipping resgate for non-bond asset {} ({:?})",
+                    ticker, asset.asset_type
+                );
+                skipped_trades += 1;
+                continue;
+            }
+        }
 
         let transaction = match entry.to_transaction(asset_id) {
             Ok(tx) => tx,

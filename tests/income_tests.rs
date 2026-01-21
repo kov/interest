@@ -9,8 +9,8 @@
 use anyhow::Result;
 use chrono::NaiveDate;
 use interest::db::{
-    get_income_events_with_assets, income_event_exists, init_database, insert_income_event,
-    open_db, upsert_asset, AssetType, IncomeEvent, IncomeEventType,
+    get_income_events_with_assets, income_event_exists, init_database, insert_asset,
+    insert_income_event, open_db, upsert_asset, AssetType, IncomeEvent, IncomeEventType,
 };
 use interest::importers::import_movimentacao_entries;
 use interest::importers::movimentacao_excel::MovimentacaoEntry;
@@ -571,6 +571,42 @@ fn test_import_movimentacao_mixed_entries() -> Result<()> {
 
     assert_eq!(stats.imported_trades, 1, "Should import 1 trade");
     assert_eq!(stats.imported_income, 1, "Should import 1 income event");
+    assert_eq!(stats.errors, 0, "Should have no errors");
+
+    Ok(())
+}
+
+#[test]
+fn test_import_movimentacao_resgate_only_for_bonds() -> Result<()> {
+    let (_temp, conn) = create_test_db()?;
+
+    insert_asset(&conn, "PETR4", &AssetType::Stock, None)?;
+    insert_asset(&conn, "TESOURO_PREFIXADO_2027", &AssetType::GovBond, None)?;
+
+    let mut stock_resgate = sample_movimentacao_entry(
+        NaiveDate::from_ymd_opt(2024, 6, 12).unwrap(),
+        "Resgate",
+        "PETR4",
+    );
+    stock_resgate.direction = "Debito".to_string();
+    stock_resgate.quantity = Some(dec!(10));
+    stock_resgate.unit_price = Some(dec!(30.00));
+    stock_resgate.operation_value = Some(dec!(300.00));
+
+    let mut bond_resgate = sample_movimentacao_entry(
+        NaiveDate::from_ymd_opt(2024, 6, 12).unwrap(),
+        "Resgate",
+        "TESOURO_PREFIXADO_2027",
+    );
+    bond_resgate.direction = "Debito".to_string();
+    bond_resgate.quantity = Some(dec!(3.8));
+    bond_resgate.unit_price = Some(dec!(1000.00));
+    bond_resgate.operation_value = Some(dec!(3800.00));
+
+    let stats = import_movimentacao_entries(&conn, vec![stock_resgate, bond_resgate], false)?;
+
+    assert_eq!(stats.imported_trades, 1, "Should import bond resgate");
+    assert_eq!(stats.skipped_trades, 1, "Should skip non-bond resgate");
     assert_eq!(stats.errors, 0, "Should have no errors");
 
     Ok(())

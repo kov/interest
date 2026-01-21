@@ -9,7 +9,11 @@ pub async fn dispatch_import(
     use crate::importers::{self, ImportResult};
 
     match action {
-        crate::commands::ImportAction::File { path, dry_run } => {
+        crate::commands::ImportAction::File {
+            path,
+            dry_run,
+            force_reimport,
+        } => {
             tracing::info!("Importing from: {}", path);
 
             let import_result = match importers::import_file_auto(&path) {
@@ -173,12 +177,67 @@ pub async fn dispatch_import(
                     db::init_database(None)?;
                     let conn = db::open_db(None)?;
 
+                    // Handle force-reimport: delete existing data from same source
+                    if force_reimport {
+                        // Find earliest date across all entry types
+                        let earliest_trade = trades.iter().map(|e| e.date).min();
+                        let earliest_action = corporate_actions.iter().map(|e| e.date).min();
+                        let earliest_income = income_events.iter().map(|e| e.date).min();
+
+                        let earliest_date = [earliest_trade, earliest_action, earliest_income]
+                            .iter()
+                            .filter_map(|d| *d)
+                            .min();
+
+                        if let Some(from_date) = earliest_date {
+                            let source = "MOVIMENTACAO";
+
+                            if !json_output {
+                                println!(
+                                    "\n{} Force reimport: deleting {} data from {} onwards...",
+                                    "⚠".yellow().bold(),
+                                    source,
+                                    from_date.format("%Y-%m-%d").to_string().yellow()
+                                );
+                            }
+
+                            let deleted_txs = db::delete_transactions_from_source_after_date(
+                                &conn, source, from_date,
+                            )?;
+                            let deleted_actions =
+                                db::delete_corporate_actions_from_source_after_date(
+                                    &conn, source, from_date,
+                                )?;
+                            let deleted_income = db::delete_income_events_from_source_after_date(
+                                &conn, source, from_date,
+                            )?;
+
+                            // Reset import state tracking for this source
+                            conn.execute(
+                                "DELETE FROM import_state WHERE source = ?1",
+                                rusqlite::params![source],
+                            )?;
+
+                            if !json_output {
+                                println!(
+                                    "  {} Deleted: {} transactions, {} corporate actions, {} income events",
+                                    "✓".green(),
+                                    deleted_txs.to_string().red(),
+                                    deleted_actions.to_string().red(),
+                                    deleted_income.to_string().red()
+                                );
+                            }
+                        }
+                    }
+
                     if !json_output {
                         println!(
                             "{} Importing trades, corporate actions, and income events...",
                             "⏳".cyan().bold()
                         );
                     }
+                    // Always track state - when force_reimport deleted metadata, get_last_import_date returns None
+                    // This allows importing old dates, then properly updates cutoff dates for future imports
                     let stats = importers::import_movimentacao_entries(&conn, entries, true)?;
                     if let Some(date) = stats.earliest {
                         reports::invalidate_snapshots_after(&conn, date)?;
@@ -190,7 +249,7 @@ pub async fn dispatch_import(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
                                 "success": true,
-                                "summary": stats
+                                "data": stats
                             }))?
                         );
                         return Ok(());

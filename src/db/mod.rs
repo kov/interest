@@ -1347,6 +1347,48 @@ pub fn delete_corporate_action(conn: &Connection, id: i64) -> Result<usize> {
     Ok(count)
 }
 
+/// Delete all transactions from a specific source with trade_date >= the given date
+/// Used for force-reimport functionality
+pub fn delete_transactions_from_source_after_date(
+    conn: &Connection,
+    source: &str,
+    from_date: NaiveDate,
+) -> Result<usize> {
+    let count = conn.execute(
+        "DELETE FROM transactions WHERE source = ?1 AND trade_date >= ?2",
+        params![source, from_date],
+    )?;
+    Ok(count)
+}
+
+/// Delete all corporate actions from a specific source with ex_date >= the given date
+/// Used for force-reimport functionality
+pub fn delete_corporate_actions_from_source_after_date(
+    conn: &Connection,
+    source: &str,
+    from_date: NaiveDate,
+) -> Result<usize> {
+    let count = conn.execute(
+        "DELETE FROM corporate_actions WHERE source = ?1 AND ex_date >= ?2",
+        params![source, from_date],
+    )?;
+    Ok(count)
+}
+
+/// Delete all income events from a specific source with event_date >= the given date
+/// Used for force-reimport functionality
+pub fn delete_income_events_from_source_after_date(
+    conn: &Connection,
+    source: &str,
+    from_date: NaiveDate,
+) -> Result<usize> {
+    let count = conn.execute(
+        "DELETE FROM income_events WHERE source = ?1 AND event_date >= ?2",
+        params![source, from_date],
+    )?;
+    Ok(count)
+}
+
 /// Insert income event
 pub fn insert_income_event(conn: &Connection, event: &IncomeEvent) -> Result<i64> {
     conn.execute(

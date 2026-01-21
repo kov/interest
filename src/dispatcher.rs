@@ -11,7 +11,7 @@ use crate::commands::Command;
 mod actions;
 mod assets;
 mod cashflow;
-mod imports;
+pub mod imports;
 pub mod imports_helpers;
 mod inconsistencies;
 mod portfolio;
@@ -1462,6 +1462,7 @@ mod tests {
                 action: crate::commands::ImportAction::File {
                     path: "test.xlsx".to_string(),
                     dry_run: false,
+                    force_reimport: false,
                 },
             },
             false,

@@ -223,8 +223,12 @@ pub enum ExchangeAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
 pub enum ImportAction {
-    /// Import a file with auto-detection: `import <path> [--dry-run]`
-    File { path: String, dry_run: bool },
+    /// Import a file with auto-detection: `import <path> [--dry-run] [--force-reimport]`
+    File {
+        path: String,
+        dry_run: bool,
+        force_reimport: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,15 +425,21 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
             let path = parts
                 .next()
                 .ok_or_else(|| CommandParseError {
-                    message: "import requires a file path. Usage: import <path> [--dry-run]"
+                    message: "import requires a file path. Usage: import <path> [--dry-run] [--force-reimport]"
                         .to_string(),
                 })?
                 .to_string();
 
-            let dry_run = parts.any(|p| p == "--dry-run");
+            let flags: Vec<String> = parts.map(|s| s.to_string()).collect();
+            let dry_run = flags.iter().any(|p| p == "--dry-run");
+            let force_reimport = flags.iter().any(|p| p == "--force-reimport");
 
             Ok(Command::Import {
-                action: ImportAction::File { path, dry_run },
+                action: ImportAction::File {
+                    path,
+                    dry_run,
+                    force_reimport,
+                },
             })
         }
         "portfolio" => {
@@ -1357,7 +1367,8 @@ mod tests {
             Command::Import {
                 action: ImportAction::File {
                     path: "file.xlsx".to_string(),
-                    dry_run: false
+                    dry_run: false,
+                    force_reimport: false,
                 }
             }
         );
@@ -1371,7 +1382,8 @@ mod tests {
             Command::Import {
                 action: ImportAction::File {
                     path: "file.xlsx".to_string(),
-                    dry_run: false
+                    dry_run: false,
+                    force_reimport: false,
                 }
             }
         );
@@ -1385,7 +1397,38 @@ mod tests {
             Command::Import {
                 action: ImportAction::File {
                     path: "file.xlsx".to_string(),
-                    dry_run: true
+                    dry_run: true,
+                    force_reimport: false,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_import_force_reimport() {
+        let cmd = parse_command("import file.xlsx --force-reimport").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Import {
+                action: ImportAction::File {
+                    path: "file.xlsx".to_string(),
+                    dry_run: false,
+                    force_reimport: true,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_import_dry_run_and_force_reimport() {
+        let cmd = parse_command("import file.xlsx --dry-run --force-reimport").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Import {
+                action: ImportAction::File {
+                    path: "file.xlsx".to_string(),
+                    dry_run: true,
+                    force_reimport: true,
                 }
             }
         );

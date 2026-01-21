@@ -221,6 +221,14 @@ impl MovimentacaoEntry {
         )
     }
 
+    /// Determine if this is a bond redemption entry
+    pub fn is_resgate(&self) -> bool {
+        matches!(
+            self.movement_type.as_str(),
+            "Resgate" | "RESGATE ANTECIPADO/"
+        )
+    }
+
     /// Check if this is a term contract liquidation
     #[allow(dead_code)]
     pub fn is_term_liquidation(&self) -> bool {
@@ -335,6 +343,11 @@ impl MovimentacaoEntry {
                 TransactionType::Sell,
                 format!("Imported from movimentacao: {}", self.movement_type),
             ),
+            "Resgate" => (
+                TransactionType::Sell,
+                "Bond redemption at maturity".to_string(),
+            ),
+            "RESGATE ANTECIPADO/" => (TransactionType::Sell, "Bond early redemption".to_string()),
             "Liquidação Termo" => {
                 // Term contract liquidation
                 // Note: The ticker in the movimentacao file will be the BASE ticker (e.g., ANIM3)
@@ -586,5 +599,112 @@ mod tests {
             MovimentacaoEntry::extract_ticker("INVALID"),
             None // Doesn't end in a digit (required for standard tickers)
         );
+    }
+
+    #[test]
+    fn test_resgate_is_trade() {
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let entry = MovimentacaoEntry {
+            direction: "Debito".to_string(),
+            date: NaiveDate::from_ymd_opt(2023, 1, 2).unwrap(),
+            movement_type: "Resgate".to_string(),
+            product: "Tesouro Prefixado 2023".to_string(),
+            ticker: Some("TESOURO_PREFIXADO_2023".to_string()),
+            institution: "CLEAR CORRETORA - GRUPO XP".to_string(),
+            quantity: Some(Decimal::from_str("3.8").unwrap()),
+            unit_price: Some(Decimal::from_str("1000.00").unwrap()),
+            operation_value: Some(Decimal::from_str("3800.00").unwrap()),
+        };
+
+        assert!(!entry.is_trade());
+        assert!(entry.is_resgate());
+        assert!(!entry.is_corporate_action());
+        assert!(!entry.is_income_event());
+    }
+
+    #[test]
+    fn test_resgate_antecipado_is_trade() {
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let entry = MovimentacaoEntry {
+            direction: "Debito".to_string(),
+            date: NaiveDate::from_ymd_opt(2025, 9, 4).unwrap(),
+            movement_type: "RESGATE ANTECIPADO/".to_string(),
+            product: "CDB - CDB4250GA94 - BANCO INTER S/A".to_string(),
+            ticker: Some("CDB4250GA94".to_string()),
+            institution: "BANCO INTER S/A".to_string(),
+            quantity: Some(Decimal::from_str("668714").unwrap()),
+            unit_price: Some(Decimal::from_str("0.01060368").unwrap()),
+            operation_value: Some(Decimal::from_str("7090.83").unwrap()),
+        };
+
+        assert!(!entry.is_trade());
+        assert!(entry.is_resgate());
+        assert!(!entry.is_corporate_action());
+        assert!(!entry.is_income_event());
+    }
+
+    #[test]
+    fn test_resgate_to_transaction() {
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let entry = MovimentacaoEntry {
+            direction: "Debito".to_string(),
+            date: NaiveDate::from_ymd_opt(2023, 1, 2).unwrap(),
+            movement_type: "Resgate".to_string(),
+            product: "Tesouro Prefixado 2023".to_string(),
+            ticker: Some("TESOURO_PREFIXADO_2023".to_string()),
+            institution: "CLEAR CORRETORA - GRUPO XP".to_string(),
+            quantity: Some(Decimal::from_str("3.8").unwrap()),
+            unit_price: Some(Decimal::from_str("1000.00").unwrap()),
+            operation_value: Some(Decimal::from_str("3800.00").unwrap()),
+        };
+
+        let tx = entry.to_transaction(1).unwrap();
+
+        assert_eq!(tx.transaction_type, TransactionType::Sell);
+        assert_eq!(tx.asset_id, 1);
+        assert_eq!(tx.trade_date, NaiveDate::from_ymd_opt(2023, 1, 2).unwrap());
+        assert_eq!(tx.quantity, Decimal::from_str("3.8").unwrap());
+        assert_eq!(tx.price_per_unit, Decimal::from_str("1000.00").unwrap());
+        assert_eq!(tx.total_cost, Decimal::from_str("3800.00").unwrap());
+        assert!(tx.notes.as_ref().unwrap().contains("redemption"));
+        assert!(tx.notes.as_ref().unwrap().contains("maturity"));
+    }
+
+    #[test]
+    fn test_resgate_antecipado_to_transaction() {
+        use chrono::NaiveDate;
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let entry = MovimentacaoEntry {
+            direction: "Debito".to_string(),
+            date: NaiveDate::from_ymd_opt(2025, 9, 4).unwrap(),
+            movement_type: "RESGATE ANTECIPADO/".to_string(),
+            product: "CDB - CDB4250GA94 - BANCO INTER S/A".to_string(),
+            ticker: Some("CDB4250GA94".to_string()),
+            institution: "BANCO INTER S/A".to_string(),
+            quantity: Some(Decimal::from_str("668714").unwrap()),
+            unit_price: Some(Decimal::from_str("0.01060368").unwrap()),
+            operation_value: Some(Decimal::from_str("7090.83").unwrap()),
+        };
+
+        let tx = entry.to_transaction(1).unwrap();
+
+        assert_eq!(tx.transaction_type, TransactionType::Sell);
+        assert_eq!(tx.asset_id, 1);
+        assert_eq!(tx.trade_date, NaiveDate::from_ymd_opt(2025, 9, 4).unwrap());
+        assert_eq!(tx.quantity, Decimal::from_str("668714").unwrap());
+        assert_eq!(tx.price_per_unit, Decimal::from_str("0.01060368").unwrap());
+        assert_eq!(tx.total_cost, Decimal::from_str("7090.83").unwrap());
+        assert!(tx.notes.as_ref().unwrap().contains("early redemption"));
     }
 }

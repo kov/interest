@@ -36,6 +36,10 @@ pub enum Commands {
         /// Preview only, don't save to database
         #[arg(short, long)]
         dry_run: bool,
+
+        /// Force reimport: delete existing data from same source starting from earliest date in file
+        #[arg(long)]
+        force_reimport: bool,
     },
 
     /// Import opening positions from IRPF tax declaration PDF

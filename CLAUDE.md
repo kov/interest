@@ -641,6 +641,69 @@ CREATE INDEX idx_corporate_actions_asset ON corporate_actions(asset_id, ex_date)
 
 Add more indexes if queries become slow (use `EXPLAIN QUERY PLAN`).
 
+### metadata vs import_state Tables
+
+**Critical distinction**: Two separate tables for different purposes.
+
+#### `metadata` Table - Application Settings
+
+**Purpose**: General key-value store for app-level settings and cache timestamps.
+
+**Schema**:
+```sql
+CREATE TABLE metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**Examples**:
+- `schema_version` - Database schema version
+- `db_created_at` - When database was created
+- `registry_maisretorno_refreshed_at` - Last Mais Retorno sync timestamp
+- `tesouro_csv_imported_mtime` - File modification time for Tesouro data
+- Various cache timestamps and file mtimes
+
+**Functions**: `get_metadata(key)`, `set_metadata(key, value)`, `delete_metadata_by_key(key)`
+
+#### `import_state` Table - Import Cutoff Tracking
+
+**Purpose**: Tracks the latest imported date for each source/type combination to enable incremental imports (avoid re-importing old data).
+
+**Schema**:
+```sql
+CREATE TABLE import_state (
+    source TEXT NOT NULL,           -- 'CEI', 'MOVIMENTACAO', 'OFERTAS_PUBLICAS'
+    entry_type TEXT NOT NULL,       -- 'trades', 'corporate_actions', 'income', 'allocations'
+    last_date DATE NOT NULL,        -- Latest date successfully imported
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source, entry_type)
+);
+```
+
+**Examples**:
+- `('MOVIMENTACAO', 'trades', '2026-01-02')` - Latest trade from Movimentação
+- `('CEI', 'trades', '2025-12-31')` - Latest trade from CEI
+- `('MOVIMENTACAO', 'income', '2026-01-15')` - Latest income event
+
+**How it works**:
+1. `get_last_import_date(conn, source, entry_type)` returns the cutoff date
+2. Importer skips entries with `date <= last_date` (already imported)
+3. `set_last_import_date(conn, source, entry_type, date)` updates cutoff after successful import
+4. If `import_state` is empty, falls back to `MAX(date)` from actual data tables
+
+**Functions**: `get_last_import_date(source, entry_type)`, `set_last_import_date(source, entry_type, date)`
+
+**Force reimport**: Delete from `import_state WHERE source = ?` to reset cutoff and allow re-importing old dates.
+
+#### When to Use Which
+
+- **Use `metadata`**: App settings, cache timestamps, schema version, feature flags
+- **Use `import_state`**: Import deduplication, tracking what's been imported from each source
+
+**Common mistake**: Trying to store import cutoffs in `metadata` with keys like `last_import_date_MOVIMENTACAO_trades`. This is wrong - use the structured `import_state` table instead.
+
 ## External Dependencies
 
 ### Price APIs
