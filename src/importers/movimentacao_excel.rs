@@ -126,7 +126,28 @@ impl MovimentacaoEntry {
         let parts: Vec<&str> = product.split(&[' ', '-'][..]).collect();
 
         if let Some(first) = parts.first() {
-            let potential_ticker = first.trim();
+            let mut potential_ticker = first.trim().to_uppercase();
+
+            // Strip institutional market suffixes (B, L) if present
+            // These suffixes indicate market conditions, not asset class
+            // Example: CPTS11B → CPTS11, DIVD11L → DIVD11
+            if potential_ticker.len() >= 5 {
+                if let Some(last_char) = potential_ticker.chars().last() {
+                    if last_char == 'B' || last_char == 'L' {
+                        // Check if base ticker (without suffix) ends in digit
+                        let base_ticker = &potential_ticker[..potential_ticker.len() - 1];
+                        if base_ticker
+                            .chars()
+                            .last()
+                            .map(|c| c.is_numeric())
+                            .unwrap_or(false)
+                        {
+                            potential_ticker = base_ticker.to_string();
+                        }
+                    }
+                }
+            }
+
             // Brazilian tickers are typically 4-6 characters, but ETFs can be longer (up to 9)
             // They must end in a digit
             if potential_ticker.len() >= 4
@@ -137,7 +158,7 @@ impl MovimentacaoEntry {
                     .map(|c| c.is_numeric())
                     .unwrap_or(false)
             {
-                return Some(potential_ticker.to_uppercase());
+                return Some(potential_ticker);
             }
         }
 
@@ -598,6 +619,58 @@ mod tests {
         assert_eq!(
             MovimentacaoEntry::extract_ticker("INVALID"),
             None // Doesn't end in a digit (required for standard tickers)
+        );
+    }
+
+    #[test]
+    fn test_extract_ticker_with_institutional_suffixes() {
+        // B suffix (bidding/bought market)
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("CPTS11B - CAPITANIA SECURITIES II"),
+            Some("CPTS11".to_string())
+        );
+
+        // L suffix (lower liquidity)
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("DIVD11L - IT NOW IDIV RENDA DIV"),
+            Some("DIVD11".to_string())
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("HFOF11L - HEDGE TOP FOFII 3"),
+            Some("HFOF11".to_string())
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("HGLG11L - PÁTRIA LOG"),
+            Some("HGLG11".to_string())
+        );
+
+        // Verify no false positives - regular tickers unchanged
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("PETR4 - PETROBRAS"),
+            Some("PETR4".to_string()) // No change
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("VALE3 - VALE"),
+            Some("VALE3".to_string()) // No change
+        );
+
+        // Edge cases
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("BL - INVALID"),
+            None // Too short after normalization
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("TESTL - INVALID"),
+            None // Base doesn't end in digit
+        );
+
+        assert_eq!(
+            MovimentacaoEntry::extract_ticker("ABCB1 - TEST"),
+            Some("ABCB1".to_string()) // Ends in B but not just 'B', unchanged
         );
     }
 
