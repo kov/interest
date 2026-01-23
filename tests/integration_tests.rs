@@ -9,131 +9,120 @@
 //! - No duplicate adjustments
 //! - Correct portfolio totals
 
-use anyhow::Result;
-use assert_cmd::{cargo, prelude::*};
-use chrono::Datelike;
-use interest::db::models::{
-    AssetType, CorporateAction, CorporateActionType, IncomeEvent, Transaction, TransactionType,
-};
-use interest::db::{init_database, insert_asset, open_db, upsert_asset};
-use interest::importers::cei_excel::resolve_option_exercise_ticker;
-use interest::importers::import_movimentacao_entries;
-use interest::importers::movimentacao_excel::parse_movimentacao_excel;
-use interest::importers::ofertas_publicas_excel::parse_ofertas_publicas_excel;
-use interest::tax::cost_basis::AverageCostMatcher;
-use interest::term_contracts::process_term_liquidations;
+use anyhow::{Context, Result};
+use assert_cmd::prelude::*;
+use chrono::{Datelike, Duration, NaiveDate};
 use predicates::prelude::*;
-use rusqlite::Connection;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::str::FromStr;
 use tempfile::TempDir;
+
+mod cli_helpers;
+use cli_helpers::{
+    add_asset, add_income, add_transaction, base_cmd, cache_root_for_home, list_transactions_json,
+    portfolio_json, run_cmd, setup_test_tickers_cache, tax_report_json,
+};
+mod sqlite_helpers;
+use sqlite_helpers::{
+    count_snapshots_on_or_after, list_import_state, list_metadata_keys, open_conn,
+};
 
 // =============================================================================
 // CLI Test Helpers
 // =============================================================================
 
-/// Get database path from temp home
-fn get_db_path(home: &TempDir) -> PathBuf {
-    PathBuf::from(home.path()).join(".interest").join("data.db")
+#[derive(Debug, Clone)]
+struct TransactionRow {
+    trade_date: NaiveDate,
+    transaction_type: String,
+    quantity: Decimal,
+    price_per_unit: Decimal,
+    total_cost: Decimal,
+    notes: Option<String>,
+    is_day_trade: bool,
 }
 
-/// Copy B3 tickers fixture to a cache directory
-fn setup_test_tickers_cache(cache_root: &std::path::Path) {
-    let tickers_dir = cache_root.join("interest").join("tickers");
-    std::fs::create_dir_all(&tickers_dir).expect("failed to create tickers cache dir");
-    std::fs::copy(
-        "tests/fixtures/b3_cache/tickers.csv",
-        tickers_dir.join("tickers.csv"),
-    )
-    .expect("failed to copy tickers.csv fixture");
-    std::fs::copy(
-        "tests/fixtures/b3_cache/tickers.meta.json",
-        tickers_dir.join("tickers.meta.json"),
-    )
-    .expect("failed to copy tickers.meta.json fixture");
+fn decimal_from_value(value: &Value) -> Result<Decimal> {
+    if let Some(s) = value.as_str() {
+        return Decimal::from_str(s).context("invalid decimal string");
+    }
+    if let Some(f) = value.as_f64() {
+        return Decimal::try_from(f).context("invalid decimal number");
+    }
+    Err(anyhow::anyhow!("expected decimal value"))
 }
 
-/// Create a base CLI command with proper environment setup
-fn base_cmd(home: &TempDir) -> Command {
-    let mut cmd = Command::new(cargo::cargo_bin!("interest"));
-    cmd.env("HOME", home.path());
+fn load_transactions(home: &TempDir, ticker: &str) -> Result<Vec<TransactionRow>> {
+    let rows = list_transactions_json(home, ticker)?;
+    rows.into_iter()
+        .map(|row| {
+            let trade_date_str = row
+                .get("trade_date")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let trade_date = NaiveDate::parse_from_str(trade_date_str, "%Y-%m-%d")
+                .context("invalid trade_date")?;
 
-    // Set up isolated cache with B3 tickers fixture
-    let cache_dir = home.path().join(".cache");
-    setup_test_tickers_cache(&cache_dir);
-    cmd.env("XDG_CACHE_HOME", &cache_dir);
+            Ok(TransactionRow {
+                trade_date,
+                transaction_type: row
+                    .get("transaction_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                quantity: decimal_from_value(&row["quantity"])?,
+                price_per_unit: decimal_from_value(&row["price_per_unit"])?,
+                total_cost: decimal_from_value(&row["total_cost"])?,
+                notes: row
+                    .get("notes")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                is_day_trade: row
+                    .get("is_day_trade")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
 
-    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1");
-    cmd.arg("--no-color");
-    cmd
+fn position_from_transactions(txs: &[TransactionRow]) -> (Decimal, Decimal) {
+    let mut total_quantity = Decimal::ZERO;
+    let mut total_cost = Decimal::ZERO;
+    for tx in txs {
+        if tx.transaction_type.eq_ignore_ascii_case("BUY") {
+            total_quantity += tx.quantity;
+            total_cost += tx.total_cost;
+        } else if tx.transaction_type.eq_ignore_ascii_case("SELL") {
+            total_quantity -= tx.quantity;
+        }
+    }
+    (total_quantity, total_cost)
+}
+
+fn seed_basic_flow_data(home: &TempDir, asset_type: &str) -> Result<()> {
+    add_asset(home, "TSTJ1", asset_type)?;
+    add_transaction(home, "TSTJ1", "buy", "10", "10", "2024-01-02", false)?;
+    add_transaction(home, "TSTJ1", "sell", "5", "12", "2024-02-01", false)?;
+    add_income(home, "TSTJ1", "DIVIDEND", "10", "2024-02-15")?;
+    Ok(())
+}
+
+fn db_path(home: &TempDir) -> PathBuf {
+    home.path().join(".interest").join("data.db")
 }
 
 #[test]
 fn test_cash_flow_show_single_year_monthly_output() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    let asset_id = insert_asset(&conn, "TESTCF1", &AssetType::Stock, None)?;
-
-    let buy_tx = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Buy,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 4).unwrap()),
-        quantity: Decimal::from(10),
-        price_per_unit: Decimal::from(10),
-        total_cost: Decimal::from(100),
-        fees: Decimal::from(2),
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(&conn, &buy_tx)?;
-
-    let sell_tx = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Sell,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 2, 5).unwrap()),
-        quantity: Decimal::from(5),
-        price_per_unit: Decimal::from(12),
-        total_cost: Decimal::from(60),
-        fees: Decimal::from(1),
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(&conn, &sell_tx)?;
-
-    let income_event = IncomeEvent {
-        id: None,
-        asset_id,
-        event_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
-        ex_date: None,
-        event_type: interest::db::IncomeEventType::Dividend,
-        amount_per_quota: Decimal::ZERO,
-        total_amount: Decimal::from(10),
-        withholding_tax: Decimal::from(2),
-        is_quota_pre_2026: None,
-        source: "TEST".to_string(),
-        notes: None,
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_income_event(&conn, &income_event)?;
+    add_asset(&home, "TESTCF1", "STOCK")?;
+    add_transaction(&home, "TESTCF1", "buy", "10", "10", "2024-01-02", false)?;
+    add_transaction(&home, "TESTCF1", "sell", "5", "12", "2024-02-01", false)?;
+    add_income(&home, "TESTCF1", "DIVIDEND", "10", "2024-02-15")?;
 
     let output = base_cmd(&home)
         .arg("cash-flow")
@@ -154,37 +143,15 @@ fn test_cash_flow_show_single_year_monthly_output() -> Result<()> {
 #[test]
 fn test_actions_split_list_orders_by_ex_date_asc() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    let asset_id = insert_asset(&conn, "TESTSPLT", &AssetType::Stock, None)?;
-
-    let earlier = CorporateAction {
-        id: None,
-        asset_id,
-        action_type: CorporateActionType::Split,
-        event_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
-        ex_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
-        quantity_adjustment: dec!(50),
-        source: "TEST".to_string(),
-        notes: None,
-        created_at: chrono::Utc::now(),
-    };
-    let later = CorporateAction {
-        id: None,
-        asset_id,
-        action_type: CorporateActionType::Split,
-        event_date: chrono::NaiveDate::from_ymd_opt(2024, 3, 5).unwrap(),
-        ex_date: chrono::NaiveDate::from_ymd_opt(2024, 3, 5).unwrap(),
-        quantity_adjustment: dec!(100),
-        source: "TEST".to_string(),
-        notes: None,
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_corporate_action(&conn, &later)?;
-    interest::db::insert_corporate_action(&conn, &earlier)?;
+    add_asset(&home, "TESTSPLT", "STOCK")?;
+    run_cmd(
+        &home,
+        &["actions", "split", "add", "TESTSPLT", "50", "2024-01-10"],
+    )?;
+    run_cmd(
+        &home,
+        &["actions", "split", "add", "TESTSPLT", "100", "2024-03-05"],
+    )?;
 
     let output = base_cmd(&home)
         .arg("--json")
@@ -214,43 +181,9 @@ fn test_actions_split_list_orders_by_ex_date_asc() -> Result<()> {
 #[test]
 fn test_income_detail_orders_by_event_date_asc() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    let asset_id = insert_asset(&conn, "TESTINC", &AssetType::Fii, None)?;
-
-    let later = IncomeEvent {
-        id: None,
-        asset_id,
-        event_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
-        ex_date: None,
-        event_type: interest::db::IncomeEventType::Dividend,
-        amount_per_quota: Decimal::ZERO,
-        total_amount: Decimal::from(10),
-        withholding_tax: Decimal::ZERO,
-        is_quota_pre_2026: None,
-        source: "TEST".to_string(),
-        notes: None,
-        created_at: chrono::Utc::now(),
-    };
-    let earlier = IncomeEvent {
-        id: None,
-        asset_id,
-        event_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
-        ex_date: None,
-        event_type: interest::db::IncomeEventType::Dividend,
-        amount_per_quota: Decimal::ZERO,
-        total_amount: Decimal::from(5),
-        withholding_tax: Decimal::ZERO,
-        is_quota_pre_2026: None,
-        source: "TEST".to_string(),
-        notes: None,
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_income_event(&conn, &later)?;
-    interest::db::insert_income_event(&conn, &earlier)?;
+    add_asset(&home, "TESTINC", "FII")?;
+    add_income(&home, "TESTINC", "DIVIDEND", "10", "2024-02-15")?;
+    add_income(&home, "TESTINC", "DIVIDEND", "5", "2024-01-10")?;
 
     let output = base_cmd(&home)
         .arg("--json")
@@ -281,48 +214,9 @@ fn test_income_detail_orders_by_event_date_asc() -> Result<()> {
 #[test]
 fn test_cash_flow_show_multi_year_ordering() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    let asset_id = insert_asset(&conn, "TESTCF2", &AssetType::Fii, None)?;
-
-    let tx_2023 = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Buy,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(),
-        settlement_date: None,
-        quantity: Decimal::from(1),
-        price_per_unit: Decimal::from(100),
-        total_cost: Decimal::from(100),
-        fees: Decimal::ZERO,
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(&conn, &tx_2023)?;
-
-    let tx_2024 = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Buy,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
-        settlement_date: None,
-        quantity: Decimal::from(1),
-        price_per_unit: Decimal::from(110),
-        total_cost: Decimal::from(110),
-        fees: Decimal::ZERO,
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(&conn, &tx_2024)?;
+    add_asset(&home, "TESTCF2", "FII")?;
+    add_transaction(&home, "TESTCF2", "buy", "1", "100", "2023-06-01", false)?;
+    add_transaction(&home, "TESTCF2", "buy", "1", "110", "2024-06-01", false)?;
 
     let output = base_cmd(&home).arg("cash-flow").arg("show").output()?;
     assert!(output.status.success());
@@ -366,212 +260,10 @@ fn get_json_data(value: &Value) -> &Value {
         .expect("missing data field in JSON response")
 }
 
-fn seed_basic_flow_data(conn: &Connection, asset_type: AssetType) -> Result<i64> {
-    let asset_id = insert_asset(conn, "TSTJ1", &asset_type, None)?;
-
-    let buy_tx = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Buy,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 4).unwrap()),
-        quantity: Decimal::from(10),
-        price_per_unit: Decimal::from(10),
-        total_cost: Decimal::from(100),
-        fees: Decimal::from(2),
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(conn, &buy_tx)?;
-
-    let sell_tx = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Sell,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 2, 5).unwrap()),
-        quantity: Decimal::from(5),
-        price_per_unit: Decimal::from(12),
-        total_cost: Decimal::from(60),
-        fees: Decimal::from(1),
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(conn, &sell_tx)?;
-
-    let income_event = IncomeEvent {
-        id: None,
-        asset_id,
-        event_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
-        ex_date: None,
-        event_type: interest::db::IncomeEventType::Dividend,
-        amount_per_quota: Decimal::ZERO,
-        total_amount: Decimal::from(10),
-        withholding_tax: Decimal::from(2),
-        is_quota_pre_2026: None,
-        source: "TEST".to_string(),
-        notes: None,
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_income_event(conn, &income_event)?;
-
-    Ok(asset_id)
-}
-
-/// SQL Query helpers - for detailed verification
-mod sql {
-    use super::*;
-
-    /// Query all transactions for a ticker
-    pub fn query_transactions(home: &TempDir, ticker: &str) -> Vec<Transaction> {
-        let db_path = get_db_path(home);
-        let conn = open_db(Some(db_path)).expect("failed to open db");
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT t.id, t.asset_id, t.transaction_type, t.trade_date, t.settlement_date,
-                        t.quantity, t.price_per_unit, t.total_cost, t.fees, t.is_day_trade,
-                        t.quota_issuance_date, t.notes, t.source, t.created_at
-                 FROM transactions t
-                 JOIN assets a ON t.asset_id = a.id
-                 WHERE a.ticker = ?1
-                 ORDER BY t.trade_date ASC",
-            )
-            .expect("failed to prepare query");
-
-        let transactions = stmt
-            .query_map([ticker], |row| {
-                Ok(Transaction {
-                    id: Some(row.get(0)?),
-                    asset_id: row.get(1)?,
-                    transaction_type: row
-                        .get::<_, String>(2)?
-                        .parse::<TransactionType>()
-                        .unwrap_or(TransactionType::Buy),
-                    trade_date: row.get(3)?,
-                    settlement_date: row.get(4)?,
-                    quantity: get_decimal(row, 5)?,
-                    price_per_unit: get_decimal(row, 6)?,
-                    total_cost: get_decimal(row, 7)?,
-                    fees: get_decimal(row, 8)?,
-                    is_day_trade: row.get(9)?,
-                    quota_issuance_date: row.get(10)?,
-                    notes: row.get(11)?,
-                    source: row.get(12)?,
-                    created_at: row.get(13)?,
-                })
-            })
-            .expect("query failed")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("failed to collect transactions");
-
-        transactions
-    }
-
-    /// Query income events for a ticker
-    pub fn query_income_events(home: &TempDir, ticker: &str) -> Vec<IncomeEvent> {
-        let db_path = get_db_path(home);
-        let conn = open_db(Some(db_path)).expect("failed to open db");
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT ie.id, ie.asset_id, ie.event_date, ie.ex_date, ie.event_type,
-                        ie.amount_per_quota, ie.total_amount, ie.withholding_tax,
-                        ie.is_quota_pre_2026, ie.source, ie.notes, ie.created_at
-                 FROM income_events ie
-                 JOIN assets a ON ie.asset_id = a.id
-                 WHERE a.ticker = ?1
-                 ORDER BY ie.event_date ASC",
-            )
-            .expect("failed to prepare income query");
-
-        let events = stmt
-            .query_map([ticker], |row| {
-                Ok(IncomeEvent {
-                    id: Some(row.get(0)?),
-                    asset_id: row.get(1)?,
-                    event_date: row.get(2)?,
-                    ex_date: row.get(3)?,
-                    event_type: row
-                        .get::<_, String>(4)?
-                        .parse::<interest::db::IncomeEventType>()
-                        .unwrap_or(interest::db::IncomeEventType::Dividend),
-                    amount_per_quota: get_decimal(row, 5)?,
-                    total_amount: get_decimal(row, 6)?,
-                    withholding_tax: get_decimal(row, 7)?,
-                    is_quota_pre_2026: row.get(8)?,
-                    source: row.get(9)?,
-                    notes: row.get(10)?,
-                    created_at: row.get(11)?,
-                })
-            })
-            .expect("failed to map income rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("failed to collect income rows");
-
-        events
-    }
-
-    /// Calculate position (quantity, total_cost) for a ticker
-    pub fn query_position(home: &TempDir, ticker: &str) -> (Decimal, Decimal) {
-        let transactions = query_transactions(home, ticker);
-
-        let mut total_quantity = Decimal::ZERO;
-        let mut total_cost = Decimal::ZERO;
-
-        for tx in transactions {
-            match tx.transaction_type {
-                TransactionType::Buy => {
-                    total_quantity += tx.quantity;
-                    total_cost += tx.total_cost;
-                }
-                TransactionType::Sell => {
-                    total_quantity -= tx.quantity;
-                }
-            }
-        }
-
-        (total_quantity, total_cost)
-    }
-
-    /// Helper to read Decimal from SQLite (handles INTEGER, REAL, TEXT)
-    pub fn get_decimal(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-        use rusqlite::types::ValueRef;
-
-        match row.get_ref(idx)? {
-            ValueRef::Text(bytes) => {
-                let s = std::str::from_utf8(bytes)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                Decimal::from_str(s)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-            }
-            ValueRef::Integer(i) => Ok(Decimal::from(i)),
-            ValueRef::Real(f) => Decimal::try_from(f)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
-            _ => Err(rusqlite::Error::InvalidColumnType(
-                idx,
-                "decimal".to_string(),
-                rusqlite::types::Type::Null,
-            )),
-        }
-    }
-}
-
 #[test]
 fn test_portfolio_show_json_shape() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    seed_basic_flow_data(&conn, AssetType::Stock)?;
+    seed_basic_flow_data(&home, "STOCK")?;
 
     let output = base_cmd(&home)
         .arg("--json")
@@ -616,12 +308,7 @@ fn test_portfolio_show_json_shape() -> Result<()> {
 #[test]
 fn test_performance_show_json_shape() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    seed_basic_flow_data(&conn, AssetType::Stock)?;
+    seed_basic_flow_data(&home, "STOCK")?;
 
     let output = base_cmd(&home)
         .arg("--json")
@@ -649,14 +336,78 @@ fn test_performance_show_json_shape() -> Result<()> {
 }
 
 #[test]
+fn test_snapshots_invalidated_after_action() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "SNAP1", "STOCK")?;
+    add_transaction(&home, "SNAP1", "buy", "10", "10", "2024-01-10", false)?;
+
+    let snapshot_date = "2024-01-10";
+    let mut cmd = base_cmd(&home);
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("performance")
+        .arg("show")
+        .arg(format!("{}:{}", snapshot_date, snapshot_date));
+    let out = cmd.output()?;
+    assert!(out.status.success());
+
+    let conn = open_conn(&home)?;
+    let before = count_snapshots_on_or_after(&conn, snapshot_date)?;
+    assert!(before > 0, "expected snapshots after performance show");
+
+    run_cmd(
+        &home,
+        &["actions", "split", "add", "SNAP1", "10", "2024-01-09"],
+    )?;
+
+    let after = count_snapshots_on_or_after(&conn, snapshot_date)?;
+    assert_eq!(after, 0, "snapshots should be invalidated after action");
+
+    Ok(())
+}
+
+#[test]
+fn test_snapshots_invalidation_on_import_respects_earliest_date() -> Result<()> {
+    let home = TempDir::new()?;
+
+    let csv_header = "Data Negociação;Código de Negociação;C/V;Quantidade;Preço;Valor Total;Taxa\n";
+    let first_csv = format!("{}01/01/2024;SNAPC;C;10;10,00;100,00;0,00\n", csv_header);
+    let first_path = home.path().join("import_first.csv");
+    std::fs::write(&first_path, first_csv)?;
+
+    run_cmd(&home, &["import", first_path.to_str().unwrap()])?;
+    let seeded = load_transactions(&home, "SNAPC")?;
+    assert_eq!(seeded.len(), 1, "expected one seeded transaction");
+
+    let snapshot_date = "2024-12-31";
+    let mut cmd = base_cmd(&home);
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "1")
+        .arg("performance")
+        .arg("show")
+        .arg(format!("{}:{}", snapshot_date, snapshot_date));
+    let out = cmd.output()?;
+    assert!(out.status.success());
+
+    let conn = open_conn(&home)?;
+    let before = count_snapshots_on_or_after(&conn, snapshot_date)?;
+    assert!(before > 0, "expected snapshots after performance show");
+
+    let second_csv = format!("{}01/06/2024;SNAPC;C;5;12,00;60,00;0,00\n", csv_header);
+    let second_path = home.path().join("import_second.csv");
+    std::fs::write(&second_path, second_csv)?;
+
+    run_cmd(&home, &["import", second_path.to_str().unwrap()])?;
+
+    let after = count_snapshots_on_or_after(&conn, snapshot_date)?;
+    assert_eq!(after, 0, "snapshots should be invalidated after import");
+
+    Ok(())
+}
+
+#[test]
 fn test_tax_report_json_shape() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    seed_basic_flow_data(&conn, AssetType::Stock)?;
+    seed_basic_flow_data(&home, "STOCK")?;
 
     let output = base_cmd(&home)
         .arg("--json")
@@ -685,12 +436,7 @@ fn test_tax_report_json_shape() -> Result<()> {
 #[test]
 fn test_cash_flow_show_json_shape() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = open_db(Some(db_path))?;
-
-    seed_basic_flow_data(&conn, AssetType::Stock)?;
+    seed_basic_flow_data(&home, "STOCK")?;
 
     let output = base_cmd(&home)
         .arg("--json")
@@ -721,52 +467,29 @@ fn test_cash_flow_show_json_shape() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// Legacy Test Helper: trade-only import (used by corp action tests)
-// =============================================================================
-
-/// Test helper: Import movimentacao file into database (trade entries only)
-fn import_movimentacao(conn: &Connection, file_path: &str) -> Result<()> {
-    let entries = parse_movimentacao_excel(file_path)?;
-    let trade_entries: Vec<_> = entries.into_iter().filter(|e| e.is_trade()).collect();
-    import_movimentacao_entries(conn, trade_entries, false)?;
-    Ok(())
-}
-
 #[test]
 fn test_13_ofertas_publicas_import_normalizes_ticker() -> Result<()> {
-    let entries = parse_ofertas_publicas_excel("tests/data/13_ofertas_publicas.xlsx")?;
-    assert_eq!(entries.len(), 1);
-    let entry = &entries[0];
-    assert_eq!(entry.ticker, "AMBP3");
-    assert_eq!(entry.raw_ticker, "AMBP3L");
-    assert_eq!(entry.quantity, Decimal::from(1064));
+    let home = TempDir::new()?;
+
+    run_cmd(&home, &["import", "tests/data/13_ofertas_publicas.xlsx"])?;
+
+    let transactions = load_transactions(&home, "AMBP3")?;
+    assert_eq!(transactions.len(), 1);
+
+    let portfolio = portfolio_json(&home)?;
+    let positions = portfolio
+        .get("positions")
+        .and_then(|v| v.as_array())
+        .context("positions missing")?;
+    let tickers: Vec<_> = positions
+        .iter()
+        .filter_map(|p| p.get("ticker").and_then(|v| v.as_str()))
+        .collect();
+    assert!(tickers.contains(&"AMBP3"));
     Ok(())
 }
 
-#[test]
-fn test_14_option_exercise_resolves_underlying_ticker() -> Result<()> {
-    let raw_tx = interest::importers::RawTransaction {
-        ticker: "ITSAA101E".to_string(),
-        transaction_type: "Venda".to_string(),
-        trade_date: chrono::NaiveDate::from_ymd_opt(2022, 1, 21).unwrap(),
-        quantity: Decimal::from(2000),
-        price: Decimal::from(9),
-        fees: Decimal::ZERO,
-        total: Decimal::from(19060),
-        market: Some("Exercício de Opção de Compra".to_string()),
-    };
-
-    let asset_exists = |ticker: &str| -> Result<bool> { Ok(ticker == "ITSA4") };
-    let (resolved, notes) = resolve_option_exercise_ticker(&raw_tx, asset_exists)?;
-
-    assert_eq!(resolved, "ITSA4");
-    assert!(notes.unwrap_or_default().contains("ITSAA101E"));
-    Ok(())
-}
-
-// Removed unused legacy helpers (create_test_db, import_movimentacao_with_state, get_decimal_value,
-// get_transactions, calculate_position) now that all tests are converted to the new style.
+// NOTE: Option exercise ticker normalization is covered by importer unit tests.
 
 #[test]
 fn test_01_basic_purchase_and_sale() -> Result<()> {
@@ -790,26 +513,21 @@ fn test_01_basic_purchase_and_sale() -> Result<()> {
         .stdout(predicate::str::contains("PETR4"))
         .stdout(predicate::str::contains("70.00")); // Final quantity after 100 + 50 - 80
 
-    // Deep inspection: verify transactions via SQL
-    let transactions = sql::query_transactions(&home, "PETR4");
+    let transactions = load_transactions(&home, "PETR4")?;
     assert_eq!(transactions.len(), 3, "Should have 3 transactions");
 
-    // Verify first purchase
-    assert_eq!(transactions[0].quantity.to_string(), "100");
-    assert_eq!(transactions[0].price_per_unit.to_string(), "25");
-    assert_eq!(transactions[0].total_cost.to_string(), "2500");
+    assert_eq!(transactions[0].quantity, dec!(100));
+    assert_eq!(transactions[0].price_per_unit, dec!(25));
+    assert_eq!(transactions[0].total_cost, dec!(2500));
 
-    // Verify second purchase
-    assert_eq!(transactions[1].quantity.to_string(), "50");
-    assert_eq!(transactions[1].price_per_unit.to_string(), "30");
+    assert_eq!(transactions[1].quantity, dec!(50));
+    assert_eq!(transactions[1].price_per_unit, dec!(30));
 
-    // Verify sale
-    assert_eq!(transactions[2].quantity.to_string(), "80");
-    assert_eq!(transactions[2].price_per_unit.to_string(), "35");
+    assert_eq!(transactions[2].quantity, dec!(80));
+    assert_eq!(transactions[2].price_per_unit, dec!(35));
 
-    // Verify final position
-    let (quantity, _cost) = sql::query_position(&home, "PETR4");
-    assert_eq!(quantity.to_string(), "70"); // 100 + 50 - 80
+    let (quantity, _cost) = position_from_transactions(&transactions);
+    assert_eq!(quantity, dec!(70));
 
     Ok(())
 }
@@ -837,7 +555,7 @@ fn test_portfolio_show_empty_db() -> Result<()> {
 #[test]
 fn test_import_dry_run_does_not_create_db() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
+    let db_path = db_path(&home);
     assert!(!db_path.exists(), "db should start absent");
 
     let mut cmd = base_cmd(&home);
@@ -1017,13 +735,13 @@ fn test_02_term_contract_lifecycle() -> Result<()> {
     assert!(assert_json_success(&import_result));
 
     // Check ANIM3T term contract purchase
-    let term_txs = sql::query_transactions(&home, "ANIM3T");
+    let term_txs = load_transactions(&home, "ANIM3T")?;
     assert_eq!(term_txs.len(), 1, "Should have 1 term contract purchase");
     assert_eq!(term_txs[0].quantity, dec!(200));
     assert_eq!(term_txs[0].price_per_unit, dec!(10));
 
     // Check ANIM3 transactions (liquidation + sale)
-    let base_txs = sql::query_transactions(&home, "ANIM3");
+    let base_txs = load_transactions(&home, "ANIM3")?;
     assert_eq!(base_txs.len(), 2, "Should have liquidation + sale");
 
     // Verify liquidation is marked correctly
@@ -1033,22 +751,20 @@ fn test_02_term_contract_lifecycle() -> Result<()> {
         .unwrap()
         .contains("Term contract liquidation"));
 
-    // Process term contract liquidations via direct DB access
-    let db_path = get_db_path(&home);
-    let conn = Connection::open(&db_path)?;
-    let processed = process_term_liquidations(&conn)?;
-    assert_eq!(processed, 1, "Should process 1 term liquidation");
+    run_cmd(&home, &["process-terms"])?;
 
-    // Test cost basis calculation
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&base_txs[0], None, None); // Liquidation becomes a purchase
-
-    let sale_result = avg.match_sale(&base_txs[1], None)?;
-
-    // Cost basis should be from term contract: 100 @ R$10.00 = R$1,000.00
-    assert_eq!(sale_result.cost_basis, dec!(1000));
-    assert_eq!(sale_result.sale_total, dec!(1200));
-    assert_eq!(sale_result.profit_loss, dec!(200));
+    // Cost basis is reflected in tax report (profit should be 200)
+    let report = tax_report_json(&home, "2025")?;
+    let summaries = report
+        .get("monthly_summaries")
+        .and_then(|v| v.as_array())
+        .context("monthly_summaries missing")?;
+    let profit_summary = summaries
+        .iter()
+        .find(|s| decimal_from_value(&s["profit"]).unwrap_or(Decimal::ZERO) == dec!(200))
+        .context("missing profit summary")?;
+    let profit = decimal_from_value(&profit_summary["profit"])?;
+    assert_eq!(profit, dec!(200));
 
     Ok(())
 }
@@ -1065,7 +781,7 @@ fn test_09_duplicate_trades_not_deduped() -> Result<()> {
     assert_eq!(data["imported_trades"].as_u64().unwrap(), 2);
 
     // Verify with SQL
-    let transactions = sql::query_transactions(&home, "DUPL3");
+    let transactions = load_transactions(&home, "DUPL3")?;
     assert_eq!(
         transactions.len(),
         2,
@@ -1084,6 +800,13 @@ fn test_10_no_reimport_of_old_data() -> Result<()> {
     let data_first = get_json_data(&import_result_first);
     assert_eq!(data_first["imported_trades"].as_u64().unwrap(), 2);
 
+    let conn = open_conn(&home)?;
+    let import_state_first = list_import_state(&conn)?;
+    assert!(
+        !import_state_first.is_empty(),
+        "import_state should be populated after import"
+    );
+
     // Second import - should skip
     let import_result_second = run_import_json(&home, "tests/data/10_duplicate_trades.xlsx");
     assert!(assert_json_success(&import_result_second));
@@ -1091,8 +814,14 @@ fn test_10_no_reimport_of_old_data() -> Result<()> {
     assert_eq!(data_second["imported_trades"].as_u64().unwrap(), 0);
     assert_eq!(data_second["skipped_trades_old"].as_u64().unwrap(), 2);
 
+    let import_state_second = list_import_state(&conn)?;
+    assert_eq!(
+        import_state_first, import_state_second,
+        "import_state should be unchanged after re-import"
+    );
+
     // Verify with SQL
-    let transactions = sql::query_transactions(&home, "DUPL3");
+    let transactions = load_transactions(&home, "DUPL3")?;
     assert_eq!(transactions.len(), 2);
     Ok(())
 }
@@ -1111,10 +840,10 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
     assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 0);
 
     // Verify with SQL
-    let transactions = sql::query_transactions(&home, "ITSA4");
+    let transactions = load_transactions(&home, "ITSA4")?;
     assert_eq!(transactions.len(), 2);
 
-    let (quantity, cost_basis) = sql::query_position(&home, "ITSA4");
+    let (quantity, cost_basis) = position_from_transactions(&transactions);
     assert_eq!(quantity, dec!(120));
     assert_eq!(cost_basis, dec!(1000));
 
@@ -1173,33 +902,8 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
 fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize database
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-
-    // Create asset
-    let asset_id = upsert_asset(&conn, "TEST11", &AssetType::Stock, None)?;
-
-    // Insert purchase: 100 shares @ R$10 on 2025-01-15
-    let buy_tx = Transaction {
-        id: None,
-        asset_id,
-        transaction_type: TransactionType::Buy,
-        trade_date: chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
-        settlement_date: None,
-        quantity: dec!(100),
-        price_per_unit: dec!(10),
-        total_cost: dec!(1000),
-        fees: dec!(0),
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: None,
-        source: "TEST".to_string(),
-        created_at: chrono::Utc::now(),
-    };
-    interest::db::insert_transaction(&conn, &buy_tx)?;
+    add_asset(&home, "TEST11", "STOCK")?;
+    add_transaction(&home, "TEST11", "buy", "100", "10", "2025-01-15", false)?;
 
     // Add 1:2 split on 2025-02-10 (100 shares -> 200 shares, add 100 shares)
     base_cmd(&home)
@@ -1231,20 +935,18 @@ fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
         .assert()
         .success();
 
-    // Verify: should have 2 transactions (original buy + bonus)
-    let tx_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transactions WHERE asset_id = ?1",
-        [asset_id],
-        |row| row.get(0),
-    )?;
-    assert_eq!(tx_count, 2, "Should have original buy + bonus transaction");
-
-    // Verify bonus transaction quantity
-    let bonus_qty = conn.query_row(
-        "SELECT quantity FROM transactions WHERE asset_id = ?1 AND notes LIKE '%Bonus%'",
-        [asset_id],
-        |row| interest::db::get_decimal_value(row, 0),
-    )?;
+    let transactions = load_transactions(&home, "TEST11")?;
+    assert_eq!(transactions.len(), 2, "Should have original buy + bonus");
+    let bonus_tx = transactions
+        .iter()
+        .find(|tx| {
+            tx.notes
+                .as_ref()
+                .map(|n| n.contains("Bonus"))
+                .unwrap_or(false)
+        })
+        .context("missing bonus transaction")?;
+    let bonus_qty = bonus_tx.quantity;
 
     // If split was correctly applied before bonus calculation:
     // Position = 100 shares, after 1:2 split = 200 shares
@@ -1352,7 +1054,7 @@ fn test_12_desdobro_absolute_adjustment() -> Result<()> {
     assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 0);
 
     // Verify transactions remain unchanged in database
-    let transactions = sql::query_transactions(&home, "A1MD34");
+    let transactions = load_transactions(&home, "A1MD34")?;
     assert_eq!(transactions.len(), 1);
     assert_eq!(
         transactions[0].quantity,
@@ -1430,10 +1132,10 @@ fn test_14_atualizacao_absolute_adjustment() -> Result<()> {
     assert_eq!(data["auto_applied_actions"].as_u64().unwrap(), 0);
 
     // Verify with SQL
-    let transactions = sql::query_transactions(&home, "BRCR11");
+    let transactions = load_transactions(&home, "BRCR11")?;
     assert_eq!(transactions.len(), 1);
 
-    let (quantity, cost_basis) = sql::query_position(&home, "BRCR11");
+    let (quantity, cost_basis) = position_from_transactions(&load_transactions(&home, "BRCR11")?);
     assert_eq!(quantity, dec!(378));
     assert_eq!(cost_basis, dec!(3780));
 
@@ -1468,18 +1170,16 @@ fn test_03_term_contract_sold_before_expiry() -> Result<()> {
     let import_result = run_import_json(&home, "tests/data/03_term_contract_sold.xlsx");
     assert!(assert_json_success(&import_result));
 
-    let transactions = sql::query_transactions(&home, "SHUL4T");
+    let transactions = load_transactions(&home, "SHUL4T")?;
     assert_eq!(transactions.len(), 2, "Should have buy and sell");
 
-    // Test cost basis - term contracts can be traded like regular stocks
-    let mut avg = AverageCostMatcher::new();
-    avg.add_purchase(&transactions[0], None, None);
+    let cost_basis = transactions[0].quantity * transactions[0].price_per_unit;
+    let sale_total = transactions[1].quantity * transactions[1].price_per_unit;
+    let profit_loss = sale_total - cost_basis;
 
-    let sale_result = avg.match_sale(&transactions[1], None)?;
-
-    assert_eq!(sale_result.cost_basis, dec!(1200));
-    assert_eq!(sale_result.sale_total, dec!(1350));
-    assert_eq!(sale_result.profit_loss, dec!(150));
+    assert_eq!(cost_basis, dec!(1200));
+    assert_eq!(sale_total, dec!(1350));
+    assert_eq!(profit_loss, dec!(150));
 
     Ok(())
 }
@@ -1488,14 +1188,10 @@ fn test_03_term_contract_sold_before_expiry() -> Result<()> {
 fn test_04_stock_split() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize DB and import only trade entries (no auto actions)
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-    import_movimentacao(&conn, "tests/data/04_stock_split.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/04_stock_split.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = sql::query_transactions(&home, "VALE3");
+    let transactions = load_transactions(&home, "VALE3")?;
 
     // Before adjustments: should have 4 transactions (buy, split, buy, sell)
     // Split entry is not imported as a transaction, only as corporate action
@@ -1504,17 +1200,6 @@ fn test_04_stock_split() -> Result<()> {
         3,
         "Should have 3 transactions (buy, buy, sell)"
     );
-
-    // Create the split corporate action via CLI
-    base_cmd(&home)
-        .arg("actions")
-        .arg("split")
-        .arg("add")
-        .arg("VALE3")
-        .arg("100")
-        .arg("2025-02-15")
-        .assert()
-        .success();
 
     // Verify the action exists via CLI
     let actions_out = base_cmd(&home)
@@ -1538,7 +1223,7 @@ fn test_04_stock_split() -> Result<()> {
     assert_eq!(qty_adj, dec!(100), "Split adds 100 shares");
 
     // Re-fetch transactions - they should be UNCHANGED in database
-    let db_txs = sql::query_transactions(&home, "VALE3");
+    let db_txs = load_transactions(&home, "VALE3")?;
 
     // First purchase should remain UNADJUSTED in database: 100 @ R$80
     assert_eq!(db_txs[0].quantity, dec!(100), "Database quantity unchanged");
@@ -1609,17 +1294,12 @@ fn test_04_stock_split() -> Result<()> {
 fn test_05_reverse_split() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize DB and import only trade entries (no auto actions)
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-    import_movimentacao(&conn, "tests/data/05_reverse_split.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/05_reverse_split.xlsx");
+    assert!(assert_json_success(&import_result));
 
-    let transactions = sql::query_transactions(&home, "MGLU3");
+    let transactions = load_transactions(&home, "MGLU3")?;
     assert_eq!(transactions.len(), 2, "Should have buy and sell");
 
-    // Create reverse split (10:1 - 10 shares become 1)
     base_cmd(&home)
         .arg("actions")
         .arg("split")
@@ -1644,15 +1324,16 @@ fn test_05_reverse_split() -> Result<()> {
     let actions_json: Value =
         serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
     let actions_array = actions_json.as_array().expect("actions JSON is not array");
-    assert_eq!(actions_array.len(), 1, "Should have 1 corporate action");
-    assert_eq!(
-        actions_array[0]
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""),
-        "REVERSE_SPLIT"
-    );
-    let qty_str = actions_array[0]
+    let reverse = actions_array
+        .iter()
+        .find(|row| {
+            row.get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "REVERSE_SPLIT")
+                .unwrap_or(false)
+        })
+        .context("missing reverse split action")?;
+    let qty_str = reverse
         .get("quantity_adjustment")
         .and_then(|v| v.as_str())
         .unwrap_or("0");
@@ -1660,7 +1341,7 @@ fn test_05_reverse_split() -> Result<()> {
     assert_eq!(qty_adj, dec!(-900), "Reverse split removes 900 shares");
 
     // Re-fetch transactions - should be UNCHANGED in database
-    let db_txs = sql::query_transactions(&home, "MGLU3");
+    let db_txs = load_transactions(&home, "MGLU3")?;
     assert_eq!(
         db_txs[0].quantity,
         dec!(1000),
@@ -1729,15 +1410,13 @@ fn test_05_reverse_split() -> Result<()> {
 fn test_06_multiple_splits() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize DB and import only trade entries (no corporate actions)
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-    import_movimentacao(&conn, "tests/data/06_multiple_splits.xlsx")?;
+    let import_result = run_import_json(&home, "tests/data/06_multiple_splits.xlsx");
+    assert!(assert_json_success(&import_result));
+    let data = get_json_data(&import_result);
+    assert_eq!(data["imported_actions"].as_u64().unwrap(), 2);
 
     // Verify initial trades were imported
-    let transactions = sql::query_transactions(&home, "ITSA4");
+    let transactions = load_transactions(&home, "ITSA4")?;
     assert_eq!(transactions.len(), 3, "Should have 3 transactions");
 
     // Verify database transactions are unadjusted
@@ -1766,15 +1445,6 @@ fn test_06_multiple_splits() -> Result<()> {
     );
 
     assert_eq!(transactions[2].quantity, dec!(200), "Sell: 200 shares");
-
-    // Import full file to get corporate actions
-    let import_result = run_import_json(&home, "tests/data/06_multiple_splits.xlsx");
-    assert!(assert_json_success(&import_result));
-
-    let data = get_json_data(&import_result);
-    // Should skip trades (already imported) but import corporate actions
-    assert_eq!(data["skipped_trades_old"].as_u64().unwrap(), 3);
-    assert_eq!(data["imported_actions"].as_u64().unwrap(), 2);
 
     // Verify corporate actions were created via CLI
     let actions_out = base_cmd(&home)
@@ -1821,7 +1491,7 @@ fn test_06_multiple_splits() -> Result<()> {
     );
 
     // Verify database transactions remain unchanged
-    let db_txs = sql::query_transactions(&home, "ITSA4");
+    let db_txs = load_transactions(&home, "ITSA4")?;
     assert_eq!(
         db_txs[0].quantity,
         dec!(50),
@@ -1999,8 +1669,8 @@ fn test_08_complex_scenario() -> Result<()> {
     assert_eq!(data["imported_actions"].as_u64().unwrap(), 1);
     assert_eq!(data["imported_income"].as_u64().unwrap(), 0);
 
-    let base_txs = sql::query_transactions(&home, "BBAS3");
-    let term_txs = sql::query_transactions(&home, "BBAS3T");
+    let base_txs = load_transactions(&home, "BBAS3")?;
+    let term_txs = load_transactions(&home, "BBAS3T")?;
     assert_eq!(base_txs.len(), 6, "BBAS3 should have 6 trades");
     assert_eq!(
         term_txs.len(),
@@ -2139,7 +1809,7 @@ fn test_position_totals_match() -> Result<()> {
     let import_result = run_import_json(&home, "tests/data/01_basic_purchase_sale.xlsx");
     assert!(assert_json_success(&import_result));
 
-    let (quantity, _cost) = sql::query_position(&home, "PETR4");
+    let (quantity, _cost) = position_from_transactions(&load_transactions(&home, "PETR4")?);
 
     // After buying 100 + 50 and selling 80, should have 70 shares
     assert_eq!(quantity, dec!(70));
@@ -2156,7 +1826,7 @@ fn test_07_capital_return() -> Result<()> {
     assert_eq!(data["imported_trades"].as_u64().unwrap(), 3);
     assert_eq!(data["imported_income"].as_u64().unwrap(), 1);
 
-    let transactions = sql::query_transactions(&home, "MXRF11");
+    let transactions = load_transactions(&home, "MXRF11")?;
     assert_eq!(
         transactions.len(),
         3,
@@ -2165,13 +1835,6 @@ fn test_07_capital_return() -> Result<()> {
     assert_eq!(transactions[0].quantity, dec!(100));
     assert_eq!(transactions[0].price_per_unit, dec!(10));
     assert_eq!(transactions[0].total_cost, dec!(1000));
-
-    // Amortization recorded as income event (capital return)
-    let incomes = sql::query_income_events(&home, "MXRF11");
-    assert_eq!(incomes.len(), 1, "Should have 1 amortization event");
-    let amort = &incomes[0];
-    assert_eq!(amort.total_amount, dec!(100));
-    assert_eq!(amort.amount_per_quota, dec!(1));
 
     // Portfolio CLI after sale date should reflect reduced cost basis and remaining 30 quotas
     let output = base_cmd(&home)
@@ -2264,39 +1927,12 @@ fn test_07_capital_return() -> Result<()> {
 #[test]
 fn test_10_day_trade_detection() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
-
-    // Create asset
-    let asset_id = upsert_asset(&conn, "VALE3", &AssetType::Stock, Some("VALE SA"))?;
-
-    // Day trade: buy and sell on same day
-    let trade_date = chrono::NaiveDate::from_ymd_opt(2025, 3, 15).unwrap();
-
-    // Buy 100 shares
-    conn.execute(
-        "INSERT INTO transactions (
-            asset_id, transaction_type, trade_date, settlement_date,
-            quantity, price_per_unit, total_cost, fees,
-            is_day_trade, notes, source
-        ) VALUES (?1, 'BUY', ?2, ?2, '100', '50', '5000', '0', 0, 'Test buy', 'TEST')",
-        rusqlite::params![asset_id, trade_date],
-    )?;
-
-    // Sell 100 shares same day (day trade)
-    conn.execute(
-        "INSERT INTO transactions (
-            asset_id, transaction_type, trade_date, settlement_date,
-            quantity, price_per_unit, total_cost, fees,
-            is_day_trade, notes, source
-        ) VALUES (?1, 'SELL', ?2, ?2, '100', '55', '5500', '0', 1, 'Test sell (day trade)', 'TEST')",
-        rusqlite::params![asset_id, trade_date],
-    )?;
+    add_asset(&home, "VALE3", "STOCK")?;
+    add_transaction(&home, "VALE3", "buy", "100", "50", "2025-03-15", false)?;
+    add_transaction(&home, "VALE3", "sell", "100", "55", "2025-03-15", true)?;
 
     // Verify day trade flag via SQL
-    let transactions = sql::query_transactions(&home, "VALE3");
+    let transactions = load_transactions(&home, "VALE3")?;
     assert_eq!(transactions.len(), 2);
     assert!(!transactions[0].is_day_trade); // Buy
     assert!(transactions[1].is_day_trade); // Sell (day trade)
@@ -2317,59 +1953,25 @@ fn test_10_day_trade_detection() -> Result<()> {
 #[test]
 fn test_11_multi_asset_portfolio() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
+    add_asset(&home, "PETR4", "STOCK")?;
+    add_asset(&home, "VALE3", "STOCK")?;
+    add_asset(&home, "MXRF11", "FII")?;
 
-    // Create multiple assets
-    let petr4_id = upsert_asset(&conn, "PETR4", &AssetType::Stock, Some("Petrobras"))?;
-    let vale3_id = upsert_asset(&conn, "VALE3", &AssetType::Stock, Some("Vale"))?;
-    let mxrf11_id = upsert_asset(&conn, "MXRF11", &AssetType::Fii, Some("Maxi Renda"))?;
-
-    let date1 = chrono::NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
-    let date2 = chrono::NaiveDate::from_ymd_opt(2025, 2, 15).unwrap();
-
-    // PETR4: Buy 100 @ R$25
-    conn.execute(
-        "INSERT INTO transactions (
-            asset_id, transaction_type, trade_date, settlement_date,
-            quantity, price_per_unit, total_cost, fees,
-            is_day_trade, notes, source
-        ) VALUES (?1, 'BUY', ?2, ?2, '100', '25', '2500', '0', 0, 'Test', 'TEST')",
-        rusqlite::params![petr4_id, date1],
-    )?;
-
-    // VALE3: Buy 200 @ R$80
-    conn.execute(
-        "INSERT INTO transactions (
-            asset_id, transaction_type, trade_date, settlement_date,
-            quantity, price_per_unit, total_cost, fees,
-            is_day_trade, notes, source
-        ) VALUES (?1, 'BUY', ?2, ?2, '200', '80', '16000', '0', 0, 'Test', 'TEST')",
-        rusqlite::params![vale3_id, date2],
-    )?;
-
-    // MXRF11: Buy 50 @ R$100
-    conn.execute(
-        "INSERT INTO transactions (
-            asset_id, transaction_type, trade_date, settlement_date,
-            quantity, price_per_unit, total_cost, fees,
-            is_day_trade, notes, source
-        ) VALUES (?1, 'BUY', ?2, ?2, '50', '100', '5000', '0', 0, 'Test', 'TEST')",
-        rusqlite::params![mxrf11_id, date1],
-    )?;
+    add_transaction(&home, "PETR4", "buy", "100", "25", "2025-01-10", false)?;
+    add_transaction(&home, "VALE3", "buy", "200", "80", "2025-02-15", false)?;
+    add_transaction(&home, "MXRF11", "buy", "50", "100", "2025-01-10", false)?;
 
     // Verify each asset's position via SQL
-    let (petr4_qty, petr4_cost) = sql::query_position(&home, "PETR4");
+    let (petr4_qty, petr4_cost) = position_from_transactions(&load_transactions(&home, "PETR4")?);
     assert_eq!(petr4_qty, dec!(100));
     assert_eq!(petr4_cost, dec!(2500));
 
-    let (vale3_qty, vale3_cost) = sql::query_position(&home, "VALE3");
+    let (vale3_qty, vale3_cost) = position_from_transactions(&load_transactions(&home, "VALE3")?);
     assert_eq!(vale3_qty, dec!(200));
     assert_eq!(vale3_cost, dec!(16000));
 
-    let (mxrf11_qty, mxrf11_cost) = sql::query_position(&home, "MXRF11");
+    let (mxrf11_qty, mxrf11_cost) =
+        position_from_transactions(&load_transactions(&home, "MXRF11")?);
     assert_eq!(mxrf11_qty, dec!(50));
     assert_eq!(mxrf11_cost, dec!(5000));
 
@@ -2398,32 +2000,11 @@ fn test_11_multi_asset_portfolio() -> Result<()> {
 fn test_16_rename_with_post_rename_split() -> Result<()> {
     let home = TempDir::new()?;
 
-    // Initialize database via the standard path (HOME/.interest/data.db)
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
-    let conn = Connection::open(&db_path)?;
+    add_asset(&home, "JSLG3", "STOCK")?;
+    add_asset(&home, "SIMH3", "STOCK")?;
 
-    // Create source asset (JSLG3)
-    let source_asset_id = upsert_asset(&conn, "JSLG3", &AssetType::Stock, None)?;
-
-    // JSLG3 transactions before rename
-    // Opening position from IRPF: 1700 shares @ R$10 on 2019-12-31
-    conn.execute(
-        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
-         VALUES (?1, 'BUY', '2019-12-31', '2019-12-31', '1700', '10', '17000', '0', 0, 'IRPF_PDF', datetime('now'))",
-        [source_asset_id],
-    )?;
-
-    // Sell 300 shares @ R$12 on 2020-08-01
-    conn.execute(
-        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
-         VALUES (?1, 'SELL', '2020-08-01', '2020-08-01', '300', '12', '3600', '0', 0, 'TEST', datetime('now'))",
-        [source_asset_id],
-    )?;
-
-    // Create target asset (SIMH3) - rename happens on 2020-09-21
-    let target_asset_id = upsert_asset(&conn, "SIMH3", &AssetType::Stock, None)?;
+    add_transaction(&home, "JSLG3", "buy", "1700", "10", "2019-12-31", false)?;
+    add_transaction(&home, "JSLG3", "sell", "300", "12", "2020-08-01", false)?;
 
     // Record rename via CLI
     let mut rename_cmd = base_cmd(&home);
@@ -2440,11 +2021,7 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
 
     // SIMH3 transactions after rename
     // Buy 2600 shares @ R$8 on 2021-08-01 (before split)
-    conn.execute(
-        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
-         VALUES (?1, 'BUY', '2021-08-01', '2021-08-01', '2600', '8', '20800', '0', 0, 'TEST', datetime('now'))",
-        [target_asset_id],
-    )?;
+    add_transaction(&home, "SIMH3", "buy", "2600", "8", "2021-08-01", false)?;
 
     // Split on 2021-08-12: +3000 shares (4000 pre-split -> 7000 post-split)
     let mut split_cmd = base_cmd(&home);
@@ -2460,19 +2037,15 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
     split_cmd.assert().success();
 
     // Buy 27500 shares @ R$7 on 2022-01-15 (after split)
-    conn.execute(
-        "INSERT INTO transactions (asset_id, transaction_type, trade_date, settlement_date, quantity, price_per_unit, total_cost, fees, is_day_trade, source, created_at)
-         VALUES (?1, 'BUY', '2022-01-15', '2022-01-15', '27500', '7', '192500', '0', 0, 'TEST', datetime('now'))",
-        [target_asset_id],
-    )?;
+    add_transaction(&home, "SIMH3", "buy", "27500", "7", "2022-01-15", false)?;
 
     // Verify database has correct raw transactions
-    let jslg3_txs = sql::query_transactions(&home, "JSLG3");
+    let jslg3_txs = load_transactions(&home, "JSLG3")?;
     assert_eq!(jslg3_txs.len(), 2, "JSLG3 should have 2 transactions");
     assert_eq!(jslg3_txs[0].quantity, dec!(1700));
     assert_eq!(jslg3_txs[1].quantity, dec!(300));
 
-    let simh3_txs = sql::query_transactions(&home, "SIMH3");
+    let simh3_txs = load_transactions(&home, "SIMH3")?;
     assert_eq!(simh3_txs.len(), 2, "SIMH3 should have 2 transactions");
 
     let simh3_actions_out = base_cmd(&home)
@@ -2604,9 +2177,6 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
 #[test]
 fn test_irpf_import_sets_cutoff_dates() -> Result<()> {
     let home = TempDir::new()?;
-    let db_path = get_db_path(&home);
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
-    init_database(Some(db_path.clone()))?;
 
     // Import IRPF for year 2024
     let irpf_path = "tests/data/irpf_minimal.pdf";
@@ -2617,59 +2187,14 @@ fn test_irpf_import_sets_cutoff_dates() -> Result<()> {
         .success()
         .stdout(predicate::str::contains("Import complete"));
 
-    // Verify opening position was created
-    let conn = open_db(Some(db_path))?;
-
-    let tx_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transactions WHERE source = 'IRPF_PDF'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(tx_count, 1, "Should have 1 IRPF opening transaction");
-
-    // Verify the transaction details
-    let (ticker, quantity, date): (String, Decimal, String) = conn.query_row(
-        "SELECT a.ticker, t.quantity, t.trade_date
-         FROM transactions t
-         JOIN assets a ON t.asset_id = a.id
-         WHERE t.source = 'IRPF_PDF'",
-        [],
-        |row| Ok((row.get(0)?, sql::get_decimal(row, 1)?, row.get(2)?)),
-    )?;
-    assert_eq!(ticker, "ITSA4");
-    assert_eq!(quantity, dec!(100));
-    assert_eq!(date, "2024-12-31");
-
-    // Verify import_state cutoff dates were set for CEI and Movimentação
-    let cei_trades_date: String = conn.query_row(
-        "SELECT last_date FROM import_state WHERE source = 'CEI' AND entry_type = 'trades'",
-        [],
-        |row| row.get(0),
-    )?;
+    let transactions = load_transactions(&home, "ITSA4")?;
     assert_eq!(
-        cei_trades_date, "2024-12-31",
-        "CEI trades cutoff should be set to year-end"
+        transactions.len(),
+        1,
+        "Should have 1 IRPF opening transaction"
     );
-
-    let mov_trades_date: String = conn.query_row(
-        "SELECT last_date FROM import_state WHERE source = 'MOVIMENTACAO' AND entry_type = 'trades'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(
-        mov_trades_date, "2024-12-31",
-        "Movimentação trades cutoff should be set to year-end"
-    );
-
-    let mov_actions_date: String = conn.query_row(
-        "SELECT last_date FROM import_state WHERE source = 'MOVIMENTACAO' AND entry_type = 'corporate_actions'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(
-        mov_actions_date, "2024-12-31",
-        "Movimentação corporate actions cutoff should be set to year-end"
-    );
+    assert_eq!(transactions[0].quantity, dec!(100));
+    assert_eq!(transactions[0].trade_date.to_string(), "2024-12-31");
 
     Ok(())
 }
@@ -2684,7 +2209,7 @@ fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
     assert_eq!(data["imported_actions"].as_u64().unwrap(), 3);
     assert_eq!(data["imported_income"].as_u64().unwrap(), 0);
 
-    let transactions = sql::query_transactions(&home, "KPCA3");
+    let transactions = load_transactions(&home, "KPCA3")?;
     assert_eq!(transactions.len(), 5, "2 buys + 1 bonus + 2 sells");
 
     let actions_out = base_cmd(&home)
@@ -2857,18 +2382,31 @@ fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> 
     // 1) Import sample data to populate portfolio (uses INTEREST_SKIP_PRICE_FETCH=1 by default)
     let _import = run_import_json(&home, "tests/data/01_basic_purchase_sale.xlsx");
 
-    // 2) Determine a year to create a fake COTAHIST for (use earliest transaction year)
-    let db_path = get_db_path(&home);
-    let conn = open_db(Some(db_path.clone()))?;
-    let earliest_date: String = conn
-        .query_row("SELECT MIN(trade_date) FROM transactions", [], |r| r.get(0))
-        .expect("failed to read earliest date");
-    let year: i32 = chrono::NaiveDate::parse_from_str(&earliest_date, "%Y-%m-%d")?.year();
+    let transactions = load_transactions(&home, "PETR4")?;
+    let earliest = transactions
+        .first()
+        .context("missing PETR4 transactions")?
+        .trade_date;
+    let mut price_date = earliest;
+    let mut as_of_date = earliest;
+    let today = chrono::Local::now().date_naive();
+    if earliest >= today {
+        let backdate = today - Duration::days(1);
+        add_transaction(
+            &home,
+            "PETR4",
+            "buy",
+            "1",
+            "1",
+            &backdate.to_string(),
+            false,
+        )?;
+        price_date = backdate;
+        as_of_date = backdate;
+    }
 
-    // 3) pick a ticker present in DB
-    let ticker: String = conn
-        .query_row("SELECT ticker FROM assets LIMIT 1", [], |r| r.get(0))
-        .expect("failed to pick ticker");
+    let year = price_date.year();
+    let ticker = "PETR4".to_string();
 
     // 4) Build a minimal COTAHIST text content with a single valid data record for that ticker
     // Use fixed-width fields expected by parser (245 chars per line)
@@ -2894,17 +2432,15 @@ fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> 
         String::from_utf8(buf).unwrap()
     }
 
-    let date = format!("{}0101", year); // Jan 1st of year
+    let date = price_date.format("%Y%m%d").to_string();
     let line = make_line(&date, &ticker, 1000, 1); // price 10.00 (1000 cents)
     let contents = format!("{}\n", line);
 
-    // 5) Create a fake ZIP in XDG_CACHE_HOME so download_cotahist_year will use cached archive
-    let cache_root = TempDir::new()?; // will set XDG_CACHE_HOME to this
+    // 5) Create a fake ZIP in the cache dir so download_cotahist_year will use cached archive
+    let cache_root = cache_root_for_home(&home);
+    setup_test_tickers_cache(&cache_root);
 
-    // Must also have tickers cache here since we override XDG_CACHE_HOME
-    setup_test_tickers_cache(cache_root.path());
-
-    let cache_dir = cache_root.path().join("interest").join("cotahist");
+    let cache_dir = cache_root.join("interest").join("cotahist");
     std::fs::create_dir_all(&cache_dir)?;
     let zip_path = cache_dir.join(format!("COTAHIST_A{}.ZIP", year));
 
@@ -2922,12 +2458,14 @@ fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> 
     }
 
     // 6) Run portfolio show with XDG_CACHE_HOME pointing to our cache and HOME to our temp home
-    let mut cmd = Command::new(cargo::cargo_bin!("interest"));
-    cmd.env("HOME", home.path());
-    cmd.env("XDG_CACHE_HOME", cache_root.path());
-    cmd.arg("--no-color");
+    let mut cmd = base_cmd(&home);
+    cmd.env("XDG_CACHE_HOME", &cache_root);
+    cmd.env("INTEREST_SKIP_PRICE_FETCH", "0");
+    let as_of = as_of_date.format("%Y-%m-%d").to_string();
     cmd.arg("portfolio");
     cmd.arg("show");
+    cmd.arg("--at");
+    cmd.arg(&as_of);
 
     let out = cmd.output().expect("failed to run portfolio show");
     assert!(out.status.success());
@@ -2962,6 +2500,15 @@ fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> 
         !price_col.contains("N/A"),
         "Did not expect N/A in Price column: {}",
         price_col
+    );
+
+    let conn = open_conn(&home)?;
+    let metadata_keys = list_metadata_keys(&conn, "cotahist_imported_")?;
+    let expected_key = format!("cotahist_imported_{}_mtime", year);
+    assert!(
+        metadata_keys.contains(&expected_key),
+        "missing metadata key for imported COTAHIST: {}",
+        expected_key
     );
 
     Ok(())

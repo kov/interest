@@ -104,34 +104,7 @@ pub async fn fetch_current_price(ticker: &str) -> Result<PriceData> {
         .json()
         .await
         .context("Failed to parse Yahoo Finance response")?;
-
-    if let Some(error) = data.chart.error {
-        return Err(anyhow!(
-            "Yahoo Finance API error: {} - {}",
-            error.code,
-            error.description
-        ));
-    }
-
-    let result = data
-        .chart
-        .result
-        .and_then(|r| r.into_iter().next())
-        .ok_or_else(|| anyhow!("No data returned from Yahoo Finance"))?;
-
-    let price = result
-        .meta
-        .regular_market_price
-        .ok_or_else(|| anyhow!("No price data available"))?;
-
-    let currency = result.meta.currency.unwrap_or_else(|| "BRL".to_string());
-
-    Ok(PriceData {
-        ticker: ticker.to_string(),
-        price: Decimal::from_f64_retain(price).ok_or_else(|| anyhow!("Invalid price value"))?,
-        currency,
-        timestamp: chrono::Utc::now(),
-    })
+    parse_current_price_response(ticker, data)
 }
 
 /// Fetch historical prices from Yahoo Finance
@@ -190,7 +163,40 @@ pub async fn fetch_historical_prices(
         .json()
         .await
         .context("Failed to parse Yahoo Finance response")?;
+    parse_historical_prices_response(data)
+}
 
+fn parse_current_price_response(ticker: &str, data: YahooQuoteResponse) -> Result<PriceData> {
+    if let Some(error) = data.chart.error {
+        return Err(anyhow!(
+            "Yahoo Finance API error: {} - {}",
+            error.code,
+            error.description
+        ));
+    }
+
+    let result = data
+        .chart
+        .result
+        .and_then(|r| r.into_iter().next())
+        .ok_or_else(|| anyhow!("No data returned from Yahoo Finance"))?;
+
+    let price = result
+        .meta
+        .regular_market_price
+        .ok_or_else(|| anyhow!("No price data available"))?;
+
+    let currency = result.meta.currency.unwrap_or_else(|| "BRL".to_string());
+
+    Ok(PriceData {
+        ticker: ticker.to_string(),
+        price: Decimal::from_f64_retain(price).ok_or_else(|| anyhow!("Invalid price value"))?,
+        currency,
+        timestamp: chrono::Utc::now(),
+    })
+}
+
+fn parse_historical_prices_response(data: YahooQuoteResponse) -> Result<Vec<HistoricalPrice>> {
     if let Some(error) = data.chart.error {
         return Err(anyhow!(
             "Yahoo Finance API error: {} - {}",
@@ -260,6 +266,7 @@ pub async fn fetch_historical_prices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn should_skip_online_tests() -> bool {
         std::env::var("INTEREST_SKIP_ONLINE_TESTS")
@@ -268,6 +275,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_fetch_current_price() {
         if should_skip_online_tests() {
             return;
@@ -286,6 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_fetch_historical_prices() {
         if should_skip_online_tests() {
             return;
@@ -303,5 +312,32 @@ mod tests {
 
         assert!(!prices.is_empty());
         println!("Fetched {} historical prices", prices.len());
+    }
+
+    #[test]
+    fn test_parse_current_price_from_fixture() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/yahoo_chart_PETR4.json"
+        ));
+        let data: YahooQuoteResponse = serde_json::from_str(raw).unwrap();
+        let parsed = parse_current_price_response("PETR4", data).unwrap();
+        assert_eq!(parsed.ticker, "PETR4");
+        assert_eq!(parsed.price, Decimal::from_str("34.75").unwrap());
+    }
+
+    #[test]
+    fn test_parse_historical_prices_from_fixture() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/yahoo_chart_PETR4_hist.json"
+        ));
+        let data: YahooQuoteResponse = serde_json::from_str(raw).unwrap();
+        let parsed = parse_historical_prices_response(data).unwrap();
+        assert_eq!(parsed.len(), 7);
+        assert_eq!(
+            parsed.first().unwrap().date,
+            NaiveDate::from_ymd_opt(2025, 1, 2).unwrap()
+        );
     }
 }

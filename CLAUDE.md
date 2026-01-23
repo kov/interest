@@ -53,6 +53,21 @@ cargo run -- tax report 2024 --json
 cargo run -- portfolio show --no-color
 ```
 
+### Price Data (COTAHIST)
+
+```bash
+# Import B3 COTAHIST for a year (downloads or uses cache)
+cargo run -- prices import-b3 2024
+
+# Import from a local ZIP (manual download)
+cargo run -- prices import-b3-file ~/Downloads/COTAHIST_A2024.ZIP
+
+# Clear cached COTAHIST ZIPs (optionally a year)
+cargo run -- prices clear-cache 2024
+```
+
+**Offline mode:** set `INTEREST_OFFLINE=1` to prevent network usage. When enabled, cached COTAHIST ZIPs are used directly and missing cache files return an error.
+
 ### Database
 
 ```bash
@@ -517,8 +532,9 @@ The `tests/README.md` file contains complete documentation on:
 Located in `#[cfg(test)] mod tests` within each module:
 
 ```bash
-cargo test --lib                    # Run all unit tests
+cargo test --bin interest           # Run all unit tests
 cargo test tax::                    # Run specific module
+cargo test                          # Run all unit + integration tests
 ```
 
 ### Integration Tests
@@ -528,7 +544,9 @@ Located in `tests/`:
 ```bash
 cargo test --test integration_tests           # All integration tests
 cargo test --test tax_integration_tests       # Tax scenarios
-cargo test --test generate_test_files         # Generate fixtures (use --ignored)
+cargo run --bin generate_test_fixtures        # Generate fixtures
+cargo test --test integration_tests test_portfolio_filters_by_asset_type_fii
+cargo test --test tax_integration_tests -- --list
 ```
 
 **Pattern**: Use isolated `TempDir` with fixtures (see `tests/README.md` for details).

@@ -563,3 +563,62 @@ pub async fn sync_registry(
         dry_run,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_fii_list_fixture() {
+        let html = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/maisretorno_lista-fii.html"
+        ));
+        let (entries, _pagination) =
+            parse_list_page(html, AssetType::Fii, "https://maisretorno.com/lista-fii").unwrap();
+        let entry = entries.iter().find(|e| e.ticker == "ABCP11").unwrap();
+        assert_eq!(
+            entry.name.as_deref(),
+            Some("GRAND PLAZA SHOPPING FDO INV IMOB - RESP LIM")
+        );
+    }
+
+    #[test]
+    fn test_parse_debentures_list_fixture() {
+        let html = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/maisretorno_lista-debentures.html"
+        ));
+        let (entries, _pagination) = parse_list_page(
+            html,
+            AssetType::Bond,
+            "https://maisretorno.com/lista-debentures",
+        )
+        .unwrap();
+        let entry = entries.iter().find(|e| e.ticker == "LIQP12").unwrap();
+        assert!(entry.name.as_deref().unwrap_or("").contains("ATMA"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_fetch_list_pages_online() {
+        let client = reqwest::Client::new();
+        let html = fetch_html(&client, "https://maisretorno.com/lista-fii")
+            .await
+            .unwrap();
+        let (entries, _pagination) =
+            parse_list_page(&html, AssetType::Fii, "https://maisretorno.com/lista-fii").unwrap();
+        assert!(!entries.is_empty());
+
+        let html = fetch_html(&client, "https://maisretorno.com/lista-debentures")
+            .await
+            .unwrap();
+        let (entries, _pagination) = parse_list_page(
+            &html,
+            AssetType::Bond,
+            "https://maisretorno.com/lista-debentures",
+        )
+        .unwrap();
+        assert!(!entries.is_empty());
+    }
+}

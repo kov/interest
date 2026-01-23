@@ -54,7 +54,9 @@ struct CachedMap {
 static TICKERS_CACHE: OnceLock<Mutex<Option<CachedMap>>> = OnceLock::new();
 
 pub fn get_tickers_cache_dir() -> Result<PathBuf> {
-    let cache_dir = dir_spec::cache_home()
+    let cache_dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(dir_spec::cache_home)
         .ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?;
 
     Ok(cache_dir.join("interest").join("tickers"))
@@ -679,6 +681,7 @@ fn normalize_csv_content(content: &str) -> Result<(String, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     fn record_with(
         ticker: &str,
@@ -770,5 +773,30 @@ mod tests {
 
         let not_subscription = find_record_by_prefix(&map, "BRCR11");
         assert!(not_subscription.is_none());
+    }
+
+    #[test]
+    fn test_load_b3_tickers_from_fixture() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = temp_dir.path();
+        let fixture = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/b3_tickers_sample.csv"
+        ));
+        fs::write(cache_dir.join(CACHE_FILENAME), fixture).unwrap();
+
+        let map = load_b3_tickers_map(Some(cache_dir)).unwrap();
+        let record = map.get("2WAV3").unwrap();
+        assert_eq!(record.security_category, "SHARES");
+        assert_eq!(record.cfi_code.as_deref(), Some("ESVUFR"));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_download_b3_tickers_online() {
+        let date = chrono::Local::now().date_naive();
+        let (bytes, url) = download_b3_tickers(date).unwrap();
+        assert!(!bytes.is_empty());
+        assert!(url.contains("arquivos.b3.com.br"));
     }
 }

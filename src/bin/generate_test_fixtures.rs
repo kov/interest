@@ -1,6 +1,6 @@
 //! Generate test XLS files for the interest tracker test suite.
 //!
-//! Run with: cargo test --test generate_test_files -- --ignored
+//! Run with: cargo run --bin generate_test_fixtures
 //!
 //! These files test various scenarios:
 //! 1. Basic purchases and sales
@@ -35,8 +35,6 @@ fn create_workbook_with_header() -> Workbook {
     workbook
 }
 
-#[test]
-#[ignore]
 fn generate_13_ofertas_publicas() {
     /*
     Test ofertas públicas import with L-suffix normalization.
@@ -95,8 +93,6 @@ fn generate_13_ofertas_publicas() {
     println!("✓ Created: 13_ofertas_publicas.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_12_desdobro_inference() {
     /*
     Test Desdobro absolute adjustment from credited quantity.
@@ -139,8 +135,6 @@ fn generate_12_desdobro_inference() {
     println!("✓ Created: 12_desdobro_inference.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_14_atualizacao_inference() {
     /*
     Test Atualização absolute adjustment from credited quantity.
@@ -183,8 +177,6 @@ fn generate_14_atualizacao_inference() {
     println!("✓ Created: 14_atualizacao_inference.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_10_duplicate_trades() {
     /*
     Test duplicate trades (same date/qty/price) should both be imported.
@@ -222,8 +214,6 @@ fn generate_10_duplicate_trades() {
     println!("✓ Created: 10_duplicate_trades.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_11_bonus_auto_apply() {
     /*
     Test bonus corporate action auto-apply.
@@ -264,8 +254,6 @@ fn generate_11_bonus_auto_apply() {
     println!("✓ Created: 11_bonus_auto_apply.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_01_basic_purchase_and_sale() {
     /*
     Test basic purchase and sale with cost basis calculation.
@@ -323,8 +311,6 @@ fn generate_01_basic_purchase_and_sale() {
     println!("✓ Created: 01_basic_purchase_sale.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_02_term_contract_lifecycle() {
     /*
     Test term contract purchase, expiry, and sale.
@@ -383,8 +369,6 @@ fn generate_02_term_contract_lifecycle() {
     println!("✓ Created: 02_term_contract_lifecycle.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_03_term_contract_sold_before_expiry() {
     /*
     Test selling a term contract before it expires.
@@ -428,8 +412,6 @@ fn generate_03_term_contract_sold_before_expiry() {
     println!("✓ Created: 03_term_contract_sold.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_04_stock_split() {
     /*
     Test stock split (desdobro) adjustment.
@@ -491,8 +473,6 @@ fn generate_04_stock_split() {
     println!("✓ Created: 04_stock_split.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_05_reverse_split() {
     /*
     Test reverse split (grupamento) adjustment.
@@ -549,8 +529,6 @@ fn generate_05_reverse_split() {
     println!("✓ Created: 05_reverse_split.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_06_multiple_splits() {
     /*
     Test multiple splits on the same asset.
@@ -624,8 +602,6 @@ fn generate_06_multiple_splits() {
     println!("✓ Created: 06_multiple_splits.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_07_capital_return() {
     /*
     Test FII (Real Estate Fund) with capital return (amortização).
@@ -698,8 +674,6 @@ fn generate_07_capital_return() {
     println!("✓ Created: 07_capital_return.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_08_complex_scenario() {
     /*
     Complex scenario combining multiple events.
@@ -834,8 +808,6 @@ fn generate_08_complex_scenario() {
     println!("✓ Created: 08_complex_scenario.xlsx");
 }
 
-#[test]
-#[ignore]
 fn generate_09_fi_infra() {
     /*
     Test FI-Infra (Infrastructure Fund) with similar behavior to FII.
@@ -876,4 +848,85 @@ fn generate_09_fi_infra() {
 
     workbook.save("tests/data/09_fi_infra.xlsx").unwrap();
     println!("✓ Created: 09_fi_infra.xlsx");
+}
+
+fn main() {
+    let generators: &[(&str, fn())] = &[
+        (
+            "generate_13_ofertas_publicas",
+            generate_13_ofertas_publicas as fn(),
+        ),
+        (
+            "generate_12_desdobro_inference",
+            generate_12_desdobro_inference as fn(),
+        ),
+        (
+            "generate_14_atualizacao_inference",
+            generate_14_atualizacao_inference as fn(),
+        ),
+        (
+            "generate_10_duplicate_trades",
+            generate_10_duplicate_trades as fn(),
+        ),
+        (
+            "generate_11_bonus_auto_apply",
+            generate_11_bonus_auto_apply as fn(),
+        ),
+        (
+            "generate_01_basic_purchase_and_sale",
+            generate_01_basic_purchase_and_sale as fn(),
+        ),
+        (
+            "generate_02_term_contract_lifecycle",
+            generate_02_term_contract_lifecycle as fn(),
+        ),
+        (
+            "generate_03_term_contract_sold_before_expiry",
+            generate_03_term_contract_sold_before_expiry as fn(),
+        ),
+        ("generate_04_stock_split", generate_04_stock_split as fn()),
+        (
+            "generate_05_reverse_split",
+            generate_05_reverse_split as fn(),
+        ),
+        (
+            "generate_06_multiple_splits",
+            generate_06_multiple_splits as fn(),
+        ),
+        (
+            "generate_07_capital_return",
+            generate_07_capital_return as fn(),
+        ),
+        (
+            "generate_08_complex_scenario",
+            generate_08_complex_scenario as fn(),
+        ),
+        ("generate_09_fi_infra", generate_09_fi_infra as fn()),
+    ];
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        for (_, generator) in generators {
+            generator();
+        }
+        return;
+    }
+
+    for name in args {
+        let mut found = false;
+        for (label, generator) in generators {
+            if *label == name {
+                generator();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            eprintln!("Unknown generator: {}", name);
+            eprintln!("Available generators:");
+            for (label, _) in generators {
+                eprintln!("  {}", label);
+            }
+            std::process::exit(1);
+        }
+    }
 }

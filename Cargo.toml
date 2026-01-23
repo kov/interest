@@ -6,10 +6,6 @@ authors = ["Interest Contributors"]
 description = "Brazilian B3 stock exchange investment tracker with tax calculations"
 license = "MIT"
 
-[lib]
-name = "interest"
-path = "src/lib.rs"
-
 [[bin]]
 name = "interest"
 path = "src/main.rs"
@@ -81,13 +77,13 @@ itertools = "0.14"
 once_cell = "1.19"
 dir_spec = "0.5"   # Cross-platform cache/config directories; prefered over dirs for respecting XDG on mac/win
 zip = "7.0"        # ZIP archive extraction for COTAHIST files
+rust_xlsxwriter = "0.92"
 
 # Configuration
 toml = "0.9"
 
 [dev-dependencies]
 tempfile = "3.13"
-rust_xlsxwriter = "0.92"
 rust_decimal_macros = "1.36"
 assert_cmd = "2.1"
 predicates = "3.0"
