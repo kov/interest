@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "interest"
 path = "src/main.rs"
 
+[features]
+default = ["tui"]
+tui = []
+
 [dependencies]
 # Database - SQLite
 # Note: Using rusqlite for now (stable), designed to swap to Limbo later when it's production-ready

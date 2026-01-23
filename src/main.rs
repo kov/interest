@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
                     handle_inspect(&file, full, column).await
                 }
 
-                Commands::Interactive => interest::ui::launch_tui().await,
+                Commands::Interactive => crate::ui::launch_tui().await,
 
                 Commands::ProcessTerms => handle_process_terms().await,
 

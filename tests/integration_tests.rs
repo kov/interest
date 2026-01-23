@@ -366,6 +366,64 @@ fn get_json_data(value: &Value) -> &Value {
         .expect("missing data field in JSON response")
 }
 
+fn seed_basic_flow_data(conn: &Connection, asset_type: AssetType) -> Result<i64> {
+    let asset_id = insert_asset(conn, "TSTJ1", &asset_type, None)?;
+
+    let buy_tx = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Buy,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 1, 4).unwrap()),
+        quantity: Decimal::from(10),
+        price_per_unit: Decimal::from(10),
+        total_cost: Decimal::from(100),
+        fees: Decimal::from(2),
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(conn, &buy_tx)?;
+
+    let sell_tx = Transaction {
+        id: None,
+        asset_id,
+        transaction_type: TransactionType::Sell,
+        trade_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        settlement_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 2, 5).unwrap()),
+        quantity: Decimal::from(5),
+        price_per_unit: Decimal::from(12),
+        total_cost: Decimal::from(60),
+        fees: Decimal::from(1),
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: None,
+        source: "TEST".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_transaction(conn, &sell_tx)?;
+
+    let income_event = IncomeEvent {
+        id: None,
+        asset_id,
+        event_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
+        ex_date: None,
+        event_type: interest::db::IncomeEventType::Dividend,
+        amount_per_quota: Decimal::ZERO,
+        total_amount: Decimal::from(10),
+        withholding_tax: Decimal::from(2),
+        is_quota_pre_2026: None,
+        source: "TEST".to_string(),
+        notes: None,
+        created_at: chrono::Utc::now(),
+    };
+    interest::db::insert_income_event(conn, &income_event)?;
+
+    Ok(asset_id)
+}
+
 /// SQL Query helpers - for detailed verification
 mod sql {
     use super::*;
@@ -503,6 +561,164 @@ mod sql {
             )),
         }
     }
+}
+
+#[test]
+fn test_portfolio_show_json_shape() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    seed_basic_flow_data(&conn, AssetType::Stock)?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("portfolio")
+        .arg("show")
+        .output()?;
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("invalid portfolio JSON");
+    let positions = value
+        .get("positions")
+        .and_then(|v| v.as_array())
+        .expect("positions missing or not array");
+    assert!(!positions.is_empty());
+
+    let first = positions[0].as_object().expect("position is not object");
+    for key in [
+        "ticker",
+        "asset_type",
+        "quantity",
+        "average_cost",
+        "total_cost",
+        "current_price",
+        "current_value",
+        "unrealized_pl",
+        "unrealized_pl_pct",
+    ] {
+        assert!(first.contains_key(key), "missing key: {}", key);
+    }
+
+    for key in ["total_cost", "total_value", "total_pl", "total_pl_pct"] {
+        assert!(
+            value.get(key).and_then(|v| v.as_str()).is_some(),
+            "missing or non-string total field: {}",
+            key
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_performance_show_json_shape() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    seed_basic_flow_data(&conn, AssetType::Stock)?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("performance")
+        .arg("show")
+        .arg("ALL")
+        .output()?;
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("invalid performance JSON");
+    for key in [
+        "start_date",
+        "end_date",
+        "start_value",
+        "end_value",
+        "total_return",
+        "total_return_pct",
+        "realized_gains",
+        "unrealized_gains",
+    ] {
+        assert!(value.get(key).is_some(), "missing key: {}", key);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_tax_report_json_shape() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    seed_basic_flow_data(&conn, AssetType::Stock)?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("tax")
+        .arg("report")
+        .arg("2024")
+        .output()?;
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("invalid tax JSON");
+    for key in [
+        "year",
+        "annual_total_sales",
+        "annual_total_profit",
+        "annual_total_loss",
+        "annual_total_tax",
+        "monthly_summaries",
+        "income_summary",
+    ] {
+        assert!(value.get(key).is_some(), "missing key: {}", key);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_cash_flow_show_json_shape() -> Result<()> {
+    let home = TempDir::new()?;
+    let db_path = get_db_path(&home);
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    init_database(Some(db_path.clone()))?;
+    let conn = open_db(Some(db_path))?;
+
+    seed_basic_flow_data(&conn, AssetType::Stock)?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("cash-flow")
+        .arg("show")
+        .arg("2024")
+        .output()?;
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("invalid cash-flow JSON");
+    for key in [
+        "from_date",
+        "to_date",
+        "total_in",
+        "total_out",
+        "net_flow",
+        "years",
+    ] {
+        assert!(value.get(key).is_some(), "missing key: {}", key);
+    }
+
+    let years = value
+        .get("years")
+        .and_then(|v| v.as_array())
+        .expect("years missing or not array");
+    assert!(!years.is_empty());
+
+    Ok(())
 }
 
 // =============================================================================
