@@ -219,12 +219,12 @@ pub async fn dispatch_portfolio_show(
 
 // Top-level dispatcher for portfolio sub-commands
 pub async fn dispatch_portfolio(
-    action: crate::commands::PortfolioAction,
+    action: &crate::cli::PortfolioCommands,
     json_output: bool,
 ) -> Result<()> {
     match action {
-        crate::commands::PortfolioAction::Show { filter, as_of_date } => {
-            dispatch_portfolio_show(filter.as_deref(), as_of_date.as_deref(), json_output).await
+        crate::cli::PortfolioCommands::Show { asset_type, at } => {
+            dispatch_portfolio_show(asset_type.as_deref(), at.as_deref(), json_output).await
         }
     }
 }

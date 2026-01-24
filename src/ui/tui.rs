@@ -4,9 +4,41 @@ use anyhow::Result;
 use colored::Colorize;
 use rustyline::error::ReadlineError;
 
-use crate::commands::parse_command;
 use crate::dispatcher::dispatch_command;
 use crate::ui::readline;
+
+/// Parse TUI-style command input into clap Commands
+fn parse_tui_command(input: &str) -> Result<crate::cli::Commands> {
+    // Strip optional leading slash
+    let input = input.strip_prefix('/').unwrap_or(input);
+
+    // Simple approach: build argv from input and use clap to parse it
+    // This works because clap already knows how to parse all the commands
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(anyhow::anyhow!("Empty command"));
+    }
+
+    // Build argv for clap (prepend program name)
+    let mut argv = vec!["interest"];
+    argv.extend_from_slice(&parts);
+
+    // Use clap to parse
+    use clap::Parser;
+    match crate::cli::Cli::try_parse_from(argv) {
+        Ok(cli) => {
+            if let Some(cmd) = cli.command {
+                Ok(cmd)
+            } else {
+                Err(anyhow::anyhow!("No command specified"))
+            }
+        }
+        Err(e) => {
+            // Convert clap error to anyhow
+            Err(anyhow::anyhow!("{}", e))
+        }
+    }
+}
 
 const COMMAND_PATTERNS: &[&[&str]] = &[
     // View & inspect
@@ -14,12 +46,17 @@ const COMMAND_PATTERNS: &[&[&str]] = &[
     &["performance", "show"],
     &["income", "show"],
     &["income", "detail"],
+    &["income", "summary"],
+    &["income", "add"],
     &["assets", "show"],
     &["inspect"],
     // Import & sync
     &["import"],
     &["import-irpf"],
+    &["prices", "update"],
     &["prices", "import-b3"],
+    &["prices", "import-b3-file"],
+    &["prices", "history"],
     &["assets", "sync-maisretorno"],
     // Resolve & reconcile
     &["inconsistencies", "list"],
@@ -32,10 +69,14 @@ const COMMAND_PATTERNS: &[&[&str]] = &[
     &["assets", "set-type"],
     &["assets", "set-name"],
     &["transactions", "add"],
+    &["transactions", "list"],
+    &["process-terms"],
     &["actions", "split"],
+    &["actions", "apply"],
     // Reports & tax
     &["tax", "report"],
     &["tax", "summary"],
+    &["tax", "calculate"],
     // Utilities & session
     &["prices", "clear-cache"],
     &["tickers", "status"],
@@ -69,14 +110,14 @@ pub async fn launch_tui() -> Result<()> {
                     break;
                 }
 
-                match parse_command(trimmed) {
+                match parse_tui_command(trimmed) {
                     Ok(cmd) => {
-                        if let Err(e) = dispatch_command(cmd, false).await {
+                        if let Err(e) = dispatch_command(&cmd, false).await {
                             eprintln!("{} {}", "Error:".red().bold(), e);
                         }
                     }
                     Err(e) => {
-                        eprintln!("{} {}", "Parse error:".yellow().bold(), e.message);
+                        eprintln!("{} {}", "Parse error:".yellow().bold(), e);
                     }
                 }
             }

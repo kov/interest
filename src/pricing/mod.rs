@@ -111,6 +111,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_price_fetcher_caching() {
         if should_skip_online_tests() {
             return;

@@ -417,53 +417,64 @@ let is_quota_pre_2026 = transaction.settlement_date
 
 ### Adding a New Command
 
-**New pattern** (TUI + CLI dual mode):
+**Current pattern** (Clap as single source of truth):
 
-1. Add variant to `Command` enum in `src/commands.rs`:
+**Clap is the single source of truth.** The TUI parser automatically uses clap to parse commands, so you only need to define commands once.
+
+1. Add command variant to `Commands` enum in `src/cli/mod.rs`:
 
 ```rust
-pub enum Command {
+#[derive(Subcommand)]
+pub enum Commands {
     // ... existing commands
-    MyNewCommand { arg1: String, arg2: bool },
+
+    /// My new command description
+    MyNewCommand {
+        /// First argument description
+        arg1: String,
+
+        /// Optional flag
+        #[arg(long)]
+        flag: bool,
+    },
 }
 ```
 
-2. Add parsing logic in `parse_command()`:
+2. Add handler function in appropriate dispatcher module (or create new one):
 
 ```rust
-"mynewcommand" => {
-    let arg1 = parts.next().ok_or(...)?.to_string();
-    let arg2 = parts.any(|p| p == "--flag");
-    Ok(Command::MyNewCommand { arg1, arg2 })
-}
-```
-
-3. Add handler in `src/dispatcher.rs`:
-
-```rust
-pub async fn dispatch_my_new_command(arg1: &str, arg2: bool, json_output: bool) -> Result<()> {
+// In src/dispatcher/my_module.rs
+pub async fn dispatch_my_new_command(arg1: &str, flag: bool, json_output: bool) -> Result<()> {
     // Business logic here
     // Format output based on json_output flag
 }
 ```
 
-4. Wire up in `dispatch_command()`:
+3. Wire up in `src/dispatcher.rs`:
 
 ```rust
-Command::MyNewCommand { arg1, arg2 } => {
-    dispatch_my_new_command(&arg1, arg2, json_output).await
+pub async fn dispatch_command(command: &crate::cli::Commands, json_output: bool) -> Result<()> {
+    match command {
+        // ... existing commands
+        Commands::MyNewCommand { arg1, flag } => {
+            my_module::dispatch_my_new_command(arg1, *flag, json_output).await
+        }
+    }
 }
 ```
 
-5. (Optional) Add to readline completion patterns in `src/ui/mod.rs`
+4. (Optional) Add to TUI completion patterns in `src/ui/tui.rs`:
 
-6. (Optional) Add legacy clap command in `src/cli/mod.rs` for backwards compatibility
+```rust
+const COMMAND_PATTERNS: &[&[&str]] = &[
+    // ... existing patterns
+    &["mynewcommand"],
+];
+```
 
-**Old pattern** (pure CLI, deprecated):
+**That's it!** The TUI automatically uses clap to parse commands via `parse_tui_command()`, so both CLI and TUI work with the same command definition.
 
-- Only add to `src/cli/mod.rs` via clap macros
-- Add handler in `main.rs`
-- Cannot be used from TUI
+**Note:** The TUI parser supports `/command` syntax in addition to standard `command` syntax.
 
 ### Adding a New Importer
 

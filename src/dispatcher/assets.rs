@@ -3,31 +3,34 @@ use colored::Colorize;
 use std::io::{stdin, stdout, Write};
 use tabled::{Table, Tabled};
 
-use crate::commands::AssetsAction;
 use crate::{db, reports, scraping};
 
-pub async fn dispatch_assets(action: AssetsAction, json_output: bool) -> Result<()> {
+pub async fn dispatch_assets(action: &crate::cli::AssetsCommands, json_output: bool) -> Result<()> {
     match action {
-        AssetsAction::List { asset_type } => list_assets(asset_type.as_deref(), json_output),
-        AssetsAction::Show { ticker } => show_asset(&ticker, json_output),
-        AssetsAction::Add {
+        crate::cli::AssetsCommands::List { asset_type } => {
+            list_assets(asset_type.as_deref(), json_output)
+        }
+        crate::cli::AssetsCommands::Show { ticker } => show_asset(ticker, json_output),
+        crate::cli::AssetsCommands::Add {
             ticker,
             asset_type,
             name,
-        } => add_asset(&ticker, asset_type.as_deref(), name.as_deref(), json_output),
-        AssetsAction::SetType { ticker, asset_type } => {
-            set_asset_type(&ticker, &asset_type, json_output)
+        } => add_asset(ticker, asset_type.as_deref(), name.as_deref(), json_output),
+        crate::cli::AssetsCommands::SetType { ticker, asset_type } => {
+            set_asset_type(ticker, asset_type, json_output)
         }
-        AssetsAction::SetName { ticker, name } => set_asset_name(&ticker, &name, json_output),
-        AssetsAction::Rename {
+        crate::cli::AssetsCommands::SetName { ticker, name } => {
+            set_asset_name(ticker, name, json_output)
+        }
+        crate::cli::AssetsCommands::Rename {
             old_ticker,
             new_ticker,
-        } => rename_asset(&old_ticker, &new_ticker, json_output),
-        AssetsAction::Remove { ticker } => remove_asset(&ticker, json_output),
-        AssetsAction::SyncMaisRetorno {
+        } => rename_asset(old_ticker, new_ticker, json_output),
+        crate::cli::AssetsCommands::Remove { ticker } => remove_asset(ticker, json_output),
+        crate::cli::AssetsCommands::SyncMaisRetorno {
             asset_type,
             dry_run,
-        } => sync_maisretorno(asset_type.as_deref(), dry_run, json_output).await,
+        } => sync_maisretorno(asset_type.as_deref(), *dry_run, json_output).await,
     }
 }
 

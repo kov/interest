@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::io::{stdin, stdout, Write};
 
-use crate::commands::TickersAction;
 use crate::db::{self, AssetType};
 
 const KNOWN_TYPES: &[&str] = &[
@@ -9,9 +8,13 @@ const KNOWN_TYPES: &[&str] = &[
     "OPTION", "UNKNOWN",
 ];
 
-pub async fn dispatch_tickers(action: TickersAction, json_output: bool) -> Result<()> {
+pub async fn dispatch_tickers(
+    action: &crate::cli::TickersCommands,
+    json_output: bool,
+) -> Result<()> {
     match action {
-        TickersAction::Refresh { force } => {
+        crate::cli::TickersCommands::Refresh { force } => {
+            let force = *force;
             let path = crate::tickers::refresh_b3_tickers(force)?;
             if json_output {
                 println!(
@@ -26,7 +29,7 @@ pub async fn dispatch_tickers(action: TickersAction, json_output: bool) -> Resul
             }
             Ok(())
         }
-        TickersAction::Status => {
+        crate::cli::TickersCommands::Status => {
             db::init_database(None)?;
             let conn = db::open_db(None)?;
             let cache_dir = crate::tickers::get_tickers_cache_dir()?;
@@ -61,7 +64,7 @@ pub async fn dispatch_tickers(action: TickersAction, json_output: bool) -> Resul
             println!("Unknown assets: {}", unknown_assets.len());
             Ok(())
         }
-        TickersAction::ListUnknown => {
+        crate::cli::TickersCommands::ListUnknown => {
             db::init_database(None)?;
             let conn = db::open_db(None)?;
             let unknown_assets = db::list_assets_by_type(&conn, AssetType::Unknown)?;
@@ -82,7 +85,7 @@ pub async fn dispatch_tickers(action: TickersAction, json_output: bool) -> Resul
             }
             Ok(())
         }
-        TickersAction::Resolve { ticker, asset_type } => {
+        crate::cli::TickersCommands::Resolve { ticker, asset_type } => {
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
@@ -91,11 +94,11 @@ pub async fn dispatch_tickers(action: TickersAction, json_output: bool) -> Resul
             }
 
             if let Some(ticker) = ticker {
-                let asset_type = asset_type.ok_or_else(|| {
+                let asset_type = asset_type.clone().ok_or_else(|| {
                     anyhow::anyhow!("tickers resolve requires --type when a ticker is provided")
                 })?;
                 let parsed = parse_asset_type(&asset_type)?;
-                db::update_asset_type(&conn, &ticker, &parsed)?;
+                db::update_asset_type(&conn, ticker, &parsed)?;
                 if json_output {
                     println!(
                         "{}",
