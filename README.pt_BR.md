@@ -1,5 +1,6 @@
-````markdown
 # Interest - Rastreador de Investimentos B3 (Brasil)
+
+[![CI](https://github.com/kov/interest/actions/workflows/ci.yml/badge.svg)](https://github.com/kov/interest/actions/workflows/ci.yml)
 
 Uma ferramenta de linha de comando para gerenciar investimentos na B3 (Bolsa de Valores do Brasil). O Interest cuida do seu fluxo completo de investimentos: importa transações a partir dos arquivos exportados pela B3, acompanha sua carteira em tempo real, calcula métricas de performance, gerencia eventos societários (splits, renomes, spin-offs) e gera relatórios fiscais compatíveis com as regras do IRPF (Imposto de Renda Pessoa Física).
 
@@ -797,4 +798,3 @@ MIT
 Desenvolvido por [Gustavo Noronha Silva](https://github.com/kov) com auxílio de:
 Claude Code (Anthropic)
 Codex (OpenAI)
-````
