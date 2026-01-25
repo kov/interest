@@ -456,7 +456,7 @@ Located in `#[cfg(test)] mod tests` within each module:
 
 ```bash
 # Run all unit tests
-cargo test --lib
+cargo test --bin interest
 
 # Run specific module tests
 cargo test tax::
@@ -481,11 +481,19 @@ cargo test --test tax_integration_tests
 cargo test --test integration_tests -- --nocapture
 ```
 
+### Live Network Tests
+
+Ignored by default (require network access and sometimes headless Chrome):
+
+```bash
+cargo test -- --ignored
+```
+
 ### Test Categories
 
 - `integration_tests.rs` - CLI commands, portfolio, corporate actions, filtering
 - `tax_integration_tests.rs` - Tax scenarios (exemptions, loss carryforward, categories)
-- `generate_test_files.rs` - Generate Excel fixtures (run with `--ignored`)
+- `generate_test_fixtures` - Generate Excel fixtures (helper binary)
 
 ### Performance
 
@@ -509,7 +517,7 @@ Test data is generated programmatically:
 
 ```bash
 # Generate all test XLS files
-cargo test --test generate_test_files -- --ignored --nocapture
+cargo run --bin generate_test_fixtures
 ```
 
 This creates fixtures in `tests/data/` with known scenarios for testing.
@@ -525,12 +533,12 @@ This creates fixtures in `tests/data/` with known scenarios for testing.
 - **11_bonus_auto_apply.xlsx** - Bonus shares (bonificação)
 - **12_desdobro_inference.xlsx** - Absolute adjustment inference
 
-See individual test descriptions in `generate_test_files.rs` for details.
+See individual test descriptions in `src/bin/generate_test_fixtures.rs` for details.
 
 ### Adding New Test Data
 
-1. Add entry to `generate_test_files.rs`
-2. Generate: `cargo test --test generate_test_files -- --ignored`
+1. Add entry to `src/bin/generate_test_fixtures.rs`
+2. Generate: `cargo run --bin generate_test_fixtures`
 3. Add tickers to `tests/fixtures/b3_cache/tickers.csv` if new
 4. Write integration test in `integration_tests.rs`
 5. Verify: `cargo test --test integration_tests test_my_new_feature`

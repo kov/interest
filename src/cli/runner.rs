@@ -65,6 +65,7 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
             crate::cli::IncomeCommands::Show { year } => Ok(Some(Command::Income {
                 action: cmd::IncomeAction::Show { year: *year },
             })),
+            crate::cli::IncomeCommands::Add { .. } => Ok(None),
             crate::cli::IncomeCommands::Detail { year, asset } => Ok(Some(Command::Income {
                 action: cmd::IncomeAction::Detail {
                     year: *year,
@@ -378,6 +379,9 @@ pub fn to_internal_command(c: &Commands) -> Result<Option<Command>> {
         Commands::ImportIrpf { .. } => Ok(None),
         Commands::Interactive => Ok(None),
         Commands::Prices { action } => match action {
+            crate::cli::PriceCommands::ImportB3 { .. } => Ok(None),
+            crate::cli::PriceCommands::ImportB3File { .. } => Ok(None),
+            crate::cli::PriceCommands::ClearCache { .. } => Ok(None),
             crate::cli::PriceCommands::History {
                 ticker: _,
                 from: _,

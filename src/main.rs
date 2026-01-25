@@ -108,6 +108,33 @@ async fn main() -> Result<()> {
 
                 Commands::Prices { action } => match action {
                     PriceCommands::Update => handle_price_update().await,
+                    PriceCommands::ImportB3 { year, no_cache } => {
+                        dispatcher::dispatch_command(
+                            commands::Command::Prices {
+                                action: commands::PricesAction::ImportB3 { year, no_cache },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
+                    PriceCommands::ImportB3File { path } => {
+                        dispatcher::dispatch_command(
+                            commands::Command::Prices {
+                                action: commands::PricesAction::ImportB3File { path },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
+                    PriceCommands::ClearCache { year } => {
+                        dispatcher::dispatch_command(
+                            commands::Command::Prices {
+                                action: commands::PricesAction::ClearCache { year },
+                            },
+                            cli.json,
+                        )
+                        .await
+                    }
                     PriceCommands::History { ticker, from, to } => {
                         handle_price_history(&ticker, &from, &to).await
                     }
@@ -121,6 +148,7 @@ async fn main() -> Result<()> {
                         price,
                         date,
                         fees,
+                        day_trade,
                         notes,
                     } => {
                         handle_transaction_add(
@@ -130,9 +158,13 @@ async fn main() -> Result<()> {
                             &price,
                             &date,
                             &fees,
+                            day_trade,
                             notes.as_deref(),
                         )
                         .await
+                    }
+                    TransactionCommands::List { ticker } => {
+                        handle_transactions_list(ticker.as_deref(), cli.json).await
                     }
                 },
 
@@ -140,13 +172,40 @@ async fn main() -> Result<()> {
                     handle_inspect(&file, full, column).await
                 }
 
-                Commands::Interactive => interest::ui::launch_tui().await,
+                Commands::Interactive => crate::ui::launch_tui().await,
 
                 Commands::ProcessTerms => handle_process_terms().await,
 
                 Commands::Tax { action } => match action {
                     TaxCommands::Calculate { month } => handle_tax_calculate(&month).await,
                     _ => Err(anyhow::anyhow!("Unimplemented tax subcommand")),
+                },
+
+                Commands::Income { action } => match action {
+                    cli::IncomeCommands::Add {
+                        ticker,
+                        event_type,
+                        total_amount,
+                        date,
+                        ex_date,
+                        withholding,
+                        amount_per_quota,
+                        notes,
+                    } => {
+                        handle_income_add(
+                            &ticker,
+                            &event_type,
+                            &total_amount,
+                            &date,
+                            ex_date.as_deref(),
+                            &withholding,
+                            &amount_per_quota,
+                            notes.as_deref(),
+                            cli.json,
+                        )
+                        .await
+                    }
+                    _ => Err(anyhow::anyhow!("Unimplemented income subcommand")),
                 },
 
                 Commands::Inconsistencies { action } => match action {
@@ -903,6 +962,7 @@ async fn handle_tax_calculate(month_str: &str) -> Result<()> {
 }
 
 /// Handle manual transaction add command
+#[allow(clippy::too_many_arguments)]
 async fn handle_transaction_add(
     ticker: &str,
     transaction_type: &str,
@@ -910,6 +970,7 @@ async fn handle_transaction_add(
     price_str: &str,
     date_str: &str,
     fees_str: &str,
+    day_trade: bool,
     notes: Option<&str>,
 ) -> Result<()> {
     use anyhow::Context;
@@ -975,7 +1036,7 @@ async fn handle_transaction_add(
         price_per_unit: price,
         total_cost,
         fees,
-        is_day_trade: false,
+        is_day_trade: day_trade,
         quota_issuance_date: None,
         notes: notes.map(|s| s.to_string()),
         source: "MANUAL".to_string(),
@@ -1003,6 +1064,183 @@ async fn handle_transaction_add(
     }
 
     println!();
+
+    Ok(())
+}
+
+async fn handle_transactions_list(ticker: Option<&str>, json_output: bool) -> Result<()> {
+    use serde::Serialize;
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    #[derive(Serialize)]
+    struct TransactionRow {
+        id: Option<i64>,
+        ticker: String,
+        transaction_type: String,
+        trade_date: String,
+        settlement_date: Option<String>,
+        quantity: String,
+        price_per_unit: String,
+        total_cost: String,
+        fees: String,
+        is_day_trade: bool,
+        notes: Option<String>,
+        source: String,
+    }
+
+    let mut rows = Vec::new();
+    if let Some(ticker) = ticker {
+        let asset = db::get_asset_by_ticker(&conn, ticker)?
+            .ok_or_else(|| anyhow::anyhow!("Ticker {} not found", ticker))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, transaction_type, trade_date, settlement_date, quantity, price_per_unit,
+                    total_cost, fees, is_day_trade, notes, source
+             FROM transactions
+             WHERE asset_id = ?1
+             ORDER BY trade_date ASC, id ASC",
+        )?;
+        let mut iter = stmt.query([asset.id.expect("asset id")])?;
+        while let Some(row) = iter.next()? {
+            rows.push(TransactionRow {
+                id: row.get(0)?,
+                ticker: asset.ticker.clone(),
+                transaction_type: row.get::<_, String>(1)?,
+                trade_date: row.get::<_, String>(2)?,
+                settlement_date: row.get::<_, Option<String>>(3)?,
+                quantity: db::get_decimal_value(row, 4)?.to_string(),
+                price_per_unit: db::get_decimal_value(row, 5)?.to_string(),
+                total_cost: db::get_decimal_value(row, 6)?.to_string(),
+                fees: db::get_decimal_value(row, 7)?.to_string(),
+                is_day_trade: row.get(8)?,
+                notes: row.get(9)?,
+                source: row.get(10)?,
+            });
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, a.ticker, t.transaction_type, t.trade_date, t.settlement_date,
+                    t.quantity, t.price_per_unit, t.total_cost, t.fees, t.is_day_trade,
+                    t.notes, t.source
+             FROM transactions t
+             JOIN assets a ON t.asset_id = a.id
+             ORDER BY t.trade_date ASC, t.id ASC",
+        )?;
+        let mut iter = stmt.query([])?;
+        while let Some(row) = iter.next()? {
+            rows.push(TransactionRow {
+                id: row.get(0)?,
+                ticker: row.get::<_, String>(1)?,
+                transaction_type: row.get::<_, String>(2)?,
+                trade_date: row.get::<_, String>(3)?,
+                settlement_date: row.get::<_, Option<String>>(4)?,
+                quantity: db::get_decimal_value(row, 5)?.to_string(),
+                price_per_unit: db::get_decimal_value(row, 6)?.to_string(),
+                total_cost: db::get_decimal_value(row, 7)?.to_string(),
+                fees: db::get_decimal_value(row, 8)?.to_string(),
+                is_day_trade: row.get(9)?,
+                notes: row.get(10)?,
+                source: row.get(11)?,
+            });
+        }
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        let mut out = String::new();
+        for row in rows {
+            out.push_str(&format!(
+                "{} {} {} {} @ {} (fees {})\n",
+                row.trade_date,
+                row.ticker,
+                row.transaction_type,
+                row.quantity,
+                row.price_per_unit,
+                row.fees
+            ));
+        }
+        if out.is_empty() {
+            println!("No transactions found");
+        } else {
+            print!("{}", out);
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_income_add(
+    ticker: &str,
+    event_type: &str,
+    total_amount_str: &str,
+    date_str: &str,
+    ex_date_str: Option<&str>,
+    withholding_str: &str,
+    amount_per_quota_str: &str,
+    notes: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    use anyhow::Context;
+    use chrono::NaiveDate;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    let total_amount = Decimal::from_str(total_amount_str)
+        .context("Invalid total amount. Must be a decimal number")?;
+    let withholding = Decimal::from_str(withholding_str)
+        .context("Invalid withholding amount. Must be a decimal number")?;
+    let amount_per_quota = Decimal::from_str(amount_per_quota_str)
+        .context("Invalid amount per quota. Must be a decimal number")?;
+    let event_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .context("Invalid date format. Use YYYY-MM-DD")?;
+    let ex_date = match ex_date_str {
+        Some(value) => Some(
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .context("Invalid ex-date format. Use YYYY-MM-DD")?,
+        ),
+        None => None,
+    };
+
+    let event_type = db::IncomeEventType::from_str(event_type)
+        .map_err(|_| anyhow::anyhow!("Invalid event type: {}", event_type))?;
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+    let asset_type = db::AssetType::Unknown;
+    let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
+
+    let event = db::IncomeEvent {
+        id: None,
+        asset_id,
+        event_date,
+        ex_date,
+        event_type,
+        amount_per_quota,
+        total_amount,
+        withholding_tax: withholding,
+        is_quota_pre_2026: None,
+        source: "MANUAL".to_string(),
+        notes: notes.map(|s| s.to_string()),
+        created_at: chrono::Utc::now(),
+    };
+
+    let event_id = db::insert_income_event(&conn, &event)?;
+
+    if json_output {
+        let payload = serde_json::json!({
+            "id": event_id,
+            "ticker": ticker,
+            "event_date": event_date.to_string(),
+            "total_amount": total_amount.to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Income event added: {} {}", ticker, event_date);
+    }
 
     Ok(())
 }

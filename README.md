@@ -1,5 +1,7 @@
 # Interest - Brazilian B3 Investment Tracker
 
+[![CI](https://github.com/kov/interest/actions/workflows/ci.yml/badge.svg)](https://github.com/kov/interest/actions/workflows/ci.yml)
+
 A command-line tool for tracking investments on the Brazilian B3 stock exchange. Interest handles your complete investment workflow: import transactions from B3 exports, track your portfolio in real-time, calculate performance metrics, manage corporate actions (splits, renames, spin-offs), and generate accurate tax reports following Brazilian IRPF rules.
 
 **Key Features:**

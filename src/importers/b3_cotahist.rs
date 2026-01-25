@@ -52,8 +52,10 @@ pub enum DownloadStage {
 
 /// Get the platform-specific cache directory for COTAHIST files
 pub fn get_cotahist_cache_dir() -> Result<PathBuf> {
-    let cache_dir =
-        dir_spec::cache_home().ok_or_else(|| anyhow!("Could not determine cache directory"))?;
+    let cache_dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(dir_spec::cache_home)
+        .ok_or_else(|| anyhow!("Could not determine cache directory"))?;
 
     Ok(cache_dir.join("interest").join("cotahist"))
 }
@@ -202,9 +204,24 @@ pub fn download_cotahist_year(
 ) -> Result<PathBuf> {
     let cache_dir = get_cotahist_cache_dir()?;
     let zip_path = cache_dir.join(format!("COTAHIST_A{}.ZIP", year));
+    let offline = std::env::var("INTEREST_OFFLINE")
+        .map(|value| value == "1")
+        .unwrap_or(false);
 
     // Check cache first
     if !force_redownload && zip_path.exists() {
+        if offline {
+            if let Some(callback) = progress_callback {
+                callback(&DownloadProgress {
+                    stage: DownloadStage::Complete,
+                    year,
+                    records_processed: 0,
+                    total_records: None,
+                });
+            }
+            return Ok(zip_path);
+        }
+
         // Check if we should do a conditional GET to see if file was updated
         let should_check = should_check_for_updates(year).unwrap_or(true);
 
@@ -327,6 +344,12 @@ pub fn download_cotahist_year(
     }
 
     // No cache or force_redownload - do full download
+    if offline {
+        return Err(anyhow!(
+            "COTAHIST cache missing for year {} while offline mode is enabled",
+            year
+        ));
+    }
     // Create cache directory if needed
     std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
 
@@ -744,6 +767,23 @@ pub fn import_cotahist_from_file<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
+    use tempfile::TempDir;
+
+    fn with_temp_cache_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let old = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", temp_dir.path());
+        std::env::remove_var("INTEREST_OFFLINE");
+        let result = f(temp_dir.path());
+        match old {
+            Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+        result
+    }
 
     #[test]
     fn test_parse_cotahist_line_valid() {
@@ -793,5 +833,15 @@ mod tests {
         let cache_dir = get_cotahist_cache_dir().unwrap();
         assert!(cache_dir.to_str().unwrap().contains("interest"));
         assert!(cache_dir.to_str().unwrap().contains("cotahist"));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_download_cotahist_online() {
+        with_temp_cache_dir(|_| {
+            let year = chrono::Local::now().year() - 1;
+            let zip_path = download_cotahist_year(year, true, None).unwrap();
+            assert!(zip_path.exists());
+        });
     }
 }

@@ -161,6 +161,31 @@ pub enum PriceCommands {
     /// Update all asset prices
     Update,
 
+    /// Import B3 COTAHIST for a specific year
+    #[command(name = "import-b3")]
+    ImportB3 {
+        /// Year (e.g., 2024)
+        year: i32,
+
+        /// Ignore cache and force download
+        #[arg(long = "no-cache")]
+        no_cache: bool,
+    },
+
+    /// Import B3 COTAHIST from a local ZIP file
+    #[command(name = "import-b3-file")]
+    ImportB3File {
+        /// Path to COTAHIST ZIP file
+        path: String,
+    },
+
+    /// Clear COTAHIST cache (optionally a specific year)
+    #[command(name = "clear-cache")]
+    ClearCache {
+        /// Year to clear (omit to clear all)
+        year: Option<i32>,
+    },
+
     /// Fetch historical prices for a specific ticker
     History {
         /// Ticker symbol (e.g., PETR4)
@@ -230,6 +255,37 @@ pub enum IncomeCommands {
     Show {
         /// Year to filter (optional, defaults to current year)
         year: Option<i32>,
+    },
+
+    /// Manually add an income event
+    Add {
+        /// Ticker symbol
+        ticker: String,
+
+        /// Event type (DIVIDEND, JCP, AMORTIZATION)
+        event_type: String,
+
+        /// Total amount received
+        total_amount: String,
+
+        /// Event date (YYYY-MM-DD)
+        date: String,
+
+        /// Optional ex-date (YYYY-MM-DD)
+        #[arg(long)]
+        ex_date: Option<String>,
+
+        /// Optional withholding tax
+        #[arg(long, default_value = "0")]
+        withholding: String,
+
+        /// Optional amount per quota
+        #[arg(long, default_value = "0")]
+        amount_per_quota: String,
+
+        /// Optional notes
+        #[arg(short, long)]
+        notes: Option<String>,
     },
 
     /// Show detailed income events
@@ -581,8 +637,19 @@ pub enum TransactionCommands {
         #[arg(short, long, default_value = "0")]
         fees: String,
 
+        /// Mark as day trade
+        #[arg(long)]
+        day_trade: bool,
+
         /// Optional notes
         #[arg(short, long)]
         notes: Option<String>,
+    },
+
+    /// List transactions (optional filter by ticker)
+    List {
+        /// Ticker symbol to filter
+        #[arg(long)]
+        ticker: Option<String>,
     },
 }

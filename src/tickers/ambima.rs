@@ -343,4 +343,11 @@ mod tests {
         );
         assert_eq!(extract_ticker_from_text("1ª Série"), None);
     }
+
+    #[test]
+    #[ignore]
+    fn ambima_online_is_debenture() {
+        let result = super::is_debenture("LAMEA6").unwrap();
+        assert!(result);
+    }
 }

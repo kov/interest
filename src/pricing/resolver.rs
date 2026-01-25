@@ -696,6 +696,27 @@ mod tests {
     use chrono::{NaiveDate, Utc};
     use rust_decimal::Decimal;
     use tempfile::NamedTempFile;
+    use tempfile::TempDir;
+
+    fn with_temp_cache_dir<T>(f: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let old_cache = std::env::var_os("XDG_CACHE_HOME");
+        let old_offline = std::env::var_os("INTEREST_OFFLINE");
+        std::env::set_var("XDG_CACHE_HOME", temp_dir.path());
+        std::env::remove_var("INTEREST_OFFLINE");
+        let result = f();
+        match old_cache {
+            Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+        match old_offline {
+            Some(value) => std::env::set_var("INTEREST_OFFLINE", value),
+            None => std::env::remove_var("INTEREST_OFFLINE"),
+        }
+        result
+    }
 
     #[test]
     fn test_strategy_determination() {
@@ -891,56 +912,56 @@ mod tests {
         // This test catches the regression where missing prices for a few assets
         // (like ALZM11, CDII15) would trigger endless COTAHIST re-imports
         let (_tmp, conn) = setup_db()?;
+        with_temp_cache_dir(|| {
+            // Create multiple assets - some with prices, some without
+            let asset1 = insert_asset(&conn, "PETR4", AssetType::Stock)?;
+            let asset2 = insert_asset(&conn, "VALE3", AssetType::Stock)?;
+            let asset3 = insert_asset(&conn, "ALZM11", AssetType::Fii)?; // Missing prices
+            let assets = vec![asset1.clone(), asset2.clone(), asset3.clone()];
 
-        // Create multiple assets - some with prices, some without
-        let asset1 = insert_asset(&conn, "PETR4", AssetType::Stock)?;
-        let asset2 = insert_asset(&conn, "VALE3", AssetType::Stock)?;
-        let asset3 = insert_asset(&conn, "ALZM11", AssetType::Fii)?; // Missing prices
-        let assets = vec![asset1.clone(), asset2.clone(), asset3.clone()];
+            let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
+            let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+            let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
 
-        let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
-        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+            // Add prices for PETR4 and VALE3, but NOT for ALZM11
+            insert_price(&conn, asset1.id.unwrap(), start)?;
+            insert_price(&conn, asset2.id.unwrap(), start)?;
 
-        // Add prices for PETR4 and VALE3, but NOT for ALZM11
-        insert_price(&conn, asset1.id.unwrap(), start)?;
-        insert_price(&conn, asset2.id.unwrap(), start)?;
+            // First check: Without marking COTAHIST as imported, should need 2024
+            let needs = determine_price_resolution_needs(&conn, &assets, start, end, today)?;
+            assert!(
+                needs.needed_years.contains(&2024),
+                "Should need 2024 when COTAHIST not marked as imported"
+            );
 
-        // First check: Without marking COTAHIST as imported, should need 2024
-        let needs = determine_price_resolution_needs(&conn, &assets, start, end, today)?;
-        assert!(
-            needs.needed_years.contains(&2024),
-            "Should need 2024 when COTAHIST not marked as imported"
-        );
+            // Now simulate that COTAHIST 2024 was already imported
+            // Create a fake cache file and mark it as imported
+            let cache_dir = b3_cotahist::get_cotahist_cache_dir()?;
+            std::fs::create_dir_all(&cache_dir)?;
+            let cache_file = cache_dir.join("COTAHIST_A2024.ZIP");
+            std::fs::write(&cache_file, b"fake cotahist data")?;
 
-        // Now simulate that COTAHIST 2024 was already imported
-        // Create a fake cache file and mark it as imported
-        let cache_dir = b3_cotahist::get_cotahist_cache_dir()?;
-        std::fs::create_dir_all(&cache_dir)?;
-        let cache_file = cache_dir.join("COTAHIST_A2024.ZIP");
-        std::fs::write(&cache_file, b"fake cotahist data")?;
+            // Get the mtime and store it in metadata
+            let metadata = std::fs::metadata(&cache_file)?;
+            let mtime = metadata
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let key = "cotahist_imported_2024_mtime";
+            crate::db::set_metadata(&conn, key, &mtime.to_string())?;
 
-        // Get the mtime and store it in metadata
-        let metadata = std::fs::metadata(&cache_file)?;
-        let mtime = metadata
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let key = "cotahist_imported_2024_mtime";
-        crate::db::set_metadata(&conn, key, &mtime.to_string())?;
+            // Second check: With COTAHIST marked as imported, should NOT need 2024
+            // even though ALZM11 has no prices
+            let needs = determine_price_resolution_needs(&conn, &assets, start, end, today)?;
+            assert!(
+                needs.needed_years.is_empty(),
+                "Should NOT re-import 2024 when already marked as imported (even with missing assets)"
+            );
 
-        // Second check: With COTAHIST marked as imported, should NOT need 2024
-        // even though ALZM11 has no prices
-        let needs = determine_price_resolution_needs(&conn, &assets, start, end, today)?;
-        assert!(
-            needs.needed_years.is_empty(),
-            "Should NOT re-import 2024 when already marked as imported (even with missing assets)"
-        );
-
-        // Cleanup
-        std::fs::remove_file(&cache_file).ok();
-
-        Ok(())
+            // Cleanup
+            std::fs::remove_file(&cache_file).ok();
+            Ok(())
+        })
     }
 
     #[test]
@@ -948,156 +969,156 @@ mod tests {
         // Test that if the cache file is updated (mtime changes),
         // it triggers re-import even if it was previously imported
         let (_tmp, conn) = setup_db()?;
+        with_temp_cache_dir(|| {
+            // Create an asset with NO prices (so it would normally trigger import)
+            let asset = insert_asset(&conn, "ALZM11", AssetType::Fii)?;
+            let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
+            let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+            let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
 
-        // Create an asset with NO prices (so it would normally trigger import)
-        let asset = insert_asset(&conn, "ALZM11", AssetType::Fii)?;
-        let today = NaiveDate::from_ymd_opt(2025, 3, 10).unwrap();
-        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+            // NO prices for this asset
 
-        // NO prices for this asset
+            // Create cache file and mark as imported with old mtime
+            let cache_dir = b3_cotahist::get_cotahist_cache_dir()?;
+            std::fs::create_dir_all(&cache_dir)?;
+            let cache_file = cache_dir.join("COTAHIST_A2024.ZIP");
+            std::fs::write(&cache_file, b"old cotahist data")?;
 
-        // Create cache file and mark as imported with old mtime
-        let cache_dir = b3_cotahist::get_cotahist_cache_dir()?;
-        std::fs::create_dir_all(&cache_dir)?;
-        let cache_file = cache_dir.join("COTAHIST_A2024.ZIP");
-        std::fs::write(&cache_file, b"old cotahist data")?;
+            let old_mtime = std::fs::metadata(&cache_file)?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
 
-        let old_mtime = std::fs::metadata(&cache_file)?
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
+            let key = "cotahist_imported_2024_mtime";
+            crate::db::set_metadata(&conn, key, &old_mtime.to_string())?;
 
-        let key = "cotahist_imported_2024_mtime";
-        crate::db::set_metadata(&conn, key, &old_mtime.to_string())?;
+            // Verify it's not needed initially (even though asset has no prices)
+            // because COTAHIST was marked as imported
+            let needs = determine_price_resolution_needs(
+                &conn,
+                std::slice::from_ref(&asset),
+                start,
+                end,
+                today,
+            )?;
+            assert!(
+                needs.needed_years.is_empty(),
+                "Should not need reimport initially (file marked as imported)"
+            );
 
-        // Verify it's not needed initially (even though asset has no prices)
-        // because COTAHIST was marked as imported
-        let needs = determine_price_resolution_needs(
-            &conn,
-            std::slice::from_ref(&asset),
-            start,
-            end,
-            today,
-        )?;
-        assert!(
-            needs.needed_years.is_empty(),
-            "Should not need reimport initially (file marked as imported)"
-        );
+            // Simulate file being updated (e.g., conditional GET downloaded new content)
+            // Sleep to ensure filesystem mtime granularity detects the change
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::fs::write(&cache_file, b"new cotahist data with updates")?;
 
-        // Simulate file being updated (e.g., conditional GET downloaded new content)
-        // Sleep to ensure filesystem mtime granularity detects the change
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        std::fs::write(&cache_file, b"new cotahist data with updates")?;
+            // File now has different mtime than stored → should trigger re-import
+            let new_mtime = std::fs::metadata(&cache_file)?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
 
-        // File now has different mtime than stored → should trigger re-import
-        let new_mtime = std::fs::metadata(&cache_file)?
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
+            assert_ne!(
+                old_mtime, new_mtime,
+                "File mtime should have changed after rewrite"
+            );
 
-        assert_ne!(
-            old_mtime, new_mtime,
-            "File mtime should have changed after rewrite"
-        );
+            // Now it should need 2024 because file mtime doesn't match stored mtime
+            let needs = determine_price_resolution_needs(&conn, &[asset], start, end, today)?;
+            assert!(
+                needs.needed_years.contains(&2024),
+                "Should trigger re-import when cache file mtime changed (stored: {}, actual: {})",
+                old_mtime,
+                new_mtime
+            );
 
-        // Now it should need 2024 because file mtime doesn't match stored mtime
-        let needs = determine_price_resolution_needs(&conn, &[asset], start, end, today)?;
-        assert!(
-            needs.needed_years.contains(&2024),
-            "Should trigger re-import when cache file mtime changed (stored: {}, actual: {})",
-            old_mtime,
-            new_mtime
-        );
-
-        // Cleanup
-        std::fs::remove_file(&cache_file).ok();
-
-        Ok(())
+            // Cleanup
+            std::fs::remove_file(&cache_file).ok();
+            Ok(())
+        })
     }
 
     #[test]
     fn test_tesouro_not_reimported_when_already_processed() -> Result<()> {
         // Test that Tesouro CSV is not re-parsed/imported when already processed
         let (_tmp, conn) = setup_db()?;
+        with_temp_cache_dir(|| {
+            // Create a government bond asset
+            let asset = insert_asset(&conn, "TESOURO_PREFIXADO_2027", AssetType::GovBond)?;
+            let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
-        // Create a government bond asset
-        let asset = insert_asset(&conn, "TESOURO_PREFIXADO_2027", AssetType::GovBond)?;
-        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+            // Add a price for this asset
+            insert_price(&conn, asset.id.unwrap(), start)?;
 
-        // Add a price for this asset
-        insert_price(&conn, asset.id.unwrap(), start)?;
+            // Create fake Tesouro CSV cache file and mark as imported
+            let cache_dir = tesouro::get_tesouro_cache_dir()?;
+            std::fs::create_dir_all(&cache_dir)?;
+            let csv_path = cache_dir.join("precotaxatesourodireto.csv");
+            std::fs::write(&csv_path, b"fake,tesouro,csv,data")?;
 
-        // Create fake Tesouro CSV cache file and mark as imported
-        let cache_dir = tesouro::get_tesouro_cache_dir()?;
-        std::fs::create_dir_all(&cache_dir)?;
-        let csv_path = cache_dir.join("precotaxatesourodireto.csv");
-        std::fs::write(&csv_path, b"fake,tesouro,csv,data")?;
+            // Get the mtime and store it in metadata
+            let metadata = std::fs::metadata(&csv_path)?;
+            let mtime = metadata
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let key = "tesouro_csv_imported_mtime";
+            crate::db::set_metadata(&conn, key, &mtime.to_string())?;
 
-        // Get the mtime and store it in metadata
-        let metadata = std::fs::metadata(&csv_path)?;
-        let mtime = metadata
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let key = "tesouro_csv_imported_mtime";
-        crate::db::set_metadata(&conn, key, &mtime.to_string())?;
+            // Verify it's marked as imported
+            let imported = tesouro::has_tesouro_been_imported_with_conn(Some(&conn))?;
+            assert!(imported, "Should be marked as imported");
 
-        // Verify it's marked as imported
-        let imported = tesouro::has_tesouro_been_imported_with_conn(Some(&conn))?;
-        assert!(imported, "Should be marked as imported");
-
-        // Cleanup
-        std::fs::remove_file(&csv_path).ok();
-
-        Ok(())
+            // Cleanup
+            std::fs::remove_file(&csv_path).ok();
+            Ok(())
+        })
     }
 
     #[test]
     fn test_tesouro_reimported_when_csv_updated() -> Result<()> {
         // Test that Tesouro CSV triggers re-import when file is updated (mtime changes)
         let (_tmp, conn) = setup_db()?;
+        with_temp_cache_dir(|| {
+            // Create fake Tesouro CSV cache file
+            let cache_dir = tesouro::get_tesouro_cache_dir()?;
+            std::fs::create_dir_all(&cache_dir)?;
+            let csv_path = cache_dir.join("precotaxatesourodireto.csv");
+            std::fs::write(&csv_path, b"old,tesouro,csv,data")?;
 
-        // Create fake Tesouro CSV cache file
-        let cache_dir = tesouro::get_tesouro_cache_dir()?;
-        std::fs::create_dir_all(&cache_dir)?;
-        let csv_path = cache_dir.join("precotaxatesourodireto.csv");
-        std::fs::write(&csv_path, b"old,tesouro,csv,data")?;
+            let old_mtime = std::fs::metadata(&csv_path)?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
 
-        let old_mtime = std::fs::metadata(&csv_path)?
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
+            let key = "tesouro_csv_imported_mtime";
+            crate::db::set_metadata(&conn, key, &old_mtime.to_string())?;
 
-        let key = "tesouro_csv_imported_mtime";
-        crate::db::set_metadata(&conn, key, &old_mtime.to_string())?;
+            // Verify it's marked as imported initially
+            let imported = tesouro::has_tesouro_been_imported_with_conn(Some(&conn))?;
+            assert!(imported, "Should be marked as imported initially");
 
-        // Verify it's marked as imported initially
-        let imported = tesouro::has_tesouro_been_imported_with_conn(Some(&conn))?;
-        assert!(imported, "Should be marked as imported initially");
+            // Simulate CSV being updated (e.g., refresh_tesouro_csv downloaded new data)
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::fs::write(&csv_path, b"new,tesouro,csv,data,with,updates")?;
 
-        // Simulate CSV being updated (e.g., refresh_tesouro_csv downloaded new data)
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        std::fs::write(&csv_path, b"new,tesouro,csv,data,with,updates")?;
+            let new_mtime = std::fs::metadata(&csv_path)?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
 
-        let new_mtime = std::fs::metadata(&csv_path)?
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
+            assert_ne!(old_mtime, new_mtime, "CSV mtime should have changed");
 
-        assert_ne!(old_mtime, new_mtime, "CSV mtime should have changed");
+            // Now it should NOT be marked as imported (mtime mismatch)
+            let imported = tesouro::has_tesouro_been_imported_with_conn(Some(&conn))?;
+            assert!(
+                !imported,
+                "Should trigger re-import when CSV mtime changed (stored: {}, actual: {})",
+                old_mtime, new_mtime
+            );
 
-        // Now it should NOT be marked as imported (mtime mismatch)
-        let imported = tesouro::has_tesouro_been_imported_with_conn(Some(&conn))?;
-        assert!(
-            !imported,
-            "Should trigger re-import when CSV mtime changed (stored: {}, actual: {})",
-            old_mtime, new_mtime
-        );
-
-        // Cleanup
-        std::fs::remove_file(&csv_path).ok();
-
-        Ok(())
+            // Cleanup
+            std::fs::remove_file(&csv_path).ok();
+            Ok(())
+        })
     }
 }
