@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["Interest Contributors"]
 description = "Brazilian B3 stock exchange investment tracker with tax calculations"
 license = "MIT"
+default-run = "interest"
 
 [[bin]]
 name = "interest"
