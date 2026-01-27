@@ -1,10 +1,8 @@
 //! Command parsing and routing layer
 //!
-//! Provides a simple, custom command parser that works with both CLI arguments
-//! and interactive readline input. Replaces clap for command dispatching.
-//!
-//! This allows the same command logic to be used by both the traditional CLI
-//! and the interactive TUI.
+//! Provides a simple, custom command parser that works with interactive readline
+//! input. Clap remains the source of truth for CLI command definitions; this
+//! module keeps compatibility for the current TUI.
 
 /// Parsed command from user input
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +24,22 @@ pub enum Command {
     Actions { action: ActionsAction },
     /// Price management: `prices import-b3 <year> [--nocache]` or `prices clear-cache [year]`
     Prices { action: PricesAction },
+    /// Manual transaction operations
+    Transactions { action: TransactionAction },
+    /// IRPF PDF import
+    ImportIrpf {
+        path: String,
+        year: i32,
+        dry_run: bool,
+    },
+    /// Term contract processing
+    ProcessTerms,
+    /// Inspect a file structure (Excel diagnostics)
+    Inspect {
+        path: String,
+        full: bool,
+        column: Option<usize>,
+    },
     /// Inconsistencies management
     Inconsistencies { action: InconsistenciesAction },
     /// Ticker metadata management
@@ -74,6 +88,8 @@ pub enum TaxAction {
     Report { year: i32, export_csv: bool },
     /// Show tax summary: `tax summary <year>`
     Summary { year: i32 },
+    /// Calculate monthly taxes: `tax calculate <MM/YYYY>`
+    Calculate { month: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +104,17 @@ pub enum IncomeAction {
     },
     /// Show income summary: `income summary [year]`
     Summary { year: Option<i32> },
+    /// Add an income event
+    Add {
+        ticker: String,
+        event_type: String,
+        total_amount: String,
+        date: String,
+        ex_date: Option<String>,
+        withholding: String,
+        amount_per_quota: String,
+        notes: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +267,32 @@ pub enum PricesAction {
     ImportB3File { path: String },
     /// Clear B3 cache: `prices clear-cache [year]`
     ClearCache { year: Option<i32> },
+    /// Update current prices from Yahoo
+    Update,
+    /// Fetch historical prices for a ticker
+    History {
+        ticker: String,
+        from: String,
+        to: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TransactionAction {
+    Add {
+        ticker: String,
+        transaction_type: String,
+        quantity: String,
+        price: String,
+        date: String,
+        fees: String,
+        day_trade: bool,
+        notes: Option<String>,
+    },
+    List {
+        ticker: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +495,30 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 },
             })
         }
+        "import-irpf" => {
+            let path = parts.next().ok_or_else(|| CommandParseError {
+                message: "import-irpf requires a file path and year. Usage: import-irpf <path> <year> [--dry-run]".to_string(),
+            })?;
+            let year = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message:
+                        "import-irpf requires a year. Usage: import-irpf <path> <year> [--dry-run]"
+                            .to_string(),
+                })?
+                .parse::<i32>()
+                .map_err(|_| CommandParseError {
+                    message: "Year must be a valid number (e.g., 2018)".to_string(),
+                })?;
+
+            let dry_run = parts.any(|p| p == "--dry-run");
+
+            Ok(Command::ImportIrpf {
+                path,
+                year,
+                dry_run,
+            })
+        }
         "portfolio" => {
             let action = parts
                 .next()
@@ -541,36 +618,53 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 .next()
                 .ok_or_else(|| CommandParseError {
                     message:
-                        "tax requires action (report, summary). Usage: tax <report|summary> <year>"
+                        "tax requires action (report, summary, calculate). Usage: tax <report|summary> <year> or tax calculate <MM/YYYY>"
                             .to_string(),
                 })?
                 .to_lowercase();
 
-            let year = parts
-                .next()
-                .ok_or_else(|| CommandParseError {
-                    message: format!(
-                        "tax {} requires a year. Usage: tax {} <year> [--export]",
-                        action, action
-                    ),
-                })?
-                .parse::<i32>()
-                .map_err(|_| CommandParseError {
-                    message: "Year must be a valid number (e.g., 2024)".to_string(),
-                })?;
-
-            // Remaining args for optional flags
-            let export_csv = parts.any(|p| p.eq_ignore_ascii_case("--export"));
-
             match action.as_str() {
-                "report" => Ok(Command::Tax {
-                    action: TaxAction::Report { year, export_csv },
-                }),
-                "summary" => Ok(Command::Tax {
-                    action: TaxAction::Summary { year },
-                }),
+                "calculate" => {
+                    let month = parts.next().ok_or_else(|| CommandParseError {
+                        message: "tax calculate requires a month. Usage: tax calculate <MM/YYYY>"
+                            .to_string(),
+                    })?;
+                    Ok(Command::Tax {
+                        action: TaxAction::Calculate { month },
+                    })
+                }
+                "report" | "summary" => {
+                    let year = parts
+                        .next()
+                        .ok_or_else(|| CommandParseError {
+                            message: format!(
+                                "tax {} requires a year. Usage: tax {} <year> [--export]",
+                                action, action
+                            ),
+                        })?
+                        .parse::<i32>()
+                        .map_err(|_| CommandParseError {
+                            message: "Year must be a valid number (e.g., 2024)".to_string(),
+                        })?;
+
+                    // Remaining args for optional flags
+                    let export_csv = parts.any(|p| p.eq_ignore_ascii_case("--export"));
+
+                    if action == "report" {
+                        Ok(Command::Tax {
+                            action: TaxAction::Report { year, export_csv },
+                        })
+                    } else {
+                        Ok(Command::Tax {
+                            action: TaxAction::Summary { year },
+                        })
+                    }
+                }
                 _ => Err(CommandParseError {
-                    message: format!("Unknown tax action: {}. Use: report or summary", action),
+                    message: format!(
+                        "Unknown tax action: {}. Use: report, summary, or calculate",
+                        action
+                    ),
                 }),
             }
         }
@@ -589,6 +683,70 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                     let year = parts.next().and_then(|y| y.parse::<i32>().ok());
                     Ok(Command::Income {
                         action: IncomeAction::Show { year },
+                    })
+                }
+                "add" => {
+                    let ticker = parts.next().ok_or_else(|| CommandParseError {
+                        message: "income add requires ticker, event type, total amount, and date. Usage: income add <ticker> <event_type> <total_amount> <date> [--ex-date <date>] [--withholding <amount>] [--amount-per-quota <amount>] [--notes <text>]".to_string(),
+                    })?;
+                    let event_type = parts.next().ok_or_else(|| CommandParseError {
+                        message: "income add requires event type, total amount, and date. Usage: income add <ticker> <event_type> <total_amount> <date> [--ex-date <date>] [--withholding <amount>] [--amount-per-quota <amount>] [--notes <text>]".to_string(),
+                    })?;
+                    let total_amount = parts.next().ok_or_else(|| CommandParseError {
+                        message: "income add requires total amount and date. Usage: income add <ticker> <event_type> <total_amount> <date> [--ex-date <date>] [--withholding <amount>] [--amount-per-quota <amount>] [--notes <text>]".to_string(),
+                    })?;
+                    let date = parts.next().ok_or_else(|| CommandParseError {
+                        message: "income add requires date. Usage: income add <ticker> <event_type> <total_amount> <date> [--ex-date <date>] [--withholding <amount>] [--amount-per-quota <amount>] [--notes <text>]".to_string(),
+                    })?;
+
+                    let collected: Vec<_> = parts.collect();
+                    let mut ex_date: Option<String> = None;
+                    let mut withholding = "0".to_string();
+                    let mut amount_per_quota = "0".to_string();
+                    let mut notes: Option<String> = None;
+                    let mut i = 0;
+
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--ex-date" if i + 1 < collected.len() => {
+                                ex_date = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--withholding" if i + 1 < collected.len() => {
+                                withholding = collected[i + 1].to_string();
+                                i += 2;
+                            }
+                            "--amount-per-quota" if i + 1 < collected.len() => {
+                                amount_per_quota = collected[i + 1].to_string();
+                                i += 2;
+                            }
+                            "--notes" | "-n" if i + 1 < collected.len() => {
+                                notes = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--ex-date" | "--withholding" | "--amount-per-quota" | "--notes"
+                            | "-n" => {
+                                return Err(CommandParseError {
+                                    message: "income add requires a value after --ex-date, --withholding, --amount-per-quota, or --notes".to_string(),
+                                });
+                            }
+                            _ => {
+                                i += 1;
+                            }
+                        }
+                    }
+
+                    Ok(Command::Income {
+                        action: IncomeAction::Add {
+                            ticker,
+                            event_type,
+                            total_amount,
+                            date,
+                            ex_date,
+                            withholding,
+                            amount_per_quota,
+                            notes,
+                        },
                     })
                 }
                 "detail" => {
@@ -628,7 +786,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                 }
                 _ => Err(CommandParseError {
                     message: format!(
-                        "Unknown income action: {}. Use: show, detail, or summary",
+                        "Unknown income action: {}. Use: show, add, detail, or summary",
                         action
                     ),
                 }),
@@ -638,24 +796,27 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
             let action = parts
                 .next()
                 .ok_or_else(|| CommandParseError {
-                    message: "prices requires action. Usage: prices <import-b3|clear-cache> [args]"
+                    message: "prices requires action. Usage: prices <update|import-b3|import-b3-file|clear-cache|history> [args]"
                         .to_string(),
                 })?
                 .to_lowercase();
 
             match action.as_str() {
+                "update" => Ok(Command::Prices {
+                    action: PricesAction::Update,
+                }),
                 "import-b3" => {
                     let year = parts
                         .next()
                         .ok_or_else(|| CommandParseError {
-                            message: "import-b3 requires a year. Usage: prices import-b3 <year> [--nocache]".to_string(),
+                            message: "import-b3 requires a year. Usage: prices import-b3 <year> [--no-cache]".to_string(),
                         })?
                         .parse::<i32>()
                         .map_err(|_| CommandParseError {
                             message: "Year must be a valid number (e.g., 2023)".to_string(),
                         })?;
 
-                    let no_cache = parts.any(|p| p == "--nocache");
+                    let no_cache = parts.any(|p| p == "--nocache" || p == "--no-cache");
 
                     Ok(Command::Prices {
                         action: PricesAction::ImportB3 { year, no_cache },
@@ -680,14 +841,193 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         action: PricesAction::ClearCache { year },
                     })
                 }
+                "history" => {
+                    let ticker = parts.next().ok_or_else(|| CommandParseError {
+                        message: "history requires a ticker. Usage: prices history <ticker> --from <YYYY-MM-DD> --to <YYYY-MM-DD>".to_string(),
+                    })?;
+
+                    let collected: Vec<_> = parts.collect();
+                    let mut from: Option<String> = None;
+                    let mut to: Option<String> = None;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--from" | "-f" if i + 1 < collected.len() => {
+                                from = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--to" | "-t" if i + 1 < collected.len() => {
+                                to = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--from" | "-f" | "--to" | "-t" => {
+                                return Err(CommandParseError {
+                                    message: "history requires values for --from and --to".to_string(),
+                                });
+                            }
+                            _ => {
+                                i += 1;
+                            }
+                        }
+                    }
+
+                    let from = from.ok_or_else(|| CommandParseError {
+                        message: "history requires --from <YYYY-MM-DD>".to_string(),
+                    })?;
+                    let to = to.ok_or_else(|| CommandParseError {
+                        message: "history requires --to <YYYY-MM-DD>".to_string(),
+                    })?;
+
+                    Ok(Command::Prices {
+                        action: PricesAction::History { ticker, from, to },
+                    })
+                }
                 _ => Err(CommandParseError {
                     message: format!(
-                        "Unknown prices action: {}. Use: import-b3 or clear-cache",
+                        "Unknown prices action: {}. Use: update, import-b3, import-b3-file, clear-cache, or history",
                         action
                     ),
                 }),
             }
         }
+        "transactions" | "transaction" => {
+            let action = parts
+                .next()
+                .ok_or_else(|| CommandParseError {
+                    message: "transactions requires action (add, list). Usage: transactions add <ticker> <buy|sell> <qty> <price> <date> [--fees <value>] [--day-trade] [--notes <text>] or transactions list [--ticker <ticker>]".to_string(),
+                })?
+                .to_lowercase();
+
+            match action.as_str() {
+                "add" => {
+                    let ticker = parts.next().ok_or_else(|| CommandParseError {
+                        message:
+                            "transactions add requires ticker, type, quantity, price, and date."
+                                .to_string(),
+                    })?;
+                    let transaction_type = parts.next().ok_or_else(|| CommandParseError {
+                        message: "transactions add requires type, quantity, price, and date."
+                            .to_string(),
+                    })?;
+                    let quantity = parts.next().ok_or_else(|| CommandParseError {
+                        message: "transactions add requires quantity, price, and date.".to_string(),
+                    })?;
+                    let price = parts.next().ok_or_else(|| CommandParseError {
+                        message: "transactions add requires price and date.".to_string(),
+                    })?;
+                    let date = parts.next().ok_or_else(|| CommandParseError {
+                        message: "transactions add requires date.".to_string(),
+                    })?;
+
+                    let collected: Vec<_> = parts.collect();
+                    let mut fees = "0".to_string();
+                    let mut day_trade = false;
+                    let mut notes: Option<String> = None;
+                    let mut i = 0;
+
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--fees" | "-f" if i + 1 < collected.len() => {
+                                fees = collected[i + 1].to_string();
+                                i += 2;
+                            }
+                            "--day-trade" => {
+                                day_trade = true;
+                                i += 1;
+                            }
+                            "--notes" | "-n" if i + 1 < collected.len() => {
+                                notes = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            "--fees" | "-f" | "--notes" | "-n" => {
+                                return Err(CommandParseError {
+                                    message:
+                                        "transactions add requires a value after --fees or --notes"
+                                            .to_string(),
+                                });
+                            }
+                            _ => {
+                                i += 1;
+                            }
+                        }
+                    }
+
+                    Ok(Command::Transactions {
+                        action: TransactionAction::Add {
+                            ticker,
+                            transaction_type,
+                            quantity,
+                            price,
+                            date,
+                            fees,
+                            day_trade,
+                            notes,
+                        },
+                    })
+                }
+                "list" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut ticker: Option<String> = None;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        if (collected[i] == "--ticker" || collected[i] == "-t")
+                            && i + 1 < collected.len()
+                        {
+                            ticker = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    Ok(Command::Transactions {
+                        action: TransactionAction::List { ticker },
+                    })
+                }
+                _ => Err(CommandParseError {
+                    message: format!("Unknown transactions action: {}. Use: add or list", action),
+                }),
+            }
+        }
+        "inspect" => {
+            let path = parts.next().ok_or_else(|| CommandParseError {
+                message:
+                    "inspect requires a file path. Usage: inspect <path> [--full] [--column <n>]"
+                        .to_string(),
+            })?;
+
+            let collected: Vec<_> = parts.collect();
+            let mut full = false;
+            let mut column: Option<usize> = None;
+            let mut i = 0;
+            while i < collected.len() {
+                match collected[i].as_str() {
+                    "--full" | "-f" => {
+                        full = true;
+                        i += 1;
+                    }
+                    "--column" | "-c" if i + 1 < collected.len() => {
+                        column = Some(collected[i + 1].parse::<usize>().map_err(|_| {
+                            CommandParseError {
+                                message: "inspect --column requires a number".to_string(),
+                            }
+                        })?);
+                        i += 2;
+                    }
+                    "--column" | "-c" => {
+                        return Err(CommandParseError {
+                            message: "inspect --column requires a number".to_string(),
+                        });
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+
+            Ok(Command::Inspect { path, full, column })
+        }
+        "process-terms" => Ok(Command::ProcessTerms),
         "actions" | "action" => {
             let action_type = parts
                 .next()
@@ -1435,6 +1775,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_import_irpf() {
+        let cmd = parse_command("import-irpf irpf.pdf 2018 --dry-run").unwrap();
+        assert_eq!(
+            cmd,
+            Command::ImportIrpf {
+                path: "irpf.pdf".to_string(),
+                year: 2018,
+                dry_run: true,
+            }
+        );
+    }
+
+    #[test]
     fn test_parse_portfolio_show() {
         let cmd = parse_command("portfolio show").unwrap();
         assert_eq!(
@@ -1533,6 +1886,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prices_update() {
+        let cmd = parse_command("prices update").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Prices {
+                action: PricesAction::Update
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_prices_history() {
+        let cmd = parse_command("prices history PETR4 --from 2024-01-01 --to 2024-01-31").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Prices {
+                action: PricesAction::History {
+                    ticker: "PETR4".to_string(),
+                    from: "2024-01-01".to_string(),
+                    to: "2024-01-31".to_string(),
+                }
+            }
+        );
+    }
+
+    #[test]
     fn test_parse_tax_report() {
         let cmd = parse_command("tax report 2024").unwrap();
         assert_eq!(
@@ -1541,6 +1920,19 @@ mod tests {
                 action: TaxAction::Report {
                     year: 2024,
                     export_csv: false
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_tax_calculate() {
+        let cmd = parse_command("tax calculate 12/2025").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Tax {
+                action: TaxAction::Calculate {
+                    month: "12/2025".to_string()
                 }
             }
         );
@@ -1608,6 +2000,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_income_add() {
+        let cmd = parse_command("income add MXRF11 DIVIDEND 10.00 2025-01-10 --ex-date 2025-01-05 --withholding 0.50 --amount-per-quota 0.10 --notes test").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Income {
+                action: IncomeAction::Add {
+                    ticker: "MXRF11".to_string(),
+                    event_type: "DIVIDEND".to_string(),
+                    total_amount: "10.00".to_string(),
+                    date: "2025-01-10".to_string(),
+                    ex_date: Some("2025-01-05".to_string()),
+                    withholding: "0.50".to_string(),
+                    amount_per_quota: "0.10".to_string(),
+                    notes: Some("test".to_string()),
+                }
+            }
+        );
+    }
+
+    #[test]
     fn test_parse_income_detail_with_asset() {
         let cmd = parse_command("income detail --asset XPLG11").unwrap();
         assert_eq!(
@@ -1655,6 +2067,61 @@ mod tests {
                 action: IncomeAction::Summary { year: None }
             }
         );
+    }
+
+    #[test]
+    fn test_parse_transactions_add() {
+        let cmd = parse_command(
+            "transactions add PETR4 buy 10 5.00 2024-01-01 --fees 1.00 --day-trade --notes test",
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Transactions {
+                action: TransactionAction::Add {
+                    ticker: "PETR4".to_string(),
+                    transaction_type: "buy".to_string(),
+                    quantity: "10".to_string(),
+                    price: "5.00".to_string(),
+                    date: "2024-01-01".to_string(),
+                    fees: "1.00".to_string(),
+                    day_trade: true,
+                    notes: Some("test".to_string()),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transactions_list() {
+        let cmd = parse_command("transactions list --ticker PETR4").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Transactions {
+                action: TransactionAction::List {
+                    ticker: Some("PETR4".to_string())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_inspect() {
+        let cmd = parse_command("inspect file.xlsx --full --column 2").unwrap();
+        assert_eq!(
+            cmd,
+            Command::Inspect {
+                path: "file.xlsx".to_string(),
+                full: true,
+                column: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_process_terms() {
+        let cmd = parse_command("process-terms").unwrap();
+        assert_eq!(cmd, Command::ProcessTerms);
     }
 
     #[test]

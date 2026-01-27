@@ -5,53 +5,57 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use tabled::{Table, Tabled};
 
-use crate::commands::{ActionsAction, BonusAction, ExchangeAction, RenameAction, SplitAction};
 use crate::{db, reports};
 
-pub async fn dispatch_actions(action: ActionsAction, json_output: bool) -> Result<()> {
+pub async fn dispatch_actions(
+    action: &crate::cli::ActionCommands,
+    json_output: bool,
+) -> Result<()> {
     match action {
-        ActionsAction::Rename { action } => dispatch_rename(action, json_output),
-        ActionsAction::Split { action } => dispatch_split(action, json_output),
-        ActionsAction::Bonus { action } => dispatch_bonus(action, json_output),
-        ActionsAction::Spinoff { action } => {
+        crate::cli::ActionCommands::Rename { action } => dispatch_rename(action, json_output),
+        crate::cli::ActionCommands::Split { action } => dispatch_split(action, json_output),
+        crate::cli::ActionCommands::Bonus { action } => dispatch_bonus(action, json_output),
+        crate::cli::ActionCommands::Spinoff { action } => {
             dispatch_exchange(action, json_output, db::AssetExchangeType::Spinoff)
         }
-        ActionsAction::Merger { action } => {
+        crate::cli::ActionCommands::Merger { action } => {
             dispatch_exchange(action, json_output, db::AssetExchangeType::Merger)
         }
-        ActionsAction::Apply { ticker } => dispatch_apply(ticker.as_deref(), json_output).await,
+        crate::cli::ActionCommands::Apply { ticker } => {
+            dispatch_apply(ticker.as_deref(), json_output).await
+        }
     }
 }
 
-fn dispatch_rename(action: RenameAction, json_output: bool) -> Result<()> {
+fn dispatch_rename(action: &crate::cli::RenameCommands, json_output: bool) -> Result<()> {
     match action {
-        RenameAction::Add {
+        crate::cli::RenameCommands::Add {
             from,
             to,
             date,
             notes,
-        } => add_rename(&from, &to, &date, notes.as_deref(), json_output),
-        RenameAction::List { ticker } => list_renames(ticker.as_deref(), json_output),
-        RenameAction::Remove { id } => remove_rename(id, json_output),
+        } => add_rename(from, to, date, notes.as_deref(), json_output),
+        crate::cli::RenameCommands::List { ticker } => list_renames(ticker.as_deref(), json_output),
+        crate::cli::RenameCommands::Remove { id } => remove_rename(*id, json_output),
     }
 }
 
-fn dispatch_split(action: SplitAction, json_output: bool) -> Result<()> {
+fn dispatch_split(action: &crate::cli::SplitCommands, json_output: bool) -> Result<()> {
     match action {
-        SplitAction::Add {
+        crate::cli::SplitCommands::Add {
             ticker,
             quantity_adjustment,
             date,
             notes,
         } => add_split_or_bonus(
-            &ticker,
-            &quantity_adjustment,
-            &date,
+            ticker,
+            quantity_adjustment,
+            date,
             notes.as_deref(),
             json_output,
             db::CorporateActionType::Split,
         ),
-        SplitAction::List { ticker } => list_corporate_actions(
+        crate::cli::SplitCommands::List { ticker } => list_corporate_actions(
             ticker.as_deref(),
             json_output,
             &[
@@ -59,8 +63,8 @@ fn dispatch_split(action: SplitAction, json_output: bool) -> Result<()> {
                 db::CorporateActionType::ReverseSplit,
             ],
         ),
-        SplitAction::Remove { id } => remove_corporate_action(
-            id,
+        crate::cli::SplitCommands::Remove { id } => remove_corporate_action(
+            *id,
             json_output,
             &[
                 db::CorporateActionType::Split,
@@ -70,39 +74,39 @@ fn dispatch_split(action: SplitAction, json_output: bool) -> Result<()> {
     }
 }
 
-fn dispatch_bonus(action: BonusAction, json_output: bool) -> Result<()> {
+fn dispatch_bonus(action: &crate::cli::BonusCommands, json_output: bool) -> Result<()> {
     match action {
-        BonusAction::Add {
+        crate::cli::BonusCommands::Add {
             ticker,
             quantity_adjustment,
             date,
             notes,
         } => add_split_or_bonus(
-            &ticker,
-            &quantity_adjustment,
-            &date,
+            ticker,
+            quantity_adjustment,
+            date,
             notes.as_deref(),
             json_output,
             db::CorporateActionType::Bonus,
         ),
-        BonusAction::List { ticker } => list_corporate_actions(
+        crate::cli::BonusCommands::List { ticker } => list_corporate_actions(
             ticker.as_deref(),
             json_output,
             &[db::CorporateActionType::Bonus],
         ),
-        BonusAction::Remove { id } => {
-            remove_corporate_action(id, json_output, &[db::CorporateActionType::Bonus])
+        crate::cli::BonusCommands::Remove { id } => {
+            remove_corporate_action(*id, json_output, &[db::CorporateActionType::Bonus])
         }
     }
 }
 
 fn dispatch_exchange(
-    action: ExchangeAction,
+    action: &crate::cli::ExchangeCommands,
     json_output: bool,
     event_type: db::AssetExchangeType,
 ) -> Result<()> {
     match action {
-        ExchangeAction::Add {
+        crate::cli::ExchangeCommands::Add {
             from,
             to,
             date,
@@ -111,20 +115,22 @@ fn dispatch_exchange(
             cash,
             notes,
         } => add_exchange(
-            &from,
-            &to,
-            &date,
-            &quantity,
-            &allocated_cost,
+            from,
+            to,
+            date,
+            quantity,
+            allocated_cost,
             cash.as_deref(),
             notes.as_deref(),
             json_output,
             event_type,
         ),
-        ExchangeAction::List { ticker } => {
+        crate::cli::ExchangeCommands::List { ticker } => {
             list_exchanges(ticker.as_deref(), json_output, event_type)
         }
-        ExchangeAction::Remove { id } => remove_exchange(id, json_output, event_type),
+        crate::cli::ExchangeCommands::Remove { id } => {
+            remove_exchange(*id, json_output, event_type)
+        }
     }
 }
 

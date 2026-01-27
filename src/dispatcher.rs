@@ -1,114 +1,115 @@
-//! Command dispatcher that routes both clap Commands and custom Command enums
-//! to the appropriate handlers.
+//! Command dispatcher that routes clap Commands to the appropriate handlers.
 //!
-//! This module provides a unified interface for command routing, making it easy
-//! to switch between different command sources (CLI args vs interactive input).
+//! This module provides a unified interface for command routing, with clap
+//! as the single source of truth for command definitions.
 
 pub mod performance;
 use performance::dispatch_performance;
-
-use crate::commands::Command;
 mod actions;
 mod assets;
 mod cashflow;
 pub mod imports;
 pub mod imports_helpers;
 mod inconsistencies;
+mod inspect;
+mod irpf;
 mod portfolio;
 mod prices;
+mod terms;
 mod tickers;
+mod transactions;
 use crate::utils::format_currency;
 use crate::{db, tax};
 use anyhow::Result;
-use clap::CommandFactory;
 use colored::Colorize;
 use tracing::info;
 
 /// Route a parsed command to its handler
-pub async fn dispatch_command(command: Command, json_output: bool) -> Result<()> {
+pub async fn dispatch_command(command: &crate::cli::Commands, json_output: bool) -> Result<()> {
+    use crate::cli::Commands;
+
     match command {
-        Command::Import { action } => dispatch_import(action, json_output).await,
-        Command::Portfolio { action } => portfolio::dispatch_portfolio(action, json_output).await,
-        Command::Performance { action } => dispatch_performance(action, json_output).await,
-        Command::CashFlow { action } => cashflow::dispatch_cashflow(action, json_output).await,
-        Command::Tax { action } => dispatch_tax(action, json_output).await,
-        Command::Income { action } => dispatch_income(action, json_output).await,
-        Command::Actions { action } => actions::dispatch_actions(action, json_output).await,
-        Command::Prices { action } => prices::dispatch_prices(action, json_output).await,
-        Command::Inconsistencies { action } => {
+        Commands::Import {
+            file,
+            dry_run,
+            force_reimport,
+        } => imports::dispatch_import(file, *dry_run, *force_reimport, json_output).await,
+        Commands::ImportIrpf {
+            file,
+            year,
+            dry_run,
+        } => irpf::dispatch_irpf_import(file, *year, *dry_run).await,
+        Commands::Portfolio { action } => portfolio::dispatch_portfolio(action, json_output).await,
+        Commands::Performance { action } => dispatch_performance(action, json_output).await,
+        Commands::CashFlow { action } => cashflow::dispatch_cashflow(action, json_output).await,
+        Commands::Tax { action } => dispatch_tax(action, json_output).await,
+        Commands::Income { action } => dispatch_income(action, json_output).await,
+        Commands::Actions { action } => actions::dispatch_actions(action, json_output).await,
+        Commands::Prices { action } => prices::dispatch_prices(action, json_output).await,
+        Commands::Transactions { action } => {
+            transactions::dispatch_transactions(action, json_output).await
+        }
+        Commands::Inspect { file, full, column } => {
+            inspect::dispatch_inspect(file, *full, *column).await
+        }
+        Commands::ProcessTerms => terms::dispatch_process_terms().await,
+        Commands::Inconsistencies { action } => {
             inconsistencies::dispatch_inconsistencies(action, json_output).await
         }
-        Command::Tickers { action } => tickers::dispatch_tickers(action, json_output).await,
-        Command::Assets { action } => assets::dispatch_assets(action, json_output).await,
-        Command::Help => {
-            // Use the shared help renderer for consistent top-level help output
-            let opts = crate::cli::help::RenderOpts::default();
-            crate::cli::help::render_help(std::io::stdout(), &opts)?;
-            Ok(())
-        }
-        Command::HelpTarget(target) => {
-            // Delegate to clap to render subcommand-specific help (e.g., `tax`).
-            // First verify the subcommand exists so we can show a friendly
-            // message when it does not.
-            let cmd = crate::cli::Cli::command();
-            let found = cmd
-                .get_subcommands()
-                .any(|s| s.get_name() == target.as_str());
-
-            if !found {
-                println!(
-                    "Unknown command: '{}'. Type 'help' for available commands.",
-                    target
-                );
-                return Ok(());
-            }
-
-            // Build a small argv that requests help for the target subcommand
-            // and let clap produce the properly formatted help text.
-            let argv = vec!["interest", target.as_str(), "--help"];
-            match cmd.try_get_matches_from(argv) {
-                // If clap parsed it without triggering help display, nothing to show.
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    // clap returns an Err that prints help/version messages; display it.
-                    println!("{}", e);
-                    Ok(())
-                }
-            }
-        }
-        Command::Exit => {
-            std::process::exit(0);
+        Commands::Tickers { action } => tickers::dispatch_tickers(action, json_output).await,
+        Commands::Assets { action } => assets::dispatch_assets(action, json_output).await,
+        Commands::Interactive => {
+            // This should never be reached since main.rs handles Interactive separately
+            Err(anyhow::anyhow!(
+                "Interactive mode should be handled by main.rs"
+            ))
         }
     }
 }
 
-async fn dispatch_tax(action: crate::commands::TaxAction, json_output: bool) -> Result<()> {
+async fn dispatch_tax(action: &crate::cli::TaxCommands, json_output: bool) -> Result<()> {
     match action {
-        crate::commands::TaxAction::Report { year, export_csv } => {
-            dispatch_tax_report(year, export_csv, json_output).await
+        crate::cli::TaxCommands::Report { year, export } => {
+            dispatch_tax_report(*year, *export, json_output).await
         }
-        crate::commands::TaxAction::Summary { year } => {
-            dispatch_tax_summary(year, json_output).await
-        }
+        crate::cli::TaxCommands::Summary { year } => dispatch_tax_summary(*year, json_output).await,
+        crate::cli::TaxCommands::Calculate { month } => dispatch_tax_calculate(month).await,
     }
 }
 
-async fn dispatch_income(action: crate::commands::IncomeAction, json_output: bool) -> Result<()> {
+async fn dispatch_income(action: &crate::cli::IncomeCommands, json_output: bool) -> Result<()> {
     match action {
-        crate::commands::IncomeAction::Show { year } => {
-            dispatch_income_show(year, json_output).await
+        crate::cli::IncomeCommands::Show { year } => dispatch_income_show(*year, json_output).await,
+        crate::cli::IncomeCommands::Detail { year, asset } => {
+            dispatch_income_detail(*year, asset.as_deref(), json_output).await
         }
-        crate::commands::IncomeAction::Detail { year, asset } => {
-            dispatch_income_detail(year, asset.as_deref(), json_output).await
+        crate::cli::IncomeCommands::Summary { year } => {
+            dispatch_income_summary(*year, json_output).await
         }
-        crate::commands::IncomeAction::Summary { year } => {
-            dispatch_income_summary(year, json_output).await
+        crate::cli::IncomeCommands::Add {
+            ticker,
+            event_type,
+            total_amount,
+            date,
+            ex_date,
+            withholding,
+            amount_per_quota,
+            notes,
+        } => {
+            dispatch_income_add(
+                ticker,
+                event_type,
+                total_amount,
+                date,
+                ex_date.as_deref(),
+                withholding,
+                amount_per_quota,
+                notes.as_deref(),
+                json_output,
+            )
+            .await
         }
     }
-}
-
-async fn dispatch_import(action: crate::commands::ImportAction, json_output: bool) -> Result<()> {
-    imports::dispatch_import(action, json_output).await
 }
 
 async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
@@ -1360,6 +1361,246 @@ pub async fn dispatch_income_summary(year: Option<i32>, json_output: bool) -> Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_income_add(
+    ticker: &str,
+    event_type: &str,
+    total_amount_str: &str,
+    date_str: &str,
+    ex_date_str: Option<&str>,
+    withholding_str: &str,
+    amount_per_quota_str: &str,
+    notes: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    use anyhow::Context;
+    use chrono::NaiveDate;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    let total_amount = Decimal::from_str(total_amount_str)
+        .context("Invalid total amount. Must be a decimal number")?;
+    let withholding = Decimal::from_str(withholding_str)
+        .context("Invalid withholding amount. Must be a decimal number")?;
+    let amount_per_quota = Decimal::from_str(amount_per_quota_str)
+        .context("Invalid amount per quota. Must be a decimal number")?;
+    let event_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .context("Invalid date format. Use YYYY-MM-DD")?;
+    let ex_date = match ex_date_str {
+        Some(value) => Some(
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .context("Invalid ex-date format. Use YYYY-MM-DD")?,
+        ),
+        None => None,
+    };
+
+    let event_type = db::IncomeEventType::from_str(event_type)
+        .map_err(|_| anyhow::anyhow!("Invalid event type: {}", event_type))?;
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+    let asset_type = db::AssetType::Unknown;
+    let asset_id = db::upsert_asset(&conn, ticker, &asset_type, None)?;
+
+    let event = db::IncomeEvent {
+        id: None,
+        asset_id,
+        event_date,
+        ex_date,
+        event_type,
+        amount_per_quota,
+        total_amount,
+        withholding_tax: withholding,
+        is_quota_pre_2026: None,
+        source: "MANUAL".to_string(),
+        notes: notes.map(|s| s.to_string()),
+        created_at: chrono::Utc::now(),
+    };
+
+    let event_id = db::insert_income_event(&conn, &event)?;
+
+    if json_output {
+        let payload = serde_json::json!({
+            "id": event_id,
+            "ticker": ticker,
+            "event_date": event_date.to_string(),
+            "total_amount": total_amount.to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Income event added: {} {}", ticker, event_date);
+    }
+
+    Ok(())
+}
+
+async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
+    use anyhow::Context;
+    use colored::Colorize;
+
+    tracing::info!("Calculating swing trade tax for {}", month_str);
+
+    // Parse month string (MM/YYYY)
+    let parts: Vec<&str> = month_str.split('/').collect();
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!(
+            "Invalid month format. Use MM/YYYY (e.g., 01/2025)"
+        ));
+    }
+
+    let month: u32 = parts[0].parse().context("Invalid month number")?;
+    let year: i32 = parts[1].parse().context("Invalid year")?;
+
+    if !(1..=12).contains(&month) {
+        return Err(anyhow::anyhow!("Month must be between 01 and 12"));
+    }
+
+    // Initialize database
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Calculate monthly tax; carryforward map stays empty for one-off calculation
+    let mut carryforward = std::collections::HashMap::new();
+    let calculations = tax::calculate_monthly_tax(&conn, year, month, &mut carryforward)?;
+
+    if calculations.is_empty() {
+        println!(
+            "\n{} No sales found for {}/{}\n",
+            "ℹ".blue().bold(),
+            month,
+            year
+        );
+        return Ok(());
+    }
+
+    println!(
+        "\n{} Swing Trade Tax Calculation - {}/{}\n",
+        "💰".cyan().bold(),
+        month,
+        year
+    );
+
+    // Display results by tax category
+    for calc in &calculations {
+        println!(
+            "{} {}",
+            "Tax Category:".bold(),
+            calc.category.display_name()
+        );
+        println!(
+            "  Total Sales:      {}",
+            format_currency(calc.total_sales).cyan()
+        );
+        println!(
+            "  Total Cost Basis: {}",
+            format_currency(calc.total_cost_basis).cyan()
+        );
+        println!(
+            "  Gross Profit:     {}",
+            format_currency(calc.total_profit).green()
+        );
+        println!(
+            "  Gross Loss:       {}",
+            format_currency(calc.total_loss).red()
+        );
+
+        let net_str = if calc.net_profit >= rust_decimal::Decimal::ZERO {
+            format_currency(calc.net_profit).green()
+        } else {
+            format_currency(calc.net_profit).red()
+        };
+        println!("  Net P&L:          {}", net_str);
+
+        // Show loss offset if applied
+        if calc.loss_offset_applied > rust_decimal::Decimal::ZERO {
+            println!(
+                "  Loss Offset:      {} (from previous months)",
+                format_currency(calc.loss_offset_applied).cyan()
+            );
+            println!(
+                "  After Loss Offset: {}",
+                format_currency(calc.profit_after_loss_offset).green()
+            );
+        }
+
+        if calc.exemption_applied > rust_decimal::Decimal::ZERO {
+            println!(
+                "  Exemption:        {} (sales under R$20.000)",
+                format_currency(calc.exemption_applied).yellow().bold()
+            );
+        }
+
+        if calc.taxable_amount > rust_decimal::Decimal::ZERO {
+            println!(
+                "  Taxable Amount:   {}",
+                format_currency(calc.taxable_amount).yellow()
+            );
+            let tax_rate_pct = calc.tax_rate * rust_decimal::Decimal::from(100);
+            println!(
+                "  Tax Rate:         {}",
+                format!("{:.0}%", tax_rate_pct).yellow()
+            );
+            println!(
+                "  {} {}",
+                "Tax Due:".bold(),
+                format_currency(calc.tax_due).red().bold()
+            );
+        } else if calc.profit_after_loss_offset < rust_decimal::Decimal::ZERO {
+            println!(
+                "  {} Loss to carry forward",
+                format_currency(calc.net_profit.abs()).yellow().bold()
+            );
+        } else {
+            println!("  {} No tax due (exempt)", "Tax Due:".bold().green());
+        }
+
+        println!();
+    }
+
+    // Summary
+    let total_tax: rust_decimal::Decimal = calculations.iter().map(|c| c.tax_due).sum();
+
+    if total_tax > rust_decimal::Decimal::ZERO {
+        println!(
+            "{} Total Tax Due for {}/{}: {}\n",
+            "📋".cyan().bold(),
+            month,
+            year,
+            format_currency(total_tax).red().bold()
+        );
+
+        // Generate DARF payments
+        let darf_payments = tax::generate_darf_payments(calculations, year, month)?;
+
+        if !darf_payments.is_empty() {
+            println!("{} DARF Payments:\n", "💳".cyan().bold());
+
+            for payment in &darf_payments {
+                println!(
+                    "  {} Code {}: {}",
+                    "DARF".yellow().bold(),
+                    payment.darf_code,
+                    payment.description
+                );
+                println!("    Amount:   {}", format_currency(payment.tax_due).red());
+                println!(
+                    "    Due Date: {}",
+                    payment.due_date.format("%d/%m/%Y").to_string().yellow()
+                );
+                println!();
+            }
+
+            println!(
+                "{} Payment due by {}\n",
+                "⏰".yellow(),
+                darf_payments[0].due_date.format("%d/%m/%Y")
+            );
+        }
+    }
+
+    Ok(())
+}
+
 // Snapshot commands are intentionally internal-only; no public dispatcher.
 
 struct TaxProgressPrinter {
@@ -1439,35 +1680,5 @@ impl TaxProgressPrinter {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_dispatch_help_command() {
-        let result = dispatch_command(Command::Help, false).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_exit_command() {
-        // We can't really test exit, but we can check it would be called
-        // In reality, this would exit the process
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_import() {
-        let result = dispatch_command(
-            Command::Import {
-                action: crate::commands::ImportAction::File {
-                    path: "test.xlsx".to_string(),
-                    dry_run: false,
-                    force_reimport: false,
-                },
-            },
-            false,
-        )
-        .await;
-        assert!(result.is_err());
-    }
-}
+// Tests removed - dispatcher now works with clap Commands
+// Integration tests in tests/ directory provide coverage

@@ -6,22 +6,30 @@ use serde_json::{Map, Value};
 use std::io::{stdin, stdout, BufRead, Write};
 use std::str::FromStr;
 
-use crate::commands::InconsistenciesAction;
-
 pub async fn dispatch_inconsistencies(
-    action: InconsistenciesAction,
+    action: &crate::cli::InconsistenciesCommands,
     json_output: bool,
 ) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
     match action {
-        InconsistenciesAction::List {
+        crate::cli::InconsistenciesCommands::List {
+            open,
+            all,
             status,
             issue_type,
             asset,
         } => {
-            let status = match status.as_deref() {
+            // Convert open/all flags to status
+            let status = if *all {
+                None
+            } else if *open || status.is_none() {
+                Some("OPEN")
+            } else {
+                status.as_deref()
+            };
+            let status = match status {
                 Some("ALL") => None,
                 Some(value) => Some(parse_inconsistency_status(value)?),
                 None => Some(db::InconsistencyStatus::Open),
@@ -66,8 +74,8 @@ pub async fn dispatch_inconsistencies(
             }
             Ok(())
         }
-        InconsistenciesAction::Show { id } => {
-            let issue = db::get_inconsistency(&conn, id)?
+        crate::cli::InconsistenciesCommands::Show { id } => {
+            let issue = db::get_inconsistency(&conn, *id)?
                 .ok_or_else(|| anyhow::anyhow!("Inconsistency {} not found", id))?;
 
             if json_output {
@@ -75,7 +83,7 @@ pub async fn dispatch_inconsistencies(
                 return Ok(());
             }
 
-            println!("ID: {}", issue.id.unwrap_or(id));
+            println!("ID: {}", issue.id.unwrap_or(*id));
             println!("Type: {}", issue.issue_type.as_str());
             println!("Status: {}", issue.status.as_str());
             println!("Severity: {}", issue.severity.as_str());
@@ -116,11 +124,16 @@ pub async fn dispatch_inconsistencies(
             Ok(())
         }
         // The Resolve and Ignore variants rely on interactive helpers in the parent dispatcher module.
-        InconsistenciesAction::Resolve { id, set, json } => {
+        crate::cli::InconsistenciesCommands::Resolve {
+            id,
+            set,
+            json_payload,
+        } => {
+            let json = json_payload;
             // If no ID provided, iterate through all open inconsistencies
             let issues_to_resolve: Vec<crate::db::Inconsistency> = if let Some(id) = id {
-                let issue = crate::db::get_inconsistency(&conn, id)?
-                    .ok_or_else(|| anyhow::anyhow!("Inconsistency {} not found", id))?;
+                let issue = crate::db::get_inconsistency(&conn, *id)?
+                    .ok_or_else(|| anyhow::anyhow!("Inconsistency {} not found", *id))?;
                 vec![issue]
             } else {
                 // Get all open inconsistencies
@@ -197,7 +210,22 @@ pub async fn dispatch_inconsistencies(
                         }
                     }
                 } else {
-                    build_resolution_map(&set, json.as_deref())?
+                    // Parse Vec<String> with key=value format into Vec<(String, String)>
+                    let parsed_set: Result<Vec<(String, String)>> = set
+                        .iter()
+                        .map(|s| {
+                            let parts: Vec<&str> = s.splitn(2, '=').collect();
+                            if parts.len() == 2 {
+                                Ok((parts[0].to_string(), parts[1].to_string()))
+                            } else {
+                                Err(anyhow::anyhow!(
+                                    "Invalid --set format: '{}'. Use key=value",
+                                    s
+                                ))
+                            }
+                        })
+                        .collect();
+                    build_resolution_map(&parsed_set?, json.as_deref())?
                 };
 
                 apply_inconsistency_resolution(&conn, issue, &resolution)?;
@@ -219,8 +247,8 @@ pub async fn dispatch_inconsistencies(
 
             Ok(())
         }
-        InconsistenciesAction::Ignore { id, reason } => {
-            crate::db::ignore_inconsistency(&conn, id, reason.as_deref())?;
+        crate::cli::InconsistenciesCommands::Ignore { id, reason } => {
+            crate::db::ignore_inconsistency(&conn, *id, reason.as_deref())?;
             if json_output {
                 println!("{}", serde_json::json!({"ignored": id}));
             } else {

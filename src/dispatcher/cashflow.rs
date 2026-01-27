@@ -1,4 +1,3 @@
-use crate::commands::CashFlowAction;
 use crate::reports::cashflow::{self, TrendDirection};
 use crate::utils::format_currency;
 use crate::{db, reports};
@@ -10,10 +9,19 @@ use serde::Serialize;
 use std::collections::HashMap;
 use tabled::{settings::Style, Table, Tabled};
 
-pub async fn dispatch_cashflow(action: CashFlowAction, json_output: bool) -> Result<()> {
+pub async fn dispatch_cashflow(
+    action: &crate::cli::CashFlowCommands,
+    json_output: bool,
+) -> Result<()> {
     match action {
-        CashFlowAction::Show { period } => dispatch_cashflow_show(&period, json_output).await,
-        CashFlowAction::Stats { period } => dispatch_cashflow_stats(&period, json_output).await,
+        crate::cli::CashFlowCommands::Show { period } => {
+            let period_str = period.as_deref().unwrap_or("ALL");
+            dispatch_cashflow_show(period_str, json_output).await
+        }
+        crate::cli::CashFlowCommands::Stats { period } => {
+            let period_str = period.as_deref().unwrap_or("ALL");
+            dispatch_cashflow_stats(period_str, json_output).await
+        }
     }
 }
 

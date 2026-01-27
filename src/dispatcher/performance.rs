@@ -281,12 +281,12 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 }
 
 pub async fn dispatch_performance(
-    action: crate::commands::PerformanceAction,
+    action: &crate::cli::PerformanceCommands,
     json_output: bool,
 ) -> Result<()> {
     match action {
-        crate::commands::PerformanceAction::Show { period } => {
-            dispatch_performance_show(&period, json_output).await
+        crate::cli::PerformanceCommands::Show { period } => {
+            dispatch_performance_show(period, json_output).await
         }
     }
 }

@@ -2,7 +2,6 @@ use clap::{Parser, Subcommand};
 
 pub mod formatters;
 pub mod help;
-pub mod runner;
 
 #[derive(Parser)]
 #[command(name = "interest")]
