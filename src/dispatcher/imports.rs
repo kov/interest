@@ -1,4 +1,4 @@
-use crate::{db, reports};
+use crate::{db, formatters, reports};
 use anyhow::Result;
 use colored::Colorize;
 
@@ -32,7 +32,7 @@ pub async fn dispatch_import(
 
             if !json_output {
                 if let Some(table) =
-                    crate::dispatcher::imports_helpers::preview_cei_table(&raw_transactions)
+                    formatters::imports::format_cei_preview_table(&raw_transactions)
                 {
                     println!("{}", table);
                 }
@@ -109,7 +109,7 @@ pub async fn dispatch_import(
                 println!("{} Sample trades:", "💰".cyan().bold());
                 let cloned_trades: Vec<_> = trades.iter().map(|e| (*e).clone()).collect();
                 if let Some(table) =
-                    crate::dispatcher::imports_helpers::preview_movimentacao_trades(&cloned_trades)
+                    formatters::imports::format_movimentacao_preview_table(&cloned_trades)
                 {
                     println!("{}\n", table);
                 }
@@ -231,76 +231,8 @@ pub async fn dispatch_import(
                 reports::invalidate_snapshots_after(&conn, date)?;
             }
 
-            if json_output {
-                // Use the unified ImportStats returned by the importer
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "success": true,
-                        "data": stats
-                    }))?
-                );
-                return Ok(());
-            }
-
-            if !json_output {
-                println!("\n{} Import complete!", "✓".green().bold());
-                println!("  {} Trades:", "💰".cyan());
-                println!(
-                    "    Imported: {}",
-                    stats.imported_trades.to_string().green()
-                );
-                if stats.skipped_trades_old > 0 {
-                    println!(
-                        "    Skipped (before last import date): {}",
-                        stats.skipped_trades_old.to_string().yellow()
-                    );
-                }
-                if stats.skipped_trades > 0 {
-                    println!("    Skipped: {}", stats.skipped_trades.to_string().yellow());
-                }
-                println!("  {} Corporate actions:", "🏢".cyan());
-                println!(
-                    "    Imported: {}",
-                    stats.imported_actions.to_string().green()
-                );
-                if stats.skipped_actions_old > 0 {
-                    println!(
-                        "    Skipped (before last import date): {}",
-                        stats.skipped_actions_old.to_string().yellow()
-                    );
-                }
-                if stats.skipped_actions > 0 {
-                    println!(
-                        "    Skipped: {}",
-                        stats.skipped_actions.to_string().yellow()
-                    );
-                }
-                if stats.errors > 0 {
-                    println!(
-                        "  {} Errors: {}",
-                        "❌".red(),
-                        stats.errors.to_string().red()
-                    );
-                }
-                println!("  {} Income events:", "💵".cyan());
-                println!(
-                    "    Imported: {}",
-                    stats.imported_income.to_string().green()
-                );
-                if stats.skipped_income_old > 0 {
-                    println!(
-                        "    Skipped (before last import date): {}",
-                        stats.skipped_income_old.to_string().yellow()
-                    );
-                }
-                if stats.skipped_income > 0 {
-                    println!(
-                        "    Skipped (duplicates): {}",
-                        stats.skipped_income.to_string().yellow()
-                    );
-                }
-            }
+            let mode = formatters::OutputMode::from_json_flag(json_output);
+            println!("{}", formatters::imports::format_import_stats(&stats, mode));
 
             Ok(())
         }
@@ -315,9 +247,7 @@ pub async fn dispatch_import(
             }
 
             if !json_output {
-                if let Some(table) =
-                    crate::dispatcher::imports_helpers::preview_ofertas_table(&entries)
-                {
+                if let Some(table) = formatters::imports::format_ofertas_preview_table(&entries) {
                     println!("{}", table);
                 }
             }

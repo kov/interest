@@ -1,11 +1,9 @@
 //! Performance command dispatcher implementation
 
 use crate::ui::progress::{ProgressEvent, ProgressPrinter};
-use crate::utils::{format_currency, format_currency_aligned};
-use crate::{db, reports};
+use crate::{db, formatters, reports};
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
-use colored::Colorize;
 use tracing;
 
 /// Parse a period string (MTD, QTD, YTD, 1Y, ALL, YYYY, or from:to)
@@ -133,149 +131,9 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
 
     let report = reports::calculate_performance(&mut conn, period)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "start_date": report.start_date,
-            "end_date": report.end_date,
-            "start_value": report.start_value,
-            "end_value": report.end_value,
-            "total_return": report.total_return,
-            "total_return_pct": report.return_pct(),
-            "realized_gains": report.realized_gains,
-            "unrealized_gains": report.unrealized_gains,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("\n{} Performance Report", "📈".cyan().bold());
-        println!("  Period: {} → {}", report.start_date, report.end_date);
-        println!();
-        println!(
-            "  Start Value:      {}",
-            format_currency(report.start_value).cyan()
-        );
-        println!(
-            "  End Value:        {}",
-            format_currency(report.end_value).cyan()
-        );
-        println!();
-
-        let return_color = if report.total_return >= rust_decimal::Decimal::ZERO {
-            "green"
-        } else {
-            "red"
-        };
-
-        let return_str = format_currency(report.total_return);
-        let return_pct_str = format!("{:.2}%", report.return_pct());
-
-        // Show whether this includes cash flows or is pure return
-        let growth_label = if report.cash_flows.is_some() {
-            "Portfolio Growth:"
-        } else {
-            "Total Return:    "
-        };
-
-        match return_color {
-            "green" => {
-                println!(
-                    "  {} {} ({})",
-                    growth_label,
-                    return_str.green(),
-                    return_pct_str.green()
-                );
-            }
-            _ => {
-                println!(
-                    "  {} {} ({})",
-                    growth_label,
-                    return_str.red(),
-                    return_pct_str.red()
-                );
-            }
-        }
-
-        // Show TWR explicitly when cash flows present
-        if report.cash_flows.is_some() {
-            let twr_color = if report.time_weighted_return >= rust_decimal::Decimal::ZERO {
-                "green"
-            } else {
-                "red"
-            };
-            let twr_str = format!("{:.2}%", report.time_weighted_return);
-            match twr_color {
-                "green" => {
-                    println!("  Investment Return: {}", twr_str.green());
-                }
-                _ => {
-                    println!("  Investment Return: {}", twr_str.red());
-                }
-            }
-        }
-
-        println!(
-            "  Realized Gains:   {}",
-            format_currency(report.realized_gains).yellow()
-        );
-
-        // Normalize -0.00 to 0.00 for display (handle Decimal precision quirks)
-        let unrealized_display = if report.unrealized_gains.abs() < rust_decimal::Decimal::new(1, 2)
-        {
-            rust_decimal::Decimal::ZERO
-        } else {
-            report.unrealized_gains
-        };
-        println!(
-            "  Unrealized Gains: {}",
-            format_currency(unrealized_display).blue()
-        );
-
-        // Show cash flow summary if available
-        if let Some(ref cf) = report.cash_flows {
-            println!();
-            println!(
-                "  {} Cash Flows ({} transactions)",
-                "💰".cyan().bold(),
-                cf.flow_count
-            );
-            println!(
-                "    Contributions: {}",
-                format_currency(cf.total_contributions).green()
-            );
-            println!(
-                "    Withdrawals:   {}",
-                format_currency(cf.total_withdrawals).red()
-            );
-            println!("    Net Flow:      {}", format_currency(cf.net_flow).cyan());
-        }
-
-        // Show asset type breakdown
-        if !report.asset_breakdown.is_empty() {
-            println!();
-            println!("  {} By Asset Type", "📊".cyan().bold());
-
-            // Sort by start value (largest positions first)
-            let mut breakdown_vec: Vec<_> = report.asset_breakdown.iter().collect();
-            breakdown_vec.sort_by(|a, b| b.1.start_value.cmp(&a.1.start_value));
-
-            for (asset_type, perf) in breakdown_vec {
-                let return_display = if perf.return_pct >= rust_decimal::Decimal::ZERO {
-                    format!("{:>7.2}%", perf.return_pct).green()
-                } else {
-                    format!("{:>7.2}%", perf.return_pct).red()
-                };
-
-                println!(
-                    "    {:12} {} → {}  {}",
-                    format!("{:?}", asset_type),
-                    format_currency_aligned(perf.start_value, 16).dimmed(),
-                    format_currency_aligned(perf.end_value, 16).cyan(),
-                    return_display
-                );
-            }
-        }
-
-        println!();
-    }
+    // Print performance output (JSON or table)
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    formatters::performance::print(&report, mode);
 
     Ok(())
 }

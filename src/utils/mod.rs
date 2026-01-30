@@ -101,20 +101,6 @@ pub fn format_currency(value: Decimal) -> String {
     format_currency_with_width(value, 0, CurrencySymbol::Brl)
 }
 
-/// Format as Brazilian Real, right-aligned to specified width.
-///
-/// # Examples
-/// ```
-/// use interest::utils::format_currency_aligned;
-/// use rust_decimal_macros::dec;
-///
-/// let result = format_currency_aligned(dec!(100), 15);
-/// assert_eq!(result, "      R$ 100,00");
-/// ```
-pub fn format_currency_aligned(value: Decimal, width: usize) -> String {
-    format_currency_with_width(value, width, CurrencySymbol::Brl)
-}
-
 /// Format number only (no symbol): "1.234,56"
 ///
 /// # Examples
@@ -192,7 +178,7 @@ mod tests {
     #[test]
     fn test_format_with_width() {
         // "R$ 100,00" is 10 chars, padding to 15 adds 5 spaces
-        let result = format_currency_aligned(dec!(100), 15);
+        let result = format_currency_with_width(dec!(100), 15, CurrencySymbol::Brl);
         assert_eq!(result.len(), 15);
         assert_eq!(result, "      R$ 100,00");
 
@@ -205,7 +191,7 @@ mod tests {
     #[test]
     fn test_format_with_width_no_padding_needed() {
         // If result is already >= width, no padding added
-        let result = format_currency_aligned(dec!(1000000), 5);
+        let result = format_currency_with_width(dec!(1000000), 5, CurrencySymbol::Brl);
         assert_eq!(result, "R$ 1.000.000,00");
     }
 

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use assert_cmd::cargo;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -69,6 +69,48 @@ pub fn import_json(home: &TempDir, file_path: &str) -> Result<Value> {
     run_cmd_json(home, &["--json", "import", file_path])
 }
 
+pub fn import_stats_json(home: &TempDir, file_path: &str) -> Result<Value> {
+    let doc = import_json(home, file_path)?;
+    Ok(import_stats_from_doc(&doc))
+}
+
+pub fn import_stats_from_doc(doc: &Value) -> Value {
+    let mut map = serde_json::Map::new();
+    let trade = find_key_value_block(doc, "Trades");
+    let actions = find_key_value_block(doc, "Corporate actions");
+    let income = find_key_value_block(doc, "Income events");
+
+    insert_kv_number(&mut map, "imported_trades", trade, "Imported");
+    insert_kv_number(&mut map, "skipped_trades", trade, "Skipped");
+    insert_kv_number(
+        &mut map,
+        "skipped_trades_old",
+        trade,
+        "Skipped (before last import date)",
+    );
+
+    insert_kv_number(&mut map, "imported_actions", actions, "Imported");
+    insert_kv_number(&mut map, "skipped_actions", actions, "Skipped");
+    insert_kv_number(
+        &mut map,
+        "skipped_actions_old",
+        actions,
+        "Skipped (before last import date)",
+    );
+    insert_kv_number(&mut map, "auto_applied_actions", actions, "Auto-applied");
+
+    insert_kv_number(&mut map, "imported_income", income, "Imported");
+    insert_kv_number(&mut map, "skipped_income", income, "Skipped");
+    insert_kv_number(
+        &mut map,
+        "skipped_income_old",
+        income,
+        "Skipped (before last import date)",
+    );
+
+    Value::Object(map)
+}
+
 pub fn add_asset(home: &TempDir, ticker: &str, asset_type: &str) -> Result<()> {
     run_cmd(home, &["assets", "add", ticker, "--type", asset_type])?;
     Ok(())
@@ -118,11 +160,18 @@ pub fn list_transactions_json(home: &TempDir, ticker: &str) -> Result<Vec<Value>
         home,
         &["--json", "transactions", "list", "--ticker", ticker],
     )?;
-    Ok(value.as_array().cloned().unwrap_or_default())
+    let rows = extract_table_rows(&value, None, Some("trade_date"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| remap_transactions_row(&row))
+        .collect())
 }
 
 pub fn portfolio_json(home: &TempDir) -> Result<Value> {
-    run_cmd_json(home, &["--json", "portfolio", "show"])
+    let doc = run_cmd_json(home, &["--json", "portfolio", "show"])?;
+    let rows = extract_table_rows(&doc, None, Some("avg_cost"))?;
+    let positions: Vec<Value> = rows.into_iter().collect();
+    Ok(serde_json::json!({ "positions": positions }))
 }
 
 pub fn income_detail_json(home: &TempDir, year: &str, ticker: &str) -> Result<Vec<Value>> {
@@ -130,9 +179,248 @@ pub fn income_detail_json(home: &TempDir, year: &str, ticker: &str) -> Result<Ve
         home,
         &["--json", "income", "detail", year, "--asset", ticker],
     )?;
-    Ok(value.as_array().cloned().unwrap_or_default())
+    let rows = extract_table_rows(&value, Some("Income Detail"), None)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| remap_income_detail_row(&row))
+        .collect())
 }
 
 pub fn tax_report_json(home: &TempDir, year: &str) -> Result<Value> {
-    run_cmd_json(home, &["--json", "tax", "report", year])
+    let doc = run_cmd_json(home, &["--json", "tax", "report", year])?;
+    let monthly = extract_table_rows(&doc, Some("Monthly Summary"), None)?;
+    let annual = find_key_value_block(&doc, "Annual Totals");
+
+    let report = serde_json::json!({
+        "monthly_summaries": monthly,
+        "annual_total_sales": kv_value(annual, "Total Sales"),
+        "annual_total_profit": kv_value(annual, "Total Profit"),
+        "annual_total_loss": kv_value(annual, "Total Loss"),
+        "annual_total_tax": kv_value(annual, "Total Tax"),
+    });
+    Ok(report)
+}
+
+pub fn list_split_actions_json(home: &TempDir, ticker: Option<&str>) -> Result<Vec<Value>> {
+    let mut args = vec!["--json", "actions", "split", "list"];
+    if let Some(ticker) = ticker {
+        args.push(ticker);
+    }
+    let doc = run_cmd_json(home, &args)?;
+    extract_table_rows(&doc, None, Some("ex_date"))
+}
+
+pub fn extract_table_rows(
+    doc: &Value,
+    title: Option<&str>,
+    column_key: Option<&str>,
+) -> Result<Vec<Value>> {
+    let blocks = doc
+        .get("blocks")
+        .and_then(|b| b.as_array())
+        .context("blocks missing")?;
+    let mut tables = Vec::new();
+    collect_table_blocks(blocks, &mut tables);
+
+    let table = if let Some(title) = title {
+        tables.into_iter().find(|block| {
+            block
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(|t| t == title)
+                .unwrap_or(false)
+        })
+    } else if let Some(key) = column_key {
+        tables.into_iter().find(|block| {
+            block
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|cols| {
+                    cols.iter()
+                        .any(|col| col.get("key").and_then(|v| v.as_str()) == Some(key))
+                })
+                .unwrap_or(false)
+        })
+    } else {
+        tables.into_iter().next()
+    };
+
+    let table = table.context("table block not found")?;
+    let columns = table
+        .get("columns")
+        .and_then(|c| c.as_array())
+        .context("columns missing")?;
+    let keys: Vec<&str> = columns
+        .iter()
+        .filter_map(|col| col.get("key").and_then(|v| v.as_str()))
+        .collect();
+
+    let mut rows_out = Vec::new();
+    if let Some(rows) = table.get("rows").and_then(|r| r.as_array()) {
+        for row in rows {
+            let Some(cells) = row.get("cells").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            let mut map = serde_json::Map::new();
+            for (idx, key) in keys.iter().enumerate() {
+                let cell = cells.get(idx);
+                let value = cell
+                    .and_then(|c| c.get("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                map.insert((*key).to_string(), value);
+            }
+            rows_out.push(Value::Object(map));
+        }
+    }
+    Ok(rows_out)
+}
+
+fn collect_table_blocks<'a>(blocks: &'a [Value], tables: &mut Vec<&'a Value>) {
+    for block in blocks {
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("table") => tables.push(block),
+            Some("section") => {
+                if let Some(nested) = block.get("blocks").and_then(|b| b.as_array()) {
+                    collect_table_blocks(nested, tables);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn find_key_value_block<'a>(doc: &'a Value, title: &str) -> Option<&'a Value> {
+    let blocks = doc.get("blocks")?.as_array()?;
+    find_key_value_block_in_blocks(blocks, title)
+}
+
+fn find_key_value_block_in_blocks<'a>(blocks: &'a [Value], title: &str) -> Option<&'a Value> {
+    for block in blocks {
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("key_value") => {
+                if block
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == title)
+                    .unwrap_or(false)
+                {
+                    return Some(block);
+                }
+            }
+            Some("section") => {
+                if let Some(nested) = block.get("blocks").and_then(|b| b.as_array()) {
+                    if let Some(found) = find_key_value_block_in_blocks(nested, title) {
+                        return Some(found);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub fn kv_value(block: Option<&Value>, label: &str) -> Value {
+    if let Some(block) = block {
+        if let Some(rows) = block.get("rows").and_then(|r| r.as_array()) {
+            for row in rows {
+                if row.get("label").and_then(|l| l.as_str()) == Some(label) {
+                    return row
+                        .get("value")
+                        .and_then(|v| v.get("value"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                }
+            }
+        }
+    }
+    Value::Null
+}
+
+fn insert_kv_number(
+    map: &mut serde_json::Map<String, Value>,
+    key: &str,
+    block: Option<&Value>,
+    label: &str,
+) {
+    let value = kv_value(block, label);
+    let number = if let Some(s) = value.as_str() {
+        s.parse::<u64>().ok()
+    } else {
+        value.as_u64()
+    };
+    map.insert(key.to_string(), Value::Number(number.unwrap_or(0).into()));
+}
+
+fn remap_transactions_row(row: &Value) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "trade_date".to_string(),
+        row.get("trade_date").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "transaction_type".to_string(),
+        row.get("type").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "quantity".to_string(),
+        row.get("quantity").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "price_per_unit".to_string(),
+        row.get("price_per_unit").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "total_cost".to_string(),
+        row.get("total_cost").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "notes".to_string(),
+        row.get("notes").cloned().unwrap_or(Value::Null),
+    );
+    let day_trade = row
+        .get("day_trade")
+        .and_then(|v| v.as_str())
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+    map.insert("is_day_trade".to_string(), Value::Bool(day_trade));
+    Value::Object(map)
+}
+
+fn remap_income_detail_row(row: &Value) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "date".to_string(),
+        row.get("date").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "ticker".to_string(),
+        row.get("ticker").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "event_type".to_string(),
+        row.get("type").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "asset_type".to_string(),
+        row.get("asset_type").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "amount".to_string(),
+        row.get("amount").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "withholding_tax".to_string(),
+        row.get("tax").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "net_amount".to_string(),
+        row.get("net").cloned().unwrap_or(Value::Null),
+    );
+    map.insert(
+        "notes".to_string(),
+        row.get("notes").cloned().unwrap_or(Value::Null),
+    );
+    Value::Object(map)
 }

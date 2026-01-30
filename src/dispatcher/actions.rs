@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use colored::Colorize;
 use rust_decimal::Decimal;
 use std::str::FromStr;
-use tabled::{Table, Tabled};
 
-use crate::{db, reports};
+use crate::{db, formatters, reports};
 
 pub async fn dispatch_actions(
     action: &crate::cli::ActionCommands,
@@ -20,9 +18,6 @@ pub async fn dispatch_actions(
         }
         crate::cli::ActionCommands::Merger { action } => {
             dispatch_exchange(action, json_output, db::AssetExchangeType::Merger)
-        }
-        crate::cli::ActionCommands::Apply { ticker } => {
-            dispatch_apply(ticker.as_deref(), json_output).await
         }
     }
 }
@@ -165,26 +160,11 @@ fn add_rename(
     let rename_id = db::insert_asset_rename(&conn, &rename)?;
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "id": rename_id,
-            "from": from,
-            "to": to,
-            "effective_date": effective_date.to_string(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    println!("\n{} Asset rename added successfully!", "✓".green().bold());
-    println!("  Rename ID:      {}", rename_id);
-    println!("  From:           {}", from.cyan().bold());
-    println!("  To:             {}", to.cyan().bold());
-    println!("  Effective Date: {}", effective_date.format("%Y-%m-%d"));
-    if let Some(n) = notes {
-        println!("  Notes:          {}", n);
-    }
-    println!();
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::actions::format_rename_add(rename_id, from, to, effective_date, notes, mode)
+    );
 
     Ok(())
 }
@@ -193,52 +173,8 @@ fn list_renames(ticker: Option<&str>, json_output: bool) -> Result<()> {
     let conn = open_conn()?;
     let rows = db::list_asset_renames_with_assets(&conn, ticker)?;
 
-    if json_output {
-        let payload: Vec<_> = rows
-            .iter()
-            .map(|(rename, from, to)| {
-                serde_json::json!({
-                    "id": rename.id,
-                    "from": from.ticker,
-                    "to": to.ticker,
-                    "effective_date": rename.effective_date.to_string(),
-                    "notes": rename.notes,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    if rows.is_empty() {
-        println!("{} No renames found", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    #[derive(Tabled)]
-    struct RenameRow {
-        #[tabled(rename = "ID")]
-        id: String,
-        #[tabled(rename = "From")]
-        from: String,
-        #[tabled(rename = "To")]
-        to: String,
-        #[tabled(rename = "Date")]
-        date: String,
-    }
-
-    let table_rows: Vec<_> = rows
-        .into_iter()
-        .map(|(rename, from, to)| RenameRow {
-            id: rename.id.unwrap_or(0).to_string(),
-            from: from.ticker,
-            to: to.ticker,
-            date: rename.effective_date.format("%Y-%m-%d").to_string(),
-        })
-        .collect();
-
-    let table = Table::new(table_rows).to_string();
-    println!("{}", table);
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!("{}", formatters::actions::format_renames_list(&rows, mode));
 
     Ok(())
 }
@@ -254,13 +190,9 @@ fn remove_rename(id: i64, json_output: bool) -> Result<()> {
     }
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    if json_output {
-        let payload = serde_json::json!({ "deleted": id });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!("{}", formatters::actions::format_rename_remove(id, mode));
 
-    println!("{} Removed rename {}", "✓".green().bold(), id);
     Ok(())
 }
 
@@ -304,31 +236,29 @@ fn add_split_or_bonus(
     let action_id = db::insert_corporate_action(&conn, &action)?;
     reports::invalidate_snapshots_after(&conn, ex_date)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "id": action_id,
-            "ticker": ticker,
-            "type": final_type.as_str(),
-            "quantity_adjustment": quantity_adjustment.to_string(),
-            "ex_date": ex_date.to_string(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
+    // For bonus actions, automatically apply them (create synthetic transaction)
+    // Splits use query-time adjustments and don't need this
+    if final_type == db::CorporateActionType::Bonus {
+        let asset = db::get_all_assets(&conn)?
+            .into_iter()
+            .find(|a| a.id == Some(asset_id))
+            .context("Asset not found after insert")?;
+        crate::corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
     }
 
+    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
-        "\n{} Corporate action added successfully!",
-        "✓".green().bold()
+        "{}",
+        formatters::actions::format_corporate_action_add(
+            action_id,
+            ticker,
+            &final_type,
+            quantity_adjustment,
+            ex_date,
+            notes,
+            mode,
+        )
     );
-    println!("  Action ID:      {}", action_id);
-    println!("  Ticker:         {}", ticker.cyan().bold());
-    println!("  Type:           {}", final_type.as_str());
-    println!("  Adjustment:     {} shares", quantity_adjustment);
-    println!("  Ex-Date:        {}", ex_date.format("%Y-%m-%d"));
-    if let Some(n) = notes {
-        println!("  Notes:          {}", n);
-    }
-    println!();
 
     Ok(())
 }
@@ -345,59 +275,11 @@ fn list_corporate_actions(
         .filter(|(action, _)| types.contains(&action.action_type))
         .collect();
 
-    if json_output {
-        let payload: Vec<_> = filtered
-            .iter()
-            .map(|(action, asset)| {
-                serde_json::json!({
-                    "id": action.id,
-                    "ticker": asset.ticker,
-                    "type": action.action_type.as_str(),
-                    "quantity_adjustment": action.quantity_adjustment.to_string(),
-                    "ex_date": action.ex_date.to_string(),
-                    "source": action.source,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    if filtered.is_empty() {
-        println!("{} No corporate actions found", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    #[derive(Tabled)]
-    struct ActionRow {
-        #[tabled(rename = "ID")]
-        id: String,
-        #[tabled(rename = "Ticker")]
-        ticker: String,
-        #[tabled(rename = "Type")]
-        action_type: String,
-        #[tabled(rename = "Adj Qty")]
-        quantity_adjustment: String,
-        #[tabled(rename = "Ex-Date")]
-        ex_date: String,
-        #[tabled(rename = "Source")]
-        source: String,
-    }
-
-    let rows: Vec<_> = filtered
-        .into_iter()
-        .map(|(action, asset)| ActionRow {
-            id: action.id.unwrap_or(0).to_string(),
-            ticker: asset.ticker,
-            action_type: action.action_type.as_str().to_string(),
-            quantity_adjustment: action.quantity_adjustment.to_string(),
-            ex_date: action.ex_date.format("%Y-%m-%d").to_string(),
-            source: action.source,
-        })
-        .collect();
-
-    let table = Table::new(rows).to_string();
-    println!("{}", table);
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::actions::format_corporate_actions_list(&filtered, mode)
+    );
 
     Ok(())
 }
@@ -421,13 +303,12 @@ fn remove_corporate_action(
     }
     reports::invalidate_snapshots_after(&conn, action.ex_date)?;
 
-    if json_output {
-        let payload = serde_json::json!({ "deleted": id });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::actions::format_corporate_action_remove(id, mode)
+    );
 
-    println!("{} Removed corporate action {}", "✓".green().bold(), id);
     Ok(())
 }
 
@@ -473,40 +354,22 @@ fn add_exchange(
     let exchange_id = db::insert_asset_exchange(&conn, &exchange)?;
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "id": exchange_id,
-            "type": event_type.as_str(),
-            "from": from,
-            "to": to,
-            "effective_date": effective_date.to_string(),
-            "quantity": to_quantity.to_string(),
-            "allocated_cost": allocated_cost.to_string(),
-            "cash_amount": cash_amount.to_string(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    let label = if event_type == db::AssetExchangeType::Spinoff {
-        "Spin-off"
-    } else {
-        "Merger"
-    };
-    println!("\n{} {} added successfully!", "✓".green().bold(), label);
-    println!("  Exchange ID:    {}", exchange_id);
-    println!("  From:           {}", from.cyan().bold());
-    println!("  To:             {}", to.cyan().bold());
-    println!("  Effective Date: {}", effective_date.format("%Y-%m-%d"));
-    println!("  Quantity:       {}", to_quantity);
-    println!("  Allocated Cost: {}", allocated_cost);
-    if cash_amount > Decimal::ZERO {
-        println!("  Cash Amount:    {}", cash_amount);
-    }
-    if let Some(n) = notes {
-        println!("  Notes:          {}", n);
-    }
-    println!();
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::actions::format_exchange_add(
+            exchange_id,
+            &event_type,
+            from,
+            to,
+            effective_date,
+            to_quantity,
+            allocated_cost,
+            cash_amount,
+            notes,
+            mode,
+        )
+    );
 
     Ok(())
 }
@@ -523,64 +386,11 @@ fn list_exchanges(
         .filter(|(exchange, _, _)| exchange.event_type == event_type)
         .collect();
 
-    if json_output {
-        let payload: Vec<_> = filtered
-            .iter()
-            .map(|(exchange, from, to)| {
-                serde_json::json!({
-                    "id": exchange.id,
-                    "type": exchange.event_type.as_str(),
-                    "from": from.ticker,
-                    "to": to.ticker,
-                    "effective_date": exchange.effective_date.to_string(),
-                    "quantity": exchange.to_quantity.to_string(),
-                    "allocated_cost": exchange.allocated_cost.to_string(),
-                    "cash_amount": exchange.cash_amount.to_string(),
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    if filtered.is_empty() {
-        println!("{} No exchanges found", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    #[derive(Tabled)]
-    struct ExchangeRow {
-        #[tabled(rename = "ID")]
-        id: String,
-        #[tabled(rename = "From")]
-        from: String,
-        #[tabled(rename = "To")]
-        to: String,
-        #[tabled(rename = "Date")]
-        date: String,
-        #[tabled(rename = "Qty")]
-        quantity: String,
-        #[tabled(rename = "Alloc Cost")]
-        allocated_cost: String,
-        #[tabled(rename = "Cash")]
-        cash: String,
-    }
-
-    let rows: Vec<_> = filtered
-        .into_iter()
-        .map(|(exchange, from, to)| ExchangeRow {
-            id: exchange.id.unwrap_or(0).to_string(),
-            from: from.ticker,
-            to: to.ticker,
-            date: exchange.effective_date.format("%Y-%m-%d").to_string(),
-            quantity: exchange.to_quantity.to_string(),
-            allocated_cost: exchange.allocated_cost.to_string(),
-            cash: exchange.cash_amount.to_string(),
-        })
-        .collect();
-
-    let table = Table::new(rows).to_string();
-    println!("{}", table);
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::actions::format_exchanges_list(&filtered, mode)
+    );
 
     Ok(())
 }
@@ -599,81 +409,8 @@ fn remove_exchange(id: i64, json_output: bool, event_type: db::AssetExchangeType
     }
     reports::invalidate_snapshots_after(&conn, exchange.effective_date)?;
 
-    if json_output {
-        let payload = serde_json::json!({ "deleted": id });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    println!("{} Removed exchange {}", "✓".green().bold(), id);
-    Ok(())
-}
-
-async fn dispatch_apply(ticker: Option<&str>, json_output: bool) -> Result<()> {
-    use crate::corporate_actions;
-
-    let conn = open_conn()?;
-    let actions = if let Some(ticker) = ticker {
-        let assets = db::get_all_assets(&conn)?;
-        let asset = assets
-            .into_iter()
-            .find(|a| a.ticker.eq_ignore_ascii_case(ticker))
-            .context("Ticker not found in database")?;
-        corporate_actions::get_unapplied_actions(&conn, Some(asset.id.unwrap()))?
-    } else {
-        corporate_actions::get_unapplied_actions(&conn, None)?
-    };
-
-    if actions.is_empty() {
-        if json_output {
-            let payload = serde_json::json!({ "applied": [] });
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-            return Ok(());
-        }
-        println!("{} No unapplied corporate actions found", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    let mut applied = Vec::new();
-    for action in actions {
-        let asset = db::get_all_assets(&conn)?
-            .into_iter()
-            .find(|a| a.id == Some(action.asset_id))
-            .context("Asset not found")?;
-        let adjusted_count = corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
-        applied.push((action, asset, adjusted_count));
-    }
-
-    if json_output {
-        let payload: Vec<_> = applied
-            .iter()
-            .map(|(action, asset, adjusted)| {
-                serde_json::json!({
-                    "id": action.id,
-                    "ticker": asset.ticker,
-                    "type": action.action_type.as_str(),
-                    "adjusted_transactions": adjusted,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
-    println!(
-        "\n{} Applied {} corporate action(s)",
-        "✓".green().bold(),
-        applied.len()
-    );
-    for (action, asset, adjusted) in applied {
-        println!(
-            "  • {} {} ({} tx)",
-            asset.ticker,
-            action.action_type.as_str(),
-            adjusted
-        );
-    }
-    println!();
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!("{}", formatters::actions::format_exchange_remove(id, mode));
 
     Ok(())
 }

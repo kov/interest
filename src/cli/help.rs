@@ -74,12 +74,6 @@ pub fn render_help<W: Write>(mut out: W, _opts: &RenderOpts) -> io::Result<()> {
         "  {:24} - Resolve unknown tickers",
         "tickers list-unknown/resolve"
     )?;
-    writeln!(
-        out,
-        "  {:24} - Apply unapplied corporate actions",
-        "actions apply [ticker]"
-    )?;
-
     writeln!(out)?;
     writeln!(out, "{}", "Manage & maintain:".bold())?;
     writeln!(

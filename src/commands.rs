@@ -155,25 +155,11 @@ pub enum AssetsAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Variants constructed via parse_command() runtime string matching
 pub enum ActionsAction {
-    Rename {
-        action: RenameAction,
-    },
-    Split {
-        action: SplitAction,
-    },
-    Bonus {
-        action: BonusAction,
-    },
-    Spinoff {
-        action: ExchangeAction,
-    },
-    Merger {
-        action: ExchangeAction,
-    },
-    /// Apply corporate actions (bonus synthetic transactions)
-    Apply {
-        ticker: Option<String>,
-    },
+    Rename { action: RenameAction },
+    Split { action: SplitAction },
+    Bonus { action: BonusAction },
+    Spinoff { action: ExchangeAction },
+    Merger { action: ExchangeAction },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1036,13 +1022,6 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                         .to_string(),
                 })?
                 .to_lowercase();
-
-            if action_type == "apply" {
-                let ticker = parts.next().map(|t| t.to_string());
-                return Ok(Command::Actions {
-                    action: ActionsAction::Apply { ticker },
-                });
-            }
 
             let verb = parts
                 .next()

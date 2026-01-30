@@ -18,16 +18,11 @@ pub struct CashFlowReport {
 #[derive(Debug, Clone)]
 pub struct YearlyCashFlow {
     pub year: i32,
-    pub money_in: Decimal,
-    pub money_out: Decimal,
-    pub net_flow: Decimal,
     pub by_asset_type: HashMap<AssetType, AssetTypeCashFlow>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AssetTypeCashFlow {
-    #[allow(dead_code)] // Kept for future detailed breakdown reporting
-    pub asset_type: AssetType,
     pub money_in: Decimal,
     pub money_out_sells: Decimal,
     pub money_out_income: Decimal,
@@ -64,8 +59,6 @@ pub enum TrendDirection {
 #[derive(Debug, Clone)]
 pub struct YearlyChange {
     pub year: i32,
-    #[allow(dead_code)] // Kept for future detailed reporting
-    pub prev_year_net: Decimal,
     pub curr_year_net: Decimal,
     pub growth_rate_pct: Option<Decimal>,
 }
@@ -96,7 +89,6 @@ pub fn calculate_cash_flow_report(
         let bucket = asset_map
             .entry(entry.asset_type)
             .or_insert(AssetTypeCashFlow {
-                asset_type: entry.asset_type,
                 money_in: Decimal::ZERO,
                 money_out_sells: Decimal::ZERO,
                 money_out_income: Decimal::ZERO,
@@ -114,21 +106,9 @@ pub fn calculate_cash_flow_report(
 
     let mut years: Vec<YearlyCashFlow> = years_map
         .into_iter()
-        .map(|(year, by_asset_type)| {
-            let money_in = by_asset_type
-                .values()
-                .fold(Decimal::ZERO, |acc, a| acc + a.money_in);
-            let money_out = by_asset_type.values().fold(Decimal::ZERO, |acc, a| {
-                acc + a.money_out_sells + a.money_out_income
-            });
-            let net_flow = money_in - money_out;
-            YearlyCashFlow {
-                year,
-                money_in,
-                money_out,
-                net_flow,
-                by_asset_type,
-            }
+        .map(|(year, by_asset_type)| YearlyCashFlow {
+            year,
+            by_asset_type,
         })
         .collect();
 
@@ -223,7 +203,6 @@ pub fn calculate_cash_flow_stats(
     if let Some((first_year, first_net)) = yearly_pairs.first().copied() {
         yearly_changes.push(YearlyChange {
             year: first_year,
-            prev_year_net: Decimal::ZERO,
             curr_year_net: first_net,
             growth_rate_pct: None,
         });
@@ -242,7 +221,6 @@ pub fn calculate_cash_flow_stats(
         }
         yearly_changes.push(YearlyChange {
             year: curr_year,
-            prev_year_net: prev_net,
             curr_year_net: curr_net,
             growth_rate_pct: growth,
         });

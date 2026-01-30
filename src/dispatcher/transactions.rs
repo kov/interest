@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+use crate::formatters;
+
 pub async fn dispatch_transactions(
     action: &crate::cli::TransactionCommands,
     json_output: bool,
@@ -46,7 +48,6 @@ async fn dispatch_transaction_add(
 ) -> Result<()> {
     use anyhow::Context;
     use chrono::NaiveDate;
-    use colored::Colorize;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -118,54 +119,27 @@ async fn dispatch_transaction_add(
     let tx_id = crate::db::insert_transaction(&conn, &transaction)?;
 
     // Display confirmation
-    println!("\n{} Transaction added successfully!", "✓".green().bold());
-    println!("  Transaction ID: {}", tx_id);
-    println!("  Ticker:         {}", ticker.cyan().bold());
-    println!("  Type:           {}", tx_type.as_str().to_uppercase());
-    println!("  Date:           {}", trade_date.format("%Y-%m-%d"));
-    println!("  Quantity:       {}", quantity);
-    println!(
-        "  Price:          {}",
-        crate::utils::format_currency(price).cyan()
+    print!(
+        "{}",
+        formatters::transactions::format_transaction_add_table(
+            tx_id,
+            ticker,
+            tx_type.as_str(),
+            trade_date,
+            quantity,
+            price,
+            fees,
+            total_cost,
+            notes,
+        )
     );
-    println!(
-        "  Fees:           {}",
-        crate::utils::format_currency(fees).cyan()
-    );
-    println!(
-        "  Total:          {}",
-        crate::utils::format_currency(total_cost).cyan().bold()
-    );
-    if let Some(n) = notes {
-        println!("  Notes:          {}", n);
-    }
-
-    println!();
 
     Ok(())
 }
 
 async fn dispatch_transactions_list(ticker: Option<&str>, json_output: bool) -> Result<()> {
-    use serde::Serialize;
-
     crate::db::init_database(None)?;
     let conn = crate::db::open_db(None)?;
-
-    #[derive(Serialize)]
-    struct TransactionRow {
-        id: Option<i64>,
-        ticker: String,
-        transaction_type: String,
-        trade_date: String,
-        settlement_date: Option<String>,
-        quantity: String,
-        price_per_unit: String,
-        total_cost: String,
-        fees: String,
-        is_day_trade: bool,
-        notes: Option<String>,
-        source: String,
-    }
 
     let mut rows = Vec::new();
     if let Some(ticker) = ticker {
@@ -181,16 +155,16 @@ async fn dispatch_transactions_list(ticker: Option<&str>, json_output: bool) -> 
         )?;
         let mut iter = stmt.query([asset.id.expect("asset id")])?;
         while let Some(row) = iter.next()? {
-            rows.push(TransactionRow {
+            rows.push(formatters::transactions::TransactionRow {
                 id: row.get(0)?,
                 ticker: asset.ticker.clone(),
                 transaction_type: row.get::<_, String>(1)?,
-                trade_date: row.get::<_, String>(2)?,
-                settlement_date: row.get::<_, Option<String>>(3)?,
-                quantity: crate::db::get_decimal_value(row, 4)?.to_string(),
-                price_per_unit: crate::db::get_decimal_value(row, 5)?.to_string(),
-                total_cost: crate::db::get_decimal_value(row, 6)?.to_string(),
-                fees: crate::db::get_decimal_value(row, 7)?.to_string(),
+                trade_date: row.get(2)?,
+                settlement_date: row.get(3)?,
+                quantity: crate::db::get_decimal_value(row, 4)?,
+                price_per_unit: crate::db::get_decimal_value(row, 5)?,
+                total_cost: crate::db::get_decimal_value(row, 6)?,
+                fees: crate::db::get_decimal_value(row, 7)?,
                 is_day_trade: row.get(8)?,
                 notes: row.get(9)?,
                 source: row.get(10)?,
@@ -207,16 +181,16 @@ async fn dispatch_transactions_list(ticker: Option<&str>, json_output: bool) -> 
         )?;
         let mut iter = stmt.query([])?;
         while let Some(row) = iter.next()? {
-            rows.push(TransactionRow {
+            rows.push(formatters::transactions::TransactionRow {
                 id: row.get(0)?,
                 ticker: row.get::<_, String>(1)?,
                 transaction_type: row.get::<_, String>(2)?,
-                trade_date: row.get::<_, String>(3)?,
-                settlement_date: row.get::<_, Option<String>>(4)?,
-                quantity: crate::db::get_decimal_value(row, 5)?.to_string(),
-                price_per_unit: crate::db::get_decimal_value(row, 6)?.to_string(),
-                total_cost: crate::db::get_decimal_value(row, 7)?.to_string(),
-                fees: crate::db::get_decimal_value(row, 8)?.to_string(),
+                trade_date: row.get(3)?,
+                settlement_date: row.get(4)?,
+                quantity: crate::db::get_decimal_value(row, 5)?,
+                price_per_unit: crate::db::get_decimal_value(row, 6)?,
+                total_cost: crate::db::get_decimal_value(row, 7)?,
+                fees: crate::db::get_decimal_value(row, 8)?,
                 is_day_trade: row.get(9)?,
                 notes: row.get(10)?,
                 source: row.get(11)?,
@@ -224,27 +198,11 @@ async fn dispatch_transactions_list(ticker: Option<&str>, json_output: bool) -> 
         }
     }
 
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        let mut out = String::new();
-        for row in rows {
-            out.push_str(&format!(
-                "{} {} {} {} @ {} (fees {})\n",
-                row.trade_date,
-                row.ticker,
-                row.transaction_type,
-                row.quantity,
-                row.price_per_unit,
-                row.fees
-            ));
-        }
-        if out.is_empty() {
-            println!("No transactions found");
-        } else {
-            print!("{}", out);
-        }
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::transactions::format_transactions_list(&rows, mode)
+    );
 
     Ok(())
 }

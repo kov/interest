@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 
-pub mod formatters;
 pub mod help;
 
 #[derive(Parser)]
@@ -334,12 +333,6 @@ pub enum ActionCommands {
     Merger {
         #[command(subcommand)]
         action: ExchangeCommands,
-    },
-
-    /// Apply unapplied corporate actions to transactions
-    Apply {
-        /// Ticker symbol (optional, applies all if not specified)
-        ticker: Option<String>,
     },
 }
 
