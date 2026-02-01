@@ -5,8 +5,8 @@ use crate::formatters::OutputMode;
 use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, Value, ValueKind,
 };
+use crate::reports::aggregation::aggregate_positions_by_asset_type;
 use crate::reports::PortfolioReport;
-use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 
 /// Format portfolio report (testable, no I/O)
@@ -88,23 +88,10 @@ fn build_portfolio_document(
         positions.sort_by(|a, b| a.asset.ticker.cmp(&b.asset.ticker));
     }
 
+    let totals_by_type = aggregate_positions_by_asset_type(&report.positions);
+
     for (asset_type, positions) in &grouped {
-        let mut subtotal_cost = Decimal::ZERO;
-        let mut subtotal_value = Decimal::ZERO;
-
-        for position in positions.iter() {
-            subtotal_cost += position.total_cost;
-            if let Some(value) = position.current_value {
-                subtotal_value += value;
-            }
-        }
-
-        let subtotal_pl = subtotal_value - subtotal_cost;
-        let subtotal_pl_pct = if subtotal_cost > Decimal::ZERO {
-            (subtotal_pl / subtotal_cost) * Decimal::from(100)
-        } else {
-            Decimal::ZERO
-        };
+        let totals = totals_by_type.get(asset_type).cloned().unwrap_or_default();
 
         let rows = positions
             .iter()
@@ -158,19 +145,19 @@ fn build_portfolio_document(
                 rows: vec![
                     KeyValueRow {
                         label: "Cost".to_string(),
-                        value: Value::Currency(subtotal_cost),
+                        value: Value::Currency(totals.cost_basis),
                     },
                     KeyValueRow {
                         label: "Value".to_string(),
-                        value: Value::Currency(subtotal_value),
+                        value: Value::Currency(totals.market_value),
                     },
                     KeyValueRow {
                         label: "P&L".to_string(),
-                        value: Value::CurrencyDelta(subtotal_pl),
+                        value: Value::CurrencyDelta(totals.unrealized_pl),
                     },
                     KeyValueRow {
                         label: "Return".to_string(),
-                        value: Value::Percent(subtotal_pl_pct),
+                        value: Value::Percent(totals.return_pct),
                     },
                 ],
             },

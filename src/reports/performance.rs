@@ -4,10 +4,14 @@ use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
-use crate::db::{self, AssetType};
-use crate::reports::portfolio::{
-    calculate_portfolio_at_date, get_valid_snapshot, save_portfolio_snapshot, PositionSummary,
+use crate::db::{self, AssetType, Transaction, TransactionType};
+use crate::reports::aggregation::{
+    aggregate_positions_by_asset_type, normalize_positions_with_prices, AssetTypeTotals,
 };
+use crate::reports::portfolio::{
+    calculate_portfolio_at_date, get_valid_snapshot, save_portfolio_snapshot, PortfolioReport,
+};
+use crate::tax::cost_basis::AverageCostMatcher;
 
 #[derive(Debug, Clone)]
 pub struct PerformanceReport {
@@ -25,22 +29,17 @@ pub struct PerformanceReport {
     pub cash_flows: Option<CashFlowSummary>, // Cash flow summary if available
 }
 
-impl PerformanceReport {
-    /// Return percentage (from time_weighted_return)
-    pub fn return_pct(&self) -> Decimal {
-        self.time_weighted_return
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AssetPerformance {
     #[allow(dead_code)] // Kept for future detailed performance breakdown
     pub asset_type: AssetType,
-    pub start_value: Decimal,
-    pub end_value: Decimal,
+    pub cost_basis: Decimal,
+    pub market_value: Decimal,
+    pub unrealized_pl: Decimal,
     pub return_pct: Decimal,
     #[allow(dead_code)] // Kept for future detailed performance breakdown
     pub contribution_to_total: Decimal, // Percentage points
+    pub realized_gains: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +106,7 @@ pub fn get_period_dates(
             if let Some(c) = conn {
                 let mut stmt = c.prepare("SELECT MIN(trade_date) FROM transactions")?;
                 let min_date: Option<NaiveDate> = stmt.query_row([], |row| row.get(0)).ok();
-                let start = min_date.unwrap_or_else(|| {
+                let start = min_date.and_then(|d| d.pred_opt()).unwrap_or_else(|| {
                     today
                         .checked_sub_days(chrono::Days::new(365 * 20))
                         .unwrap_or(today)
@@ -157,10 +156,13 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         None => calculate_portfolio_at_date(conn, end_date, None)?,
     };
 
+    let start_snapshot = normalize_snapshot_prices(conn, start_date, start_snapshot)?;
+    let end_snapshot = normalize_snapshot_prices(conn, end_date, end_snapshot)?;
+
     // Aggregate values
     let start_value = start_snapshot.total_value;
     let end_value = end_snapshot.total_value;
-    let total_return = end_value - start_value; // Absolute return in currency
+    let portfolio_growth = end_value - start_value; // Absolute return in currency
 
     // Extract cash flows in period
     let cash_flows = extract_cash_flows(conn, start_date, end_date)?;
@@ -180,7 +182,7 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
     } else {
         // Simple percentage return when no cash flows
         if start_value > Decimal::ZERO {
-            (total_return / start_value) * Decimal::from(100)
+            (portfolio_growth / start_value) * Decimal::from(100)
         } else {
             Decimal::ZERO
         }
@@ -191,6 +193,9 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         .positions
         .iter()
         .map(|p| {
+            if p.current_price.is_none() {
+                return Decimal::ZERO;
+            }
             p.unrealized_pl.unwrap_or_else(|| {
                 // Fallback calculation if unrealized_pl not set
                 let market_val = p.quantity * p.current_price.unwrap_or(p.average_cost);
@@ -200,15 +205,13 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         })
         .fold(Decimal::ZERO, |acc, x| acc + x);
 
-    // Realized gains: 0 until realized_gains table is populated by sell processing
-    let realized_gains = Decimal::ZERO;
+    let realized_by_type = calculate_realized_gains_by_asset_type(conn, start_date, end_date)?;
+    let realized_gains = realized_by_type
+        .values()
+        .fold(Decimal::ZERO, |acc, x| acc + *x);
 
-    // Asset breakdown
-    let breakdown = build_asset_breakdown(
-        &start_snapshot.positions,
-        &end_snapshot.positions,
-        start_value,
-    )?;
+    let totals_by_type = aggregate_positions_by_asset_type(&end_snapshot.positions);
+    let breakdown = build_asset_breakdown(&totals_by_type, &realized_by_type)?;
 
     Ok(PerformanceReport {
         period,
@@ -216,7 +219,7 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         end_date,
         start_value,
         end_value,
-        total_return,
+        total_return: portfolio_growth,
         time_weighted_return: twr,
         realized_gains,
         unrealized_gains: unrealized_sum,
@@ -225,48 +228,265 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
     })
 }
 
-fn build_asset_breakdown(
-    start_positions: &[PositionSummary],
-    end_positions: &[PositionSummary],
-    portfolio_start_value: Decimal,
-) -> Result<HashMap<AssetType, AssetPerformance>> {
-    let mut start_map: HashMap<AssetType, Decimal> = HashMap::new();
-    for p in start_positions {
-        let value = p.current_value.unwrap_or(p.total_cost);
-        *start_map.entry(p.asset.asset_type).or_insert(Decimal::ZERO) += value;
-    }
+fn normalize_snapshot_prices(
+    conn: &Connection,
+    date: NaiveDate,
+    report: PortfolioReport,
+) -> Result<PortfolioReport> {
+    let (positions, total_cost, total_value) =
+        normalize_positions_with_prices(conn, date, report.positions)?;
+    let total_pl = total_value - total_cost;
+    let total_pl_pct = if total_cost > Decimal::ZERO {
+        (total_pl / total_cost) * Decimal::from(100)
+    } else {
+        Decimal::ZERO
+    };
 
-    let mut end_map: HashMap<AssetType, Decimal> = HashMap::new();
-    for p in end_positions {
-        let value = p.current_value.unwrap_or(p.total_cost);
-        *end_map.entry(p.asset.asset_type).or_insert(Decimal::ZERO) += value;
-    }
+    Ok(PortfolioReport {
+        positions,
+        total_cost,
+        total_value,
+        total_pl,
+        total_pl_pct,
+    })
+}
+
+fn build_asset_breakdown(
+    totals_by_type: &HashMap<AssetType, AssetTypeTotals>,
+    realized_by_type: &HashMap<AssetType, Decimal>,
+) -> Result<HashMap<AssetType, AssetPerformance>> {
+    let total_cost_basis = totals_by_type
+        .values()
+        .map(|totals| totals.cost_basis)
+        .fold(Decimal::ZERO, |acc, x| acc + x);
+
+    let mut asset_types: Vec<AssetType> = totals_by_type
+        .keys()
+        .chain(realized_by_type.keys())
+        .copied()
+        .collect();
+    asset_types.sort();
+    asset_types.dedup();
 
     let mut breakdown = HashMap::new();
-    for (asset_type, start_val) in start_map.iter() {
-        let end_val = end_map.get(asset_type).cloned().unwrap_or(Decimal::ZERO);
-        let return_pct = if *start_val > Decimal::ZERO {
-            ((end_val - *start_val) / *start_val) * Decimal::from(100)
+    for asset_type in asset_types {
+        let totals = totals_by_type.get(&asset_type).cloned().unwrap_or_default();
+        let realized_gains = realized_by_type
+            .get(&asset_type)
+            .cloned()
+            .unwrap_or(Decimal::ZERO);
+
+        if totals.cost_basis <= Decimal::ZERO
+            && totals.market_value <= Decimal::ZERO
+            && realized_gains == Decimal::ZERO
+        {
+            continue;
+        }
+
+        let contribution = if total_cost_basis > Decimal::ZERO {
+            (totals.cost_basis / total_cost_basis) * totals.return_pct
         } else {
             Decimal::ZERO
         };
-        let contribution = if portfolio_start_value > Decimal::ZERO {
-            (*start_val / portfolio_start_value) * return_pct
-        } else {
-            Decimal::ZERO
-        };
+
         breakdown.insert(
-            *asset_type,
+            asset_type,
             AssetPerformance {
-                asset_type: *asset_type,
-                start_value: *start_val,
-                end_value: end_val,
-                return_pct,
+                asset_type,
+                cost_basis: totals.cost_basis,
+                market_value: totals.market_value,
+                unrealized_pl: totals.unrealized_pl,
+                return_pct: totals.return_pct,
                 contribution_to_total: contribution,
+                realized_gains,
             },
         );
     }
     Ok(breakdown)
+}
+
+fn calculate_realized_gains_by_asset_type(
+    conn: &Connection,
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> Result<HashMap<AssetType, Decimal>> {
+    let assets = crate::db::get_all_assets(conn)?;
+    let mut assets_by_id = HashMap::new();
+    for asset in &assets {
+        if let Some(id) = asset.id {
+            assets_by_id.insert(id, asset.clone());
+        }
+    }
+
+    let mut realized_by_type: HashMap<AssetType, Decimal> = HashMap::new();
+
+    for asset in assets {
+        if !crate::db::is_supported_portfolio_ticker(&asset.ticker)
+            && !matches!(asset.asset_type, AssetType::Bond | AssetType::GovBond)
+        {
+            continue;
+        }
+
+        let asset_id = match asset.id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        if crate::db::is_rename_source_asset(conn, asset_id, to_date)? {
+            continue;
+        }
+
+        let mut transactions =
+            crate::reports::portfolio::get_asset_transactions_until(conn, asset_id, to_date)?;
+
+        let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, to_date)?;
+        for rename in renames {
+            if let Some(source_asset) = assets_by_id.get(&rename.from_asset_id) {
+                if let Some(carryover) =
+                    crate::reports::portfolio::build_rename_carryover_transaction(
+                        conn,
+                        source_asset,
+                        asset_id,
+                        rename.effective_date,
+                    )?
+                {
+                    transactions.push(carryover);
+                }
+            }
+        }
+
+        let exchanges = crate::db::get_asset_exchanges_as_target_up_to(conn, asset_id, to_date)?;
+        for exchange in exchanges {
+            if exchange.to_quantity <= Decimal::ZERO {
+                continue;
+            }
+
+            let source_ticker = assets_by_id
+                .get(&exchange.from_asset_id)
+                .map(|a| a.ticker.as_str())
+                .unwrap_or("UNKNOWN");
+            let notes = match exchange.event_type {
+                crate::db::AssetExchangeType::Spinoff => {
+                    format!("Spin-off from {}", source_ticker)
+                }
+                crate::db::AssetExchangeType::Merger => {
+                    format!("Merger from {}", source_ticker)
+                }
+            };
+
+            let price_per_unit = if exchange.to_quantity > Decimal::ZERO {
+                exchange.allocated_cost / exchange.to_quantity
+            } else {
+                Decimal::ZERO
+            };
+
+            transactions.push(Transaction {
+                id: None,
+                asset_id,
+                transaction_type: TransactionType::Buy,
+                trade_date: exchange.effective_date,
+                settlement_date: Some(exchange.effective_date),
+                quantity: exchange.to_quantity,
+                price_per_unit,
+                total_cost: exchange.allocated_cost,
+                fees: Decimal::ZERO,
+                is_day_trade: false,
+                quota_issuance_date: None,
+                notes: Some(notes),
+                source: "EXCHANGE".to_string(),
+                created_at: chrono::Utc::now(),
+            });
+        }
+
+        transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
+
+        let mut swing_matcher = AverageCostMatcher::new();
+        let mut day_trade_matcher = AverageCostMatcher::new();
+
+        let amortizations =
+            crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(to_date))?;
+        let mut amort_idx: usize = 0;
+        let exchanges_as_source =
+            crate::db::get_asset_exchanges_as_source_up_to(conn, asset_id, to_date)?;
+        let mut exchange_idx: usize = 0;
+        let actions_up_to = crate::corporate_actions::get_actions_up_to(conn, asset_id, to_date)?;
+        let mut action_idx: usize = 0;
+
+        for tx in transactions {
+            while amort_idx < amortizations.len()
+                && amortizations[amort_idx].event_date <= tx.trade_date
+            {
+                swing_matcher.apply_amortization(amortizations[amort_idx].total_amount);
+                amort_idx += 1;
+            }
+
+            while exchange_idx < exchanges_as_source.len()
+                && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
+            {
+                apply_exchange_source_effect(
+                    &mut swing_matcher,
+                    &exchanges_as_source[exchange_idx],
+                );
+                exchange_idx += 1;
+            }
+
+            while action_idx < actions_up_to.len()
+                && actions_up_to[action_idx].ex_date <= tx.trade_date
+            {
+                match actions_up_to[action_idx].action_type {
+                    crate::db::CorporateActionType::Split
+                    | crate::db::CorporateActionType::ReverseSplit => {
+                        swing_matcher.apply_quantity_adjustment(
+                            actions_up_to[action_idx].quantity_adjustment,
+                        );
+                    }
+                    _ => {}
+                }
+                action_idx += 1;
+            }
+
+            match tx.transaction_type {
+                TransactionType::Buy => {
+                    if tx.is_day_trade {
+                        day_trade_matcher.add_purchase(&tx, None, None);
+                    } else {
+                        swing_matcher.add_purchase(&tx, None, None);
+                    }
+                }
+                TransactionType::Sell => {
+                    let matcher = if tx.is_day_trade {
+                        &mut day_trade_matcher
+                    } else {
+                        &mut swing_matcher
+                    };
+
+                    let sale = matcher.match_sale(&tx, None)?;
+                    if tx.trade_date >= from_date && tx.trade_date <= to_date {
+                        *realized_by_type
+                            .entry(asset.asset_type)
+                            .or_insert(Decimal::ZERO) += sale.profit_loss;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(realized_by_type)
+}
+
+fn apply_exchange_source_effect(
+    matcher: &mut AverageCostMatcher,
+    exchange: &crate::db::AssetExchange,
+) {
+    match exchange.event_type {
+        crate::db::AssetExchangeType::Spinoff => {
+            let reduction = exchange.allocated_cost + exchange.cash_amount;
+            matcher.apply_amortization(reduction);
+        }
+        crate::db::AssetExchangeType::Merger => {
+            matcher.clear_position();
+        }
+    }
 }
 
 /// Extract cash flows from transaction history within a date range
@@ -418,13 +638,12 @@ pub fn calculate_time_weighted_return(
     cash_flows: &[CashFlow],
     snapshots: &HashMap<NaiveDate, Decimal>,
 ) -> Result<Decimal> {
-    if start_value <= Decimal::ZERO {
-        return Ok(Decimal::ZERO);
-    }
-
     // If no cash flows, simple return
     if cash_flows.is_empty() {
-        return Ok(((end_value - start_value) / start_value) * Decimal::from(100));
+        if start_value > Decimal::ZERO {
+            return Ok(((end_value - start_value) / start_value) * Decimal::from(100));
+        }
+        return Ok(Decimal::ZERO);
     }
 
     // Group flows by date and net them (contributions - withdrawals)
@@ -453,6 +672,11 @@ pub fn calculate_time_weighted_return(
         if prev_value > Decimal::ZERO {
             let sub_return = (value_before_flow / prev_value) - Decimal::ONE;
             cumulative_factor *= Decimal::ONE + sub_return;
+        } else {
+            // If the portfolio wasn't funded yet, start tracking after this flow.
+            let net_flow = daily_flows.get(&date).copied().unwrap_or(Decimal::ZERO);
+            prev_value = value_before_flow + net_flow;
+            continue;
         }
 
         // Adjust for the flow to get starting value for next period
@@ -580,6 +804,20 @@ mod tests {
         assert_eq!(report.end_value, Decimal::from(150));
         assert!(report.total_return > Decimal::ZERO);
         assert!(report.unrealized_gains >= Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_asset_breakdown_includes_realized_only() {
+        let totals_by_type = HashMap::new();
+        let mut realized_by_type = HashMap::new();
+        realized_by_type.insert(AssetType::Bdr, Decimal::from(250));
+
+        let breakdown = build_asset_breakdown(&totals_by_type, &realized_by_type).unwrap();
+        let perf = breakdown.get(&AssetType::Bdr).unwrap();
+        assert_eq!(perf.realized_gains, Decimal::from(250));
+        assert_eq!(perf.cost_basis, Decimal::ZERO);
+        assert_eq!(perf.market_value, Decimal::ZERO);
+        assert_eq!(perf.return_pct, Decimal::ZERO);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::db::{Asset, AssetType, Transaction, TransactionType};
+use crate::reports::aggregation::normalize_positions_with_prices;
 
 /// Summary of a single position
 #[derive(Debug, Clone)]
@@ -174,9 +175,6 @@ fn calculate_portfolio_with_cutoff(
 
     // Calculate positions for each asset
     let mut positions = Vec::new();
-    let mut total_cost = Decimal::ZERO;
-    let mut total_value = Decimal::ZERO;
-
     for asset in filtered_assets {
         let asset_id = asset.id.unwrap();
 
@@ -339,11 +337,6 @@ fn calculate_portfolio_with_cutoff(
             (None, None, None)
         };
 
-        total_cost += position.total_cost;
-        if let Some(value) = current_value {
-            total_value += value;
-        }
-
         positions.push(PositionSummary {
             asset,
             quantity: position.quantity,
@@ -363,6 +356,8 @@ fn calculate_portfolio_with_cutoff(
         b_val.cmp(&a_val)
     });
 
+    let (positions, total_cost, total_value) =
+        normalize_positions_with_prices(conn, as_of, positions)?;
     let total_pl = total_value - total_cost;
     let total_pl_pct = if total_cost > Decimal::ZERO {
         (total_pl / total_cost) * Decimal::from(100)
@@ -442,7 +437,7 @@ fn get_asset_transactions_before(
 }
 
 /// Get all transactions for an asset up to and including a cutoff date.
-fn get_asset_transactions_until(
+pub(crate) fn get_asset_transactions_until(
     conn: &Connection,
     asset_id: i64,
     cutoff_date: NaiveDate,
@@ -463,7 +458,7 @@ fn get_asset_transactions_until(
     Ok(transactions)
 }
 
-fn build_rename_carryover_transaction(
+pub(crate) fn build_rename_carryover_transaction(
     conn: &Connection,
     source_asset: &Asset,
     target_asset_id: i64,
