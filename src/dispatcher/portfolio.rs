@@ -4,7 +4,8 @@ use colored::Colorize;
 use crate::reports::portfolio::calculate_allocation;
 use crate::ui::progress::{ProgressEvent, ProgressPrinter};
 use crate::utils::format_currency;
-use crate::{cli, db, reports};
+use crate::{db, formatters, reports};
+use formatters::portfolio::format_empty_portfolio;
 
 pub async fn dispatch_portfolio_show(
     asset_type: Option<&str>,
@@ -68,7 +69,7 @@ pub async fn dispatch_portfolio_show(
     if earliest_date.is_none() {
         // No transactions - nothing to show
         if !json_output {
-            println!("{}", cli::formatters::format_empty_portfolio());
+            println!("{}", format_empty_portfolio());
         }
         return Ok(());
     }
@@ -86,7 +87,7 @@ pub async fn dispatch_portfolio_show(
 
     if report.positions.is_empty() {
         if !json_output {
-            println!("{}", cli::formatters::format_empty_portfolio());
+            println!("{}", format_empty_portfolio());
         }
         return Ok(());
     }
@@ -183,33 +184,28 @@ pub async fn dispatch_portfolio_show(
         }
     }
 
-    if json_output {
-        println!("{}", cli::formatters::format_portfolio_json(&report));
-    } else {
-        println!(
-            "{}",
-            cli::formatters::format_portfolio_table(&report, asset_type)
-        );
+    // Print portfolio output (JSON or table)
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    formatters::portfolio::print(&report, asset_type_filter, mode);
 
-        // Display asset allocation if showing full portfolio
-        if asset_type_filter.is_none() {
-            let allocation = calculate_allocation(&report);
+    // Display asset allocation if showing full portfolio in table mode
+    if !json_output && asset_type_filter.is_none() {
+        let allocation = calculate_allocation(&report);
 
-            if allocation.len() > 1 {
-                println!("\n{} Asset Allocation", "🎯".cyan().bold());
+        if allocation.len() > 1 {
+            println!("\n{} Asset Allocation", "🎯".cyan().bold());
 
-                let mut alloc_vec: Vec<_> = allocation.iter().collect();
-                alloc_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+            let mut alloc_vec: Vec<_> = allocation.iter().collect();
+            alloc_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
 
-                for (asset_type, (value, pct)) in alloc_vec {
-                    let type_ref: &db::AssetType = asset_type;
-                    println!(
-                        "  {}: {} ({:.2}%)",
-                        type_ref.as_str().to_uppercase(),
-                        format_currency(*value).cyan(),
-                        pct
-                    );
-                }
+            for (asset_type, (value, pct)) in alloc_vec {
+                let type_ref: &db::AssetType = asset_type;
+                println!(
+                    "  {}: {} ({:.2}%)",
+                    type_ref.as_str().to_uppercase(),
+                    format_currency(*value).cyan(),
+                    pct
+                );
             }
         }
     }

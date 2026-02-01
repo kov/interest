@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
-use colored::Colorize;
 use std::io::{stdin, stdout, Write};
-use tabled::{Table, Tabled};
 
-use crate::{db, reports, scraping};
+use crate::{db, formatters, reports, scraping};
 
 pub async fn dispatch_assets(action: &crate::cli::AssetsCommands, json_output: bool) -> Result<()> {
     match action {
@@ -48,37 +46,9 @@ fn list_assets(asset_type: Option<&str>, json_output: bool) -> Result<()> {
         db::get_all_assets(&conn)?
     };
 
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&assets)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!("{}", formatters::assets::format_assets_list(&assets, mode));
 
-    if assets.is_empty() {
-        println!("{} No assets found.", "ℹ".blue().bold());
-        return Ok(());
-    }
-
-    #[derive(Tabled)]
-    struct AssetRow {
-        #[tabled(rename = "Ticker")]
-        ticker: String,
-        #[tabled(rename = "Type")]
-        asset_type: String,
-        #[tabled(rename = "Name")]
-        name: String,
-    }
-
-    let rows: Vec<_> = assets
-        .into_iter()
-        .map(|asset| AssetRow {
-            ticker: asset.ticker,
-            asset_type: asset.asset_type.as_str().to_string(),
-            name: asset.name.unwrap_or_else(|| "-".to_string()),
-        })
-        .collect();
-
-    let table = Table::new(rows).to_string();
-    println!("{}", table);
     Ok(())
 }
 
@@ -87,27 +57,12 @@ fn show_asset(ticker: &str, json_output: bool) -> Result<()> {
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Ticker not found in assets")?;
     let tx_count = db::count_transactions_for_asset(&conn, &asset.ticker)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "ticker": asset.ticker,
-            "asset_type": asset.asset_type.as_str(),
-            "name": asset.name,
-            "cnpj": asset.cnpj,
-            "created_at": asset.created_at.to_rfc3339(),
-            "updated_at": asset.updated_at.to_rfc3339(),
-            "transactions": tx_count,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::assets::format_asset_show(&asset, tx_count, mode)
+    );
 
-    println!("Asset: {}", asset.ticker);
-    println!("  Type: {}", asset.asset_type.as_str());
-    println!("  Name: {}", asset.name.unwrap_or_else(|| "-".to_string()));
-    println!("  CNPJ: {}", asset.cnpj.unwrap_or_else(|| "-".to_string()));
-    println!("  Created: {}", asset.created_at.to_rfc3339());
-    println!("  Updated: {}", asset.updated_at.to_rfc3339());
-    println!("  Transactions: {}", tx_count);
     Ok(())
 }
 
@@ -130,25 +85,12 @@ fn add_asset(
     };
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Asset not found after insert")?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "id": asset_id,
-            "ticker": asset.ticker,
-            "asset_type": asset.asset_type.as_str(),
-            "name": asset.name,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::assets::format_asset_add(asset_id, &asset, mode)
+    );
 
-    println!("\n{} Asset added successfully!", "✓".green().bold());
-    println!("  ID:     {}", asset_id);
-    println!("  Ticker: {}", asset.ticker.cyan().bold());
-    println!("  Type:   {}", asset.asset_type.as_str());
-    if let Some(name) = asset.name {
-        println!("  Name:   {}", name);
-    }
-    println!();
     Ok(())
 }
 
@@ -157,16 +99,12 @@ fn set_asset_type(ticker: &str, asset_type: &str, json_output: bool) -> Result<(
     let parsed = parse_asset_type(asset_type)?;
     db::update_asset_type(&conn, ticker, &parsed)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "ticker": ticker.to_uppercase(),
-            "asset_type": parsed.as_str(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::assets::format_asset_set_type(ticker, &parsed, mode)
+    );
 
-    println!("Updated {} to {}", ticker, parsed.as_str());
     Ok(())
 }
 
@@ -174,16 +112,12 @@ fn set_asset_name(ticker: &str, name: &str, json_output: bool) -> Result<()> {
     let conn = open_conn()?;
     db::update_asset_name(&conn, ticker, name)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "ticker": ticker.to_uppercase(),
-            "name": name,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::assets::format_asset_set_name(ticker, name, mode)
+    );
 
-    println!("Updated {} name to {}", ticker, name);
     Ok(())
 }
 
@@ -201,21 +135,12 @@ fn rename_asset(old_ticker: &str, new_ticker: &str, json_output: bool) -> Result
     let conn = open_conn()?;
     db::update_asset_ticker(&conn, old_ticker, new_ticker)?;
 
-    if json_output {
-        let payload = serde_json::json!({
-            "old_ticker": old_ticker.to_uppercase(),
-            "new_ticker": new_ticker.to_uppercase(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
+    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
-        "{} Renamed {} to {}",
-        "✓".green().bold(),
-        old_ticker,
-        new_ticker
+        "{}",
+        formatters::assets::format_asset_rename(old_ticker, new_ticker, mode)
     );
+
     Ok(())
 }
 
@@ -243,15 +168,12 @@ fn remove_asset(ticker: &str, json_output: bool) -> Result<()> {
         reports::invalidate_snapshots_after(&conn, date)?;
     }
 
-    if json_output {
-        let payload = serde_json::json!({
-            "deleted": asset.ticker,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
+    let mode = formatters::OutputMode::from_json_flag(json_output);
+    println!(
+        "{}",
+        formatters::assets::format_asset_remove(&asset.ticker, mode)
+    );
 
-    println!("{} Removed asset {}", "✓".green().bold(), asset.ticker);
     Ok(())
 }
 
@@ -281,48 +203,11 @@ async fn sync_maisretorno(
         crate::ui::progress::clear_progress_line();
     }
 
-    if json_output {
-        let payload = serde_json::json!({
-            "sources": sources.iter().map(|s| {
-                serde_json::json!({
-                    "asset_type": s.asset_type.as_str(),
-                    "url": s.url,
-                })
-            }).collect::<Vec<_>>(),
-            "entries": stats.total_entries,
-            "registry_written": stats.registry_written,
-            "assets_updated": stats.assets_updated,
-            "updated_type": stats.updated_type,
-            "updated_name": stats.updated_name,
-            "updated_cnpj": stats.updated_cnpj,
-            "dry_run": stats.dry_run,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
-
+    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
-        "{} Mais Retorno sync complete.",
-        if dry_run {
-            "ℹ".blue().bold()
-        } else {
-            "✓".green().bold()
-        }
+        "{}",
+        formatters::assets::format_sync_maisretorno(&sources, &stats, mode)
     );
-    println!("  Entries fetched: {}", stats.total_entries);
-    if dry_run {
-        println!("  Registry writes skipped (dry run).");
-    } else {
-        println!("  Registry entries written: {}", stats.registry_written);
-    }
-    if dry_run {
-        println!("  Asset updates skipped (dry run).");
-    } else {
-        println!("  Assets updated: {}", stats.assets_updated);
-        println!("    Type updates: {}", stats.updated_type);
-        println!("    Name updates: {}", stats.updated_name);
-        println!("    CNPJ updates: {}", stats.updated_cnpj);
-    }
 
     Ok(())
 }

@@ -2,57 +2,10 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use rusqlite::Connection;
 
-use tabled::Tabled;
-use tabled::{
-    settings::{object::Columns, Alignment, Modify, Style},
-    Table,
-};
-
 use crate::{db, importers, reports};
 
 // The helpers expose ImportStats from the `importers` module
 use crate::importers::ImportStats;
-/// Return a pretty table preview for CEI transactions (up to 10 rows)
-pub(crate) fn preview_cei_table(txs: &[crate::importers::RawTransaction]) -> Option<String> {
-    #[derive(Tabled)]
-    struct TransactionPreview<'a> {
-        #[tabled(rename = "Date")]
-        date: String,
-        #[tabled(rename = "Ticker")]
-        ticker: &'a str,
-        #[tabled(rename = "Type")]
-        tx_type: &'a str,
-        #[tabled(rename = "Quantity")]
-        quantity: String,
-        #[tabled(rename = "Price")]
-        price: String,
-        #[tabled(rename = "Total")]
-        total: String,
-    }
-
-    let preview: Vec<TransactionPreview> = txs
-        .iter()
-        .take(10)
-        .map(|tx| TransactionPreview {
-            date: tx.trade_date.format("%d/%m/%Y").to_string(),
-            ticker: tx.ticker.as_str(),
-            tx_type: tx.transaction_type.as_str(),
-            quantity: tx.quantity.to_string(),
-            price: crate::utils::format_currency(tx.price),
-            total: crate::utils::format_currency(tx.total),
-        })
-        .collect();
-
-    if preview.is_empty() {
-        None
-    } else {
-        let table = Table::new(preview)
-            .with(Style::rounded())
-            .with(Modify::new(Columns::new(3..)).with(Alignment::right()))
-            .to_string();
-        Some(table)
-    }
-}
 
 /// Import CEI transactions into database and update last import date; returns (imported, skipped_old, errors, earliest_date, max_date)
 pub(crate) fn import_cei(
@@ -154,94 +107,6 @@ pub(crate) fn import_cei(
     })
 }
 
-pub(crate) fn preview_movimentacao_trades(
-    trades: &[crate::importers::MovimentacaoEntry],
-) -> Option<String> {
-    #[derive(Tabled)]
-    struct TradePreview {
-        #[tabled(rename = "Date")]
-        date: String,
-        #[tabled(rename = "Type")]
-        movement_type: String,
-        #[tabled(rename = "Ticker")]
-        ticker: String,
-        #[tabled(rename = "Qty")]
-        quantity: String,
-        #[tabled(rename = "Price")]
-        price: String,
-    }
-
-    let preview: Vec<TradePreview> = trades
-        .iter()
-        .take(5)
-        .map(|e| TradePreview {
-            date: e.date.format("%d/%m/%Y").to_string(),
-            movement_type: e.movement_type.clone(),
-            ticker: e.ticker.clone().unwrap_or_else(|| "?".to_string()),
-            quantity: e
-                .quantity
-                .map(|q| q.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            price: e
-                .unit_price
-                .map(crate::utils::format_currency)
-                .unwrap_or_else(|| "-".to_string()),
-        })
-        .collect();
-
-    if preview.is_empty() {
-        None
-    } else {
-        Some(
-            Table::new(preview)
-                .with(Style::rounded())
-                .with(Modify::new(Columns::new(3..)).with(Alignment::right()))
-                .to_string(),
-        )
-    }
-}
-
-pub(crate) fn preview_ofertas_table(
-    entries: &[crate::importers::OfertaPublicaEntry],
-) -> Option<String> {
-    #[derive(Tabled)]
-    struct OfertaPreview {
-        #[tabled(rename = "Date")]
-        date: String,
-        #[tabled(rename = "Ticker")]
-        ticker: String,
-        #[tabled(rename = "Qty")]
-        quantity: String,
-        #[tabled(rename = "Price")]
-        price: String,
-        #[tabled(rename = "Offer")]
-        offer: String,
-    }
-
-    let preview: Vec<OfertaPreview> = entries
-        .iter()
-        .take(5)
-        .map(|e| OfertaPreview {
-            date: e.date.format("%d/%m/%Y").to_string(),
-            ticker: e.ticker.clone(),
-            quantity: e.quantity.to_string(),
-            price: crate::utils::format_currency(e.unit_price),
-            offer: e.offer.clone(),
-        })
-        .collect();
-
-    if preview.is_empty() {
-        None
-    } else {
-        Some(
-            Table::new(preview)
-                .with(Style::rounded())
-                .with(Modify::new(Columns::new(2..4)).with(Alignment::right()))
-                .to_string(),
-        )
-    }
-}
-
 /// Import "Ofertas Públicas" allocations into DB and return (imported, skipped_old, errors, max_date)
 pub(crate) fn import_ofertas(
     conn: &Connection,
@@ -322,12 +187,12 @@ pub(crate) fn import_ofertas(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::formatters;
 
     #[test]
     fn ceil_importstats_maps_correctly() {
         // Basic smoke test to ensure CEI mapping populates fields
         let txs: Vec<crate::importers::RawTransaction> = vec![];
-        assert!(preview_cei_table(&txs).is_none());
+        assert!(formatters::imports::format_cei_preview_table(&txs).is_none());
     }
 }

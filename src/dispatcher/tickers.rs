@@ -1,7 +1,10 @@
 use anyhow::Result;
 use std::io::{stdin, stdout, Write};
 
-use crate::db::{self, AssetType};
+use crate::{
+    db::{self, AssetType},
+    formatters,
+};
 
 const KNOWN_TYPES: &[&str] = &[
     "STOCK", "BDR", "ETF", "FII", "FIAGRO", "FI_INFRA", "FIDC", "FIP", "BOND", "GOV_BOND",
@@ -16,17 +19,9 @@ pub async fn dispatch_tickers(
         crate::cli::TickersCommands::Refresh { force } => {
             let force = *force;
             let path = crate::tickers::refresh_b3_tickers(force)?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "refreshed": true,
-                        "path": path,
-                    })
-                );
-            } else {
-                println!("Updated tickers cache: {}", path.display());
-            }
+            let path_str = path.display().to_string();
+            let mode = formatters::OutputMode::from_json_flag(json_output);
+            println!("{}", formatters::tickers::format_refresh(&path_str, mode));
             Ok(())
         }
         crate::cli::TickersCommands::Status => {
@@ -37,31 +32,23 @@ pub async fn dispatch_tickers(
             let meta = crate::tickers::read_cache_meta(Some(&cache_dir))?;
             let unknown_assets = db::list_assets_by_type(&conn, AssetType::Unknown)?;
 
-            if json_output {
-                let payload = serde_json::json!({
-                    "cache_path": csv_path,
-                    "cache_exists": csv_path.exists(),
-                    "fetched_at": meta.as_ref().map(|m| m.fetched_at.to_rfc3339()),
-                    "source_url": meta.as_ref().map(|m| m.source_url.clone()),
-                    "unknown_count": unknown_assets.len(),
-                });
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-                return Ok(());
-            }
+            let cache_exists = csv_path.exists();
+            let fetched_at = meta.as_ref().map(|m| m.fetched_at.to_rfc3339());
+            let source_url = meta.as_ref().map(|m| m.source_url.clone());
+            let unknown_count = unknown_assets.len();
 
-            println!("Cache path: {}", csv_path.display());
-            if let Some(meta) = meta {
-                let age = chrono::Utc::now().signed_duration_since(meta.fetched_at);
-                println!(
-                    "Last fetch: {} ({} hours ago)",
-                    meta.fetched_at.to_rfc3339(),
-                    age.num_hours()
-                );
-                println!("Source URL: {}", meta.source_url);
-            } else {
-                println!("Last fetch: not available");
-            }
-            println!("Unknown assets: {}", unknown_assets.len());
+            let mode = formatters::OutputMode::from_json_flag(json_output);
+            println!(
+                "{}",
+                formatters::tickers::format_status(
+                    &csv_path,
+                    cache_exists,
+                    fetched_at.as_deref(),
+                    source_url.as_deref(),
+                    unknown_count,
+                    mode,
+                )
+            );
             Ok(())
         }
         crate::cli::TickersCommands::ListUnknown => {
@@ -69,20 +56,11 @@ pub async fn dispatch_tickers(
             let conn = db::open_db(None)?;
             let unknown_assets = db::list_assets_by_type(&conn, AssetType::Unknown)?;
 
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&unknown_assets)?);
-                return Ok(());
-            }
-
-            if unknown_assets.is_empty() {
-                println!("No unknown assets found.");
-                return Ok(());
-            }
-
-            for asset in unknown_assets {
-                let name = asset.name.unwrap_or_else(|| "-".to_string());
-                println!("{} {}", asset.ticker, name);
-            }
+            let mode = formatters::OutputMode::from_json_flag(json_output);
+            println!(
+                "{}",
+                formatters::tickers::format_unknown_list(&unknown_assets, mode)
+            );
             Ok(())
         }
         crate::cli::TickersCommands::Resolve { ticker, asset_type } => {
@@ -99,17 +77,11 @@ pub async fn dispatch_tickers(
                 })?;
                 let parsed = parse_asset_type(&asset_type)?;
                 db::update_asset_type(&conn, ticker, &parsed)?;
-                if json_output {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "ticker": ticker,
-                            "asset_type": parsed.as_str(),
-                        })
-                    );
-                } else {
-                    println!("Updated {} to {}", ticker, parsed.as_str());
-                }
+                let mode = formatters::OutputMode::from_json_flag(json_output);
+                println!(
+                    "{}",
+                    formatters::tickers::format_resolve(ticker, parsed.as_str(), mode)
+                );
                 return Ok(());
             }
 

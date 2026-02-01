@@ -6,7 +6,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod cli_helpers;
-use cli_helpers::{add_asset, add_income, import_json, income_detail_json};
+use cli_helpers::{add_asset, add_income, import_stats_json, income_detail_json};
 
 fn decimal_from_value(value: &Value) -> Result<Decimal> {
     if let Some(s) = value.as_str() {
@@ -70,16 +70,10 @@ fn test_income_detail_year_filter() -> Result<()> {
 fn test_income_import_duplicate_detection() -> Result<()> {
     let home = TempDir::new()?;
 
-    let first = import_json(&home, "tests/data/07_capital_return.xlsx")?;
-    assert!(first
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false));
-    let data_first = first.get("data").context("missing data")?;
+    let data_first = import_stats_json(&home, "tests/data/07_capital_return.xlsx")?;
     assert_eq!(data_first["imported_income"].as_u64().unwrap_or(0), 1);
 
-    let second = import_json(&home, "tests/data/07_capital_return.xlsx")?;
-    let data_second = second.get("data").context("missing data")?;
+    let data_second = import_stats_json(&home, "tests/data/07_capital_return.xlsx")?;
     assert_eq!(data_second["imported_income"].as_u64().unwrap_or(0), 0);
     assert!(data_second["skipped_income_old"].as_u64().unwrap_or(0) >= 1);
 

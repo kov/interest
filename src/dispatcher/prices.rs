@@ -2,6 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use std::collections::HashSet;
 
+use crate::formatters;
+
 pub async fn dispatch_prices(action: &crate::cli::PriceCommands, json_output: bool) -> Result<()> {
     use crate::db;
     use crate::importers::b3_cotahist;
@@ -211,10 +213,6 @@ async fn dispatch_price_history(ticker: &str, from: &str, to: &str) -> Result<()
     use anyhow::Context;
     use chrono::NaiveDate;
     use colored::Colorize;
-    use tabled::{
-        settings::{object::Columns, Alignment, Modify, Style},
-        Table, Tabled,
-    };
 
     tracing::info!(
         "Fetching historical prices for {} from {} to {}",
@@ -236,65 +234,15 @@ async fn dispatch_price_history(ticker: &str, from: &str, to: &str) -> Result<()
 
     let prices = crate::pricing::yahoo::fetch_historical_prices(ticker, from_date, to_date).await?;
 
-    if prices.is_empty() {
-        println!("{} No price data found", "ℹ".blue().bold());
-        return Ok(());
+    println!("\n{}", formatters::prices::format_prices_table(&prices));
+
+    if !prices.is_empty() {
+        println!(
+            "\n{} Total: {} price points",
+            "✓".green().bold(),
+            prices.len()
+        );
     }
-
-    // Display prices in table
-    #[derive(Tabled)]
-    struct PriceRow {
-        #[tabled(rename = "Date")]
-        date: String,
-        #[tabled(rename = "Open")]
-        open: String,
-        #[tabled(rename = "High")]
-        high: String,
-        #[tabled(rename = "Low")]
-        low: String,
-        #[tabled(rename = "Close")]
-        close: String,
-        #[tabled(rename = "Volume")]
-        volume: String,
-    }
-
-    let rows: Vec<PriceRow> = prices
-        .iter()
-        .map(|p| PriceRow {
-            date: p.date.format("%Y-%m-%d").to_string(),
-            open: p
-                .open
-                .as_ref()
-                .map(|o| crate::utils::format_currency(*o))
-                .unwrap_or_else(|| "-".to_string()),
-            high: p
-                .high
-                .as_ref()
-                .map(|h| crate::utils::format_currency(*h))
-                .unwrap_or_else(|| "-".to_string()),
-            low: p
-                .low
-                .as_ref()
-                .map(|l| crate::utils::format_currency(*l))
-                .unwrap_or_else(|| "-".to_string()),
-            close: crate::utils::format_currency(p.close),
-            volume: p
-                .volume
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-        })
-        .collect();
-
-    let table = Table::new(rows)
-        .with(Style::rounded())
-        .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
-        .to_string();
-    println!("\n{}", table);
-    println!(
-        "\n{} Total: {} price points",
-        "✓".green().bold(),
-        prices.len()
-    );
 
     Ok(())
 }

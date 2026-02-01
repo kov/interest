@@ -72,7 +72,6 @@ const COMMAND_PATTERNS: &[&[&str]] = &[
     &["transactions", "list"],
     &["process-terms"],
     &["actions", "split"],
-    &["actions", "apply"],
     // Reports & tax
     &["tax", "report"],
     &["tax", "summary"],

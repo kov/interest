@@ -177,66 +177,6 @@ pub fn adjust_price_and_cost_for_actions(
 }
 
 /// Get unapplied corporate actions for an asset (or all assets if None)
-pub fn get_unapplied_actions(
-    conn: &Connection,
-    asset_id_filter: Option<i64>,
-) -> Result<Vec<CorporateAction>> {
-    let query = if asset_id_filter.is_some() {
-        "SELECT id, asset_id, action_type, event_date, ex_date, quantity_adjustment,
-                source, notes, created_at
-         FROM corporate_actions
-         WHERE asset_id = ?1
-         ORDER BY ex_date ASC"
-    } else {
-        "SELECT id, asset_id, action_type, event_date, ex_date, quantity_adjustment,
-                source, notes, created_at
-         FROM corporate_actions
-         ORDER BY ex_date ASC"
-    };
-
-    let mut stmt = conn.prepare(query)?;
-
-    let actions = if let Some(asset_id) = asset_id_filter {
-        stmt.query_map([asset_id], |row| {
-            Ok(CorporateAction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                action_type: row
-                    .get::<_, String>(2)?
-                    .parse::<crate::db::CorporateActionType>()
-                    .unwrap_or(crate::db::CorporateActionType::Split),
-                event_date: row.get(3)?,
-                ex_date: row.get(4)?,
-                quantity_adjustment: get_decimal_value(row, 5)?,
-                source: row.get(6)?,
-                notes: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?
-    } else {
-        stmt.query_map([], |row| {
-            Ok(CorporateAction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                action_type: row
-                    .get::<_, String>(2)?
-                    .parse::<crate::db::CorporateActionType>()
-                    .unwrap_or(crate::db::CorporateActionType::Split),
-                event_date: row.get(3)?,
-                ex_date: row.get(4)?,
-                quantity_adjustment: get_decimal_value(row, 5)?,
-                source: row.get(6)?,
-                notes: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?
-    };
-
-    Ok(actions)
-}
-
 /// Apply a corporate action by creating synthetic transactions (for bonus shares)
 ///
 /// For splits/reverse splits: No mutation - adjustments happen at query time.
@@ -244,6 +184,10 @@ pub fn get_unapplied_actions(
 /// For capital return: No synthetic transaction - cost adjustment happens at query time.
 ///
 /// Returns the number of transactions created (0 or 1).
+///
+/// TODO: Remove synthetic bonus transactions and adopt query-time application like splits.
+/// This would eliminate the need for this function entirely and make all corporate actions
+/// consistent with the query-time adjustment model.
 pub fn apply_corporate_action(
     conn: &Connection,
     action: &CorporateAction,

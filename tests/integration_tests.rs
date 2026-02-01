@@ -23,8 +23,10 @@ use tempfile::TempDir;
 
 mod cli_helpers;
 use cli_helpers::{
-    add_asset, add_income, add_transaction, base_cmd, cache_root_for_home, list_transactions_json,
-    portfolio_json, run_cmd, setup_test_tickers_cache, tax_report_json,
+    add_asset, add_income, add_transaction, base_cmd, cache_root_for_home, extract_table_rows,
+    find_key_value_block, import_stats_from_doc, income_detail_json, kv_value,
+    list_split_actions_json, list_transactions_json, portfolio_json, run_cmd,
+    setup_test_tickers_cache, tax_report_json,
 };
 mod sqlite_helpers;
 use sqlite_helpers::{
@@ -54,6 +56,13 @@ fn decimal_from_value(value: &Value) -> Result<Decimal> {
         return Decimal::try_from(f).context("invalid decimal number");
     }
     Err(anyhow::anyhow!("expected decimal value"))
+}
+
+fn performance_summary_value(doc: &Value, label: &str) -> Result<Decimal> {
+    let summary =
+        find_key_value_block(doc, "Summary").context("missing performance summary block")?;
+    let value = kv_value(Some(summary), label);
+    decimal_from_value(&value)
 }
 
 fn load_transactions(home: &TempDir, ticker: &str) -> Result<Vec<TransactionRow>> {
@@ -135,7 +144,9 @@ fn test_cash_flow_show_single_year_monthly_output() -> Result<()> {
     assert!(stdout.contains("Janeiro 2024"));
     assert!(stdout.contains("Fevereiro 2024"));
     assert!(stdout.contains("STOCK"));
-    assert!(stdout.contains("Total new money"));
+    assert!(stdout.contains("Cash Flow Summary (Monthly)"));
+    assert!(stdout.contains("Monthly Breakdown"));
+    assert!(stdout.contains("Net Flow"));
 
     Ok(())
 }
@@ -153,17 +164,7 @@ fn test_actions_split_list_orders_by_ex_date_asc() -> Result<()> {
         &["actions", "split", "add", "TESTSPLT", "100", "2024-03-05"],
     )?;
 
-    let output = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("TESTSPLT")
-        .output()?;
-    assert!(output.status.success());
-
-    let actions_json: Value = serde_json::from_slice(&output.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("TESTSPLT"))?;
     let dates: Vec<String> = actions_array
         .iter()
         .map(|row| {
@@ -182,21 +183,22 @@ fn test_actions_split_list_orders_by_ex_date_asc() -> Result<()> {
 fn test_income_detail_orders_by_event_date_asc() -> Result<()> {
     let home = TempDir::new()?;
     add_asset(&home, "TESTINC", "FII")?;
-    add_income(&home, "TESTINC", "DIVIDEND", "10", "2024-02-15")?;
+    run_cmd(
+        &home,
+        &[
+            "income",
+            "add",
+            "TESTINC",
+            "DIVIDEND",
+            "10",
+            "2024-02-15",
+            "--notes",
+            "Late payment",
+        ],
+    )?;
     add_income(&home, "TESTINC", "DIVIDEND", "5", "2024-01-10")?;
 
-    let output = base_cmd(&home)
-        .arg("--json")
-        .arg("income")
-        .arg("detail")
-        .arg("2024")
-        .arg("--asset")
-        .arg("TESTINC")
-        .output()?;
-    assert!(output.status.success());
-
-    let income_json: Value = serde_json::from_slice(&output.stdout).expect("invalid income JSON");
-    let income_array = income_json.as_array().expect("income JSON is not array");
+    let income_array = income_detail_json(&home, "2024", "TESTINC")?;
     let dates: Vec<String> = income_array
         .iter()
         .map(|row| {
@@ -207,6 +209,10 @@ fn test_income_detail_orders_by_event_date_asc() -> Result<()> {
         })
         .collect();
     assert_eq!(dates, vec!["2024-01-10", "2024-02-15"]);
+    assert_eq!(income_array[0]["asset_type"], "FII");
+    assert_eq!(income_array[1]["asset_type"], "FII");
+    assert!(income_array[0]["notes"].is_null());
+    assert_eq!(income_array[1]["notes"], "Late payment");
 
     Ok(())
 }
@@ -218,13 +224,21 @@ fn test_cash_flow_show_multi_year_ordering() -> Result<()> {
     add_transaction(&home, "TESTCF2", "buy", "1", "100", "2023-06-01", false)?;
     add_transaction(&home, "TESTCF2", "buy", "1", "110", "2024-06-01", false)?;
 
-    let output = base_cmd(&home).arg("cash-flow").arg("show").output()?;
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("cash-flow")
+        .arg("show")
+        .output()?;
     assert!(output.status.success());
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let idx_2023 = stdout.find("\n2023\n").expect("missing 2023 header");
-    let idx_2024 = stdout.find("\n2024\n").expect("missing 2024 header");
-    assert!(idx_2023 < idx_2024);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("invalid cash-flow JSON");
+    let rows = extract_table_rows(&value, Some("Yearly Breakdown"), None)?;
+    let years: Vec<i32> = rows
+        .iter()
+        .filter_map(|row| row.get("year").and_then(|v| v.as_str()))
+        .filter_map(|s| s.parse::<i32>().ok())
+        .collect();
+    assert_eq!(years, vec![2023, 2024]);
 
     Ok(())
 }
@@ -241,7 +255,12 @@ fn run_import_json(home: &TempDir, file_path: &str) -> Value {
     assert!(output.status.success(), "import command failed");
 
     let stdout = String::from_utf8(output.stdout).expect("invalid utf8 in output");
-    serde_json::from_str(&stdout).expect("failed to parse JSON output")
+    let doc: Value = serde_json::from_str(&stdout).expect("failed to parse JSON output");
+    let stats = import_stats_from_doc(&doc);
+    serde_json::json!({
+        "success": true,
+        "data": stats,
+    })
 }
 
 // Removed unused JSON helpers (run_portfolio_json, run_actions_list_json, run_actions_apply_json)
@@ -273,32 +292,31 @@ fn test_portfolio_show_json_shape() -> Result<()> {
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("invalid portfolio JSON");
-    let positions = value
-        .get("positions")
-        .and_then(|v| v.as_array())
-        .expect("positions missing or not array");
+    let positions = extract_table_rows(&value, None, Some("avg_cost"))?;
     assert!(!positions.is_empty());
 
     let first = positions[0].as_object().expect("position is not object");
     for key in [
         "ticker",
-        "asset_type",
         "quantity",
-        "average_cost",
+        "avg_cost",
         "total_cost",
-        "current_price",
-        "current_value",
-        "unrealized_pl",
-        "unrealized_pl_pct",
+        "price",
+        "value",
+        "pl",
+        "return_pct",
     ] {
         assert!(first.contains_key(key), "missing key: {}", key);
     }
 
-    for key in ["total_cost", "total_value", "total_pl", "total_pl_pct"] {
+    let summary =
+        find_key_value_block(&value, "Portfolio Summary").expect("missing portfolio summary block");
+    for label in ["Total Cost", "Total Value", "Total P&L", "Total Return"] {
+        let value = kv_value(Some(summary), label);
         assert!(
-            value.get(key).and_then(|v| v.as_str()).is_some(),
-            "missing or non-string total field: {}",
-            key
+            value.is_string() || value.is_number(),
+            "missing or non-value summary field: {}",
+            label
         );
     }
 
@@ -319,18 +337,24 @@ fn test_performance_show_json_shape() -> Result<()> {
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("invalid performance JSON");
-    for key in [
-        "start_date",
-        "end_date",
-        "start_value",
-        "end_value",
-        "total_return",
-        "total_return_pct",
-        "realized_gains",
-        "unrealized_gains",
+    let summary =
+        find_key_value_block(&value, "Summary").expect("missing performance summary block");
+    for label in [
+        "Start Value",
+        "End Value",
+        "Return",
+        "Realized Gains",
+        "Unrealized Gains",
     ] {
-        assert!(value.get(key).is_some(), "missing key: {}", key);
+        let value = kv_value(Some(summary), label);
+        assert!(
+            value.is_string() || value.is_number(),
+            "missing summary field: {}",
+            label
+        );
     }
+    let breakdown = extract_table_rows(&value, Some("By Asset Type"), None)?;
+    assert!(!breakdown.is_empty(), "missing asset breakdown rows");
 
     Ok(())
 }
@@ -418,17 +442,58 @@ fn test_tax_report_json_shape() -> Result<()> {
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("invalid tax JSON");
-    for key in [
-        "year",
-        "annual_total_sales",
-        "annual_total_profit",
-        "annual_total_loss",
-        "annual_total_tax",
-        "monthly_summaries",
-        "income_summary",
-    ] {
-        assert!(value.get(key).is_some(), "missing key: {}", key);
+    let monthly = extract_table_rows(&value, Some("Monthly Summary"), None)?;
+    assert!(!monthly.is_empty(), "monthly summary table missing rows");
+
+    let annual =
+        find_key_value_block(&value, "Annual Totals").expect("missing annual totals block");
+    for label in ["Total Sales", "Total Profit", "Total Loss", "Total Tax"] {
+        let value = kv_value(Some(annual), label);
+        assert!(
+            value.is_string() || value.is_number(),
+            "missing annual totals field: {}",
+            label
+        );
     }
+
+    let income = extract_table_rows(&value, Some("Dividends & JCP Received"), None)?;
+    assert!(!income.is_empty(), "income summary table missing rows");
+
+    Ok(())
+}
+
+#[test]
+fn test_tax_summary_json_shape() -> Result<()> {
+    let home = TempDir::new()?;
+    seed_basic_flow_data(&home, "STOCK")?;
+
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("tax")
+        .arg("summary")
+        .arg("2024")
+        .output()?;
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("invalid tax summary JSON");
+    let monthly = extract_table_rows(&value, None, Some("month"))?;
+    assert!(!monthly.is_empty(), "monthly summary table missing rows");
+
+    let annual = find_key_value_block(&value, "Annual Total").expect("missing annual total block");
+    for label in ["Sales", "Profit", "Loss", "Tax"] {
+        let value = kv_value(Some(annual), label);
+        assert!(
+            value.is_string() || value.is_number(),
+            "missing annual total field: {}",
+            label
+        );
+    }
+
+    let income = extract_table_rows(&value, Some("Dividends & JCP Received"), None);
+    assert!(
+        income.is_err(),
+        "tax summary should not include income summary"
+    );
 
     Ok(())
 }
@@ -447,22 +512,18 @@ fn test_cash_flow_show_json_shape() -> Result<()> {
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("invalid cash-flow JSON");
-    for key in [
-        "from_date",
-        "to_date",
-        "total_in",
-        "total_out",
-        "net_flow",
-        "years",
-    ] {
-        assert!(value.get(key).is_some(), "missing key: {}", key);
-    }
+    let yearly = extract_table_rows(&value, Some("Yearly Breakdown"), None)?;
+    assert!(!yearly.is_empty(), "yearly breakdown table missing rows");
 
-    let years = value
-        .get("years")
-        .and_then(|v| v.as_array())
-        .expect("years missing or not array");
-    assert!(!years.is_empty());
+    let totals = find_key_value_block(&value, "Totals").expect("missing totals block");
+    for label in ["Total In", "Total Out", "Net Flow"] {
+        let value = kv_value(Some(totals), label);
+        assert!(
+            value.is_string() || value.is_number(),
+            "missing totals field: {}",
+            label
+        );
+    }
 
     Ok(())
 }
@@ -627,7 +688,7 @@ fn test_portfolio_filters_by_asset_type_stock() -> Result<()> {
     portfolio_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        .stdout(predicate::str::contains("Stocks (STOCK)"))
         .stdout(predicate::str::contains("PETR4"));
 
     Ok(())
@@ -657,7 +718,7 @@ fn test_portfolio_filters_by_asset_type_fii() -> Result<()> {
     portfolio_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        .stdout(predicate::str::contains("Stocks (STOCK)"))
         // When filtering to a single type, only that section appears
         .stdout(predicate::str::contains("Portfolio Summary"));
 
@@ -687,7 +748,7 @@ fn test_portfolio_uses_short_asset_type_flag() -> Result<()> {
     portfolio_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        .stdout(predicate::str::contains("Stocks (STOCK)"))
         .stdout(predicate::str::contains("PETR4"));
 
     Ok(())
@@ -713,7 +774,7 @@ fn test_portfolio_groups_by_asset_type() -> Result<()> {
         .assert()
         .success()
         // Should have a Stocks group
-        .stdout(predicate::str::contains("## Stocks (STOCK)"))
+        .stdout(predicate::str::contains("Stocks (STOCK)"))
         // Should show subtotals for each group
         .stdout(predicate::str::contains("Subtotal"))
         // Should show overall portfolio summary
@@ -890,7 +951,7 @@ fn test_11_auto_apply_bonus_action_on_import() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
     assert_eq!(cols_after[1], "120.00", "Qty after bonus should be 120");
-    assert_eq!(cols_after[2], "R$ 8,33", "Avg cost should be R$8.33");
+    assert_eq!(cols_after[2], "R$  8,33", "Avg cost should be R$8.33");
     assert_eq!(cols_after[3], "R$ 1.000,00", "Total cost should be R$1000");
 
     Ok(())
@@ -917,6 +978,7 @@ fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
         .success();
 
     // Add bonus on 2025-03-15 (add 20 shares bonus)
+    // Note: Bonus actions automatically create synthetic transactions
     base_cmd(&home)
         .arg("actions")
         .arg("bonus")
@@ -924,14 +986,6 @@ fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
         .arg("TEST11")
         .arg("20")
         .arg("2025-03-15")
-        .assert()
-        .success();
-
-    // Apply corporate actions (only bonus creates transactions)
-    base_cmd(&home)
-        .arg("actions")
-        .arg("apply")
-        .arg("TEST11")
         .assert()
         .success();
 
@@ -1007,7 +1061,7 @@ fn test_11b_split_then_bonus_calculates_correctly() -> Result<()> {
         "Qty after split should be 200"
     );
     assert_eq!(
-        cols_after_split[2], "R$ 5,00",
+        cols_after_split[2], "R$  5,00",
         "Avg cost after split should be R$5.00"
     );
 
@@ -1068,18 +1122,7 @@ fn test_12_desdobro_absolute_adjustment() -> Result<()> {
     );
 
     // Verify corporate action was created via CLI
-    let actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("A1MD34")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(actions_out.status.success(), "actions split list failed");
-    let actions_json: Value =
-        serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("A1MD34"))?;
     assert_eq!(
         actions_array.len(),
         1,
@@ -1202,18 +1245,7 @@ fn test_04_stock_split() -> Result<()> {
     );
 
     // Verify the action exists via CLI
-    let actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("VALE3")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(actions_out.status.success(), "actions split list failed");
-    let actions_json: Value =
-        serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("VALE3"))?;
     assert_eq!(actions_array.len(), 1, "Should have 1 corporate action");
     let qty_str = actions_array[0]
         .get("quantity_adjustment")
@@ -1312,18 +1344,7 @@ fn test_05_reverse_split() -> Result<()> {
         .success();
 
     // Verify action exists via CLI
-    let actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("MGLU3")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(actions_out.status.success(), "actions split list failed");
-    let actions_json: Value =
-        serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("MGLU3"))?;
     let reverse = actions_array
         .iter()
         .find(|row| {
@@ -1447,18 +1468,7 @@ fn test_06_multiple_splits() -> Result<()> {
     assert_eq!(transactions[2].quantity, dec!(200), "Sell: 200 shares");
 
     // Verify corporate actions were created via CLI
-    let actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("ITSA4")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(actions_out.status.success(), "actions split list failed");
-    let actions_json: Value =
-        serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("ITSA4"))?;
     assert_eq!(
         actions_array.len(),
         2,
@@ -1583,8 +1593,8 @@ fn test_06_multiple_splits() -> Result<()> {
     );
     assert_eq!(cols[0], "ITSA4");
     assert_eq!(cols[1], "50.00");
-    assert_eq!(cols[2], "R$ 2,55");
-    assert_eq!(cols[3], "R$ 127,50");
+    assert_eq!(cols[2], "R$  2,55");
+    assert_eq!(cols[3], "R$  127,50");
     assert_eq!(cols[4], "N/A");
     assert_eq!(cols[5], "N/A");
     assert_eq!(cols[6], "N/A");
@@ -1602,55 +1612,28 @@ fn test_06_multiple_splits() -> Result<()> {
     assert!(perf_out.status.success(), "performance show failed");
     let perf_json: Value =
         serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
-    let start_value = perf_json
-        .get("start_value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let end_value = perf_json
-        .get("end_value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_return = perf_json
-        .get("total_return")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    assert_eq!(start_value, "0");
-    assert_eq!(end_value, "127.5");
-    assert_eq!(total_return, "127.5");
+    let start_value = performance_summary_value(&perf_json, "Start Value")?;
+    let end_value = performance_summary_value(&perf_json, "End Value")?;
+    let summary =
+        find_key_value_block(&perf_json, "Summary").expect("missing performance summary block");
+    let mut total_return_value = kv_value(Some(summary), "Total Return");
+    if total_return_value.is_null() {
+        total_return_value = kv_value(Some(summary), "Portfolio Growth");
+    }
+    let total_return = decimal_from_value(&total_return_value)?;
+    assert_eq!(start_value, dec!(0));
+    assert_eq!(end_value, dec!(127.5));
+    assert_eq!(total_return, dec!(127.5));
 
     // Check tax report for 2025 via interest binary JSON output
     let sale_tx = db_txs[2].clone();
     let sale_total = sale_tx.total_cost; // ABS(quantity * price_per_unit)
     let expected_cost_basis = dec!(2.55) * dec!(200);
     let expected_profit = sale_total - expected_cost_basis;
-    let tax_out = base_cmd(&home)
-        .arg("--json")
-        .arg("tax")
-        .arg("report")
-        .arg("2025")
-        .output()
-        .expect("failed to run tax report");
-    assert!(tax_out.status.success(), "tax report failed");
-    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
-    use std::str::FromStr as _;
-    let total_sales_str = tax_json
-        .get("annual_total_sales")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_profit_str = tax_json
-        .get("annual_total_profit")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_loss_str = tax_json
-        .get("annual_total_loss")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_sales_dec =
-        rust_decimal::Decimal::from_str(total_sales_str).expect("sales decimal parse");
-    let total_profit_dec =
-        rust_decimal::Decimal::from_str(total_profit_str).expect("profit decimal parse");
-    let total_loss_dec =
-        rust_decimal::Decimal::from_str(total_loss_str).expect("loss decimal parse");
+    let tax_json = tax_report_json(&home, "2025")?;
+    let total_sales_dec = decimal_from_value(&tax_json["annual_total_sales"])?;
+    let total_profit_dec = decimal_from_value(&tax_json["annual_total_profit"])?;
+    let total_loss_dec = decimal_from_value(&tax_json["annual_total_loss"])?;
     assert_eq!(total_sales_dec, sale_total);
     assert_eq!(total_profit_dec, expected_profit);
     assert_eq!(total_loss_dec, rust_decimal::Decimal::ZERO);
@@ -1678,18 +1661,7 @@ fn test_08_complex_scenario() -> Result<()> {
         "BBAS3T should have the term contract buy"
     );
 
-    let actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("BBAS3")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(actions_out.status.success(), "actions split list failed");
-    let actions_json: Value =
-        serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("BBAS3"))?;
     assert_eq!(actions_array.len(), 1, "Should import 1 split action");
     let qty_str = actions_array[0]
         .get("quantity_adjustment")
@@ -1739,39 +1711,20 @@ fn test_08_complex_scenario() -> Result<()> {
     assert!(perf_out.status.success());
     let perf_json: Value =
         serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
-    let end_value = perf_json
-        .get("end_value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_return = perf_json
-        .get("total_return")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    assert_eq!(end_value, "5519.23076923077");
-    assert_eq!(total_return, "5519.23076923077");
+    let end_value = performance_summary_value(&perf_json, "End Value")?;
+    let summary =
+        find_key_value_block(&perf_json, "Summary").expect("missing performance summary block");
+    let mut total_return_value = kv_value(Some(summary), "Total Return");
+    if total_return_value.is_null() {
+        total_return_value = kv_value(Some(summary), "Portfolio Growth");
+    }
+    let total_return = decimal_from_value(&total_return_value)?;
+    assert_eq!(end_value, dec!(5519.23076923077));
+    assert_eq!(total_return, dec!(5519.23076923077));
 
-    let tax_out = base_cmd(&home)
-        .arg("--json")
-        .arg("tax")
-        .arg("report")
-        .arg("2025")
-        .output()
-        .expect("tax report failed");
-    assert!(tax_out.status.success());
-    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
-    use std::str::FromStr as _;
-    let total_sales = Decimal::from_str(
-        tax_json
-            .get("annual_total_sales")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
-    let total_profit = Decimal::from_str(
-        tax_json
-            .get("annual_total_profit")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
+    let tax_json = tax_report_json(&home, "2025")?;
+    let total_sales = decimal_from_value(&tax_json["annual_total_sales"])?;
+    let total_profit = decimal_from_value(&tax_json["annual_total_profit"])?;
     assert_eq!(total_sales, dec!(17000));
     assert_eq!(
         total_profit,
@@ -1861,8 +1814,8 @@ fn test_07_capital_return() -> Result<()> {
     );
     assert_eq!(cols[0], "MXRF11");
     assert_eq!(cols[1], "30.00");
-    assert_eq!(cols[2], "R$ 9,50");
-    assert_eq!(cols[3], "R$ 285,00");
+    assert_eq!(cols[2], "R$  9,50");
+    assert_eq!(cols[3], "R$  285,00");
 
     // Performance JSON for 2025 should carry the reduced cost basis into end_value
     let perf_out = base_cmd(&home)
@@ -1876,46 +1829,22 @@ fn test_07_capital_return() -> Result<()> {
     assert!(perf_out.status.success(), "performance show failed");
     let perf_json: Value =
         serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
-    let end_value = perf_json
-        .get("end_value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_return = perf_json
-        .get("total_return")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    assert_eq!(end_value, "285");
+    let end_value = performance_summary_value(&perf_json, "End Value")?;
+    let summary =
+        find_key_value_block(&perf_json, "Summary").expect("missing performance summary block");
+    let mut total_return_value = kv_value(Some(summary), "Total Return");
+    if total_return_value.is_null() {
+        total_return_value = kv_value(Some(summary), "Portfolio Growth");
+    }
+    let total_return = decimal_from_value(&total_return_value)?;
+    assert_eq!(end_value, dec!(285));
     assert_eq!(total_return, end_value);
 
     // Tax JSON should use the amortization-adjusted average cost
-    let tax_out = base_cmd(&home)
-        .arg("--json")
-        .arg("tax")
-        .arg("report")
-        .arg("2025")
-        .output()
-        .expect("failed to run tax report");
-    assert!(tax_out.status.success(), "tax report failed");
-    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
-    use std::str::FromStr as _;
-    let total_sales = rust_decimal::Decimal::from_str(
-        tax_json
-            .get("annual_total_sales")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
-    let total_profit = rust_decimal::Decimal::from_str(
-        tax_json
-            .get("annual_total_profit")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
-    let total_loss = rust_decimal::Decimal::from_str(
-        tax_json
-            .get("annual_total_loss")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
+    let tax_json = tax_report_json(&home, "2025")?;
+    let total_sales = decimal_from_value(&tax_json["annual_total_sales"])?;
+    let total_profit = decimal_from_value(&tax_json["annual_total_profit"])?;
+    let total_loss = decimal_from_value(&tax_json["annual_total_loss"])?;
 
     assert_eq!(total_sales, dec!(1320));
     assert_eq!(total_profit, dec!(180));
@@ -2048,23 +1977,7 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
     let simh3_txs = load_transactions(&home, "SIMH3")?;
     assert_eq!(simh3_txs.len(), 2, "SIMH3 should have 2 transactions");
 
-    let simh3_actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("SIMH3")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(
-        simh3_actions_out.status.success(),
-        "actions split list failed"
-    );
-    let simh3_actions_json: Value =
-        serde_json::from_slice(&simh3_actions_out.stdout).expect("invalid actions JSON");
-    let simh3_actions = simh3_actions_json
-        .as_array()
-        .expect("actions JSON is not array");
+    let simh3_actions = list_split_actions_json(&home, Some("SIMH3"))?;
     assert_eq!(simh3_actions.len(), 1, "SIMH3 should have 1 split");
     let qty_str = simh3_actions[0]
         .get("quantity_adjustment")
@@ -2104,17 +2017,17 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
     // Timeline verification (following test_06 pattern with detailed checks)
     // 1. After rename, before split (2021-08-11): 1400 carryover + 2600 buy = 4000 shares
     //    Avg cost: (1400*10 + 2600*8) / 4000 = (14000 + 20800) / 4000 = 8.70
-    check_portfolio("2021-08-11", "4000.00", "R$ 8,70", "R$ 34.800,00")?;
+    check_portfolio("2021-08-11", "4000.00", "R$  8,70", "R$ 34.800,00")?;
 
     // 2. After split (2021-08-13): 4000 -> 7000 shares (+ 3000 from split)
     //    Avg cost: 34800 / 7000 = 4.97...
-    check_portfolio("2021-08-13", "7000.00", "R$ 4,97", "R$ 34.800,00")?;
+    check_portfolio("2021-08-13", "7000.00", "R$  4,97", "R$ 34.800,00")?;
 
     // 3. Final position (2022-01-20): 7000 + 27500 = 34500 shares
     //    THIS IS THE CRITICAL TEST - ensures carryover wasn't double-adjusted
     //    Total cost: 34800 + 192500 = 227300
     //    Avg cost: 227300 / 34500 = 6.59...
-    check_portfolio("2022-01-20", "34500.00", "R$ 6,58", "R$ 227.300,00")?;
+    check_portfolio("2022-01-20", "34500.00", "R$  6,58", "R$ 227.300,00")?;
 
     // Verify portfolio CLI output shows correct final position (like test_06)
     let mut portfolio_cmd = base_cmd(&home);
@@ -2143,7 +2056,7 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
         cols[1], "34500.00",
         "Final quantity should be 34500 (NOT 37500 from double-adjustment bug)"
     );
-    assert_eq!(cols[2], "R$ 6,58");
+    assert_eq!(cols[2], "R$  6,58");
     assert_eq!(cols[3], "R$ 227.300,00");
 
     // Verify performance and tax outputs (like test_06)
@@ -2160,12 +2073,7 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
     assert!(perf_out.status.success(), "performance show failed");
     let perf_json: Value =
         serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
-    let end_value = perf_json
-        .get("end_value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-
-    let end_value_dec = Decimal::from_str(end_value).expect("end_value decimal parse");
+    let end_value_dec = performance_summary_value(&perf_json, "End Value")?;
     assert_eq!(
         end_value_dec, expected_total_cost,
         "Performance end value should match total cost basis"
@@ -2212,18 +2120,7 @@ fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
     let transactions = load_transactions(&home, "KPCA3")?;
     assert_eq!(transactions.len(), 5, "2 buys + 1 bonus + 2 sells");
 
-    let actions_out = base_cmd(&home)
-        .arg("--json")
-        .arg("actions")
-        .arg("split")
-        .arg("list")
-        .arg("KPCA3")
-        .output()
-        .expect("failed to run actions split list");
-    assert!(actions_out.status.success(), "actions split list failed");
-    let actions_json: Value =
-        serde_json::from_slice(&actions_out.stdout).expect("invalid actions JSON");
-    let actions_array = actions_json.as_array().expect("actions JSON is not array");
+    let actions_array = list_split_actions_json(&home, Some("KPCA3"))?;
     assert_eq!(
         actions_array.len(),
         2,
@@ -2278,25 +2175,25 @@ fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
         };
 
     // After first buy (15/01/2025): 1000 @ 2
-    check_portfolio("2025-01-16", "1000.00", "R$ 2,00", "R$ 2.000,00")?;
+    check_portfolio("2025-01-16", "1000.00", "R$  2,00", "R$ 2.000,00")?;
 
     // After split (10/02/2025): 2000 @ 1
-    check_portfolio("2025-02-11", "2000.00", "R$ 1,00", "R$ 2.000,00")?;
+    check_portfolio("2025-02-11", "2000.00", "R$  1,00", "R$ 2.000,00")?;
 
     // After second buy (01/03/2025): 2800 @ 0.97142857...
-    check_portfolio("2025-03-02", "2800.00", "R$ 0,97", "R$ 2.720,00")?;
+    check_portfolio("2025-03-02", "2800.00", "R$  0,97", "R$ 2.720,00")?;
 
     // After grupamento (15/03/2025): 400 @ 6.8
-    check_portfolio("2025-03-16", "400.00", "R$ 6,80", "R$ 2.720,00")?;
+    check_portfolio("2025-03-16", "400.00", "R$  6,80", "R$ 2.720,00")?;
 
     // After first sell (01/04/2025): 200 @ 6.8
-    check_portfolio("2025-04-02", "200.00", "R$ 6,80", "R$ 1.360,00")?;
+    check_portfolio("2025-04-02", "200.00", "R$  6,80", "R$ 1.360,00")?;
 
     // After bonus (20/04/2025): 560 @ 2.428571...
-    check_portfolio("2025-04-21", "560.00", "R$ 2,42", "R$ 1.360,00")?;
+    check_portfolio("2025-04-21", "560.00", "R$  2,42", "R$ 1.360,00")?;
 
     // After second sell (10/05/2025): 160 @ 2.428571...
-    check_portfolio("2025-05-11", "160.00", "R$ 2,42", "R$ 388,57")?;
+    check_portfolio("2025-05-11", "160.00", "R$  2,42", "R$  388,57")?;
 
     let perf_out = base_cmd(&home)
         .arg("--json")
@@ -2308,45 +2205,21 @@ fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
     assert!(perf_out.status.success());
     let perf_json: Value =
         serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
-    let end_value = perf_json
-        .get("end_value")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let total_return = perf_json
-        .get("total_return")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    assert_eq!(end_value, "388.5714285714286");
-    assert_eq!(total_return, "388.5714285714286");
+    let end_value = performance_summary_value(&perf_json, "End Value")?;
+    let summary =
+        find_key_value_block(&perf_json, "Summary").expect("missing performance summary block");
+    let mut total_return_value = kv_value(Some(summary), "Total Return");
+    if total_return_value.is_null() {
+        total_return_value = kv_value(Some(summary), "Portfolio Growth");
+    }
+    let total_return = decimal_from_value(&total_return_value)?;
+    assert_eq!(end_value, dec!(388.5714285714286));
+    assert_eq!(total_return, dec!(388.5714285714286));
 
-    let tax_out = base_cmd(&home)
-        .arg("--json")
-        .arg("tax")
-        .arg("report")
-        .arg("2025")
-        .output()
-        .expect("tax report failed");
-    assert!(tax_out.status.success());
-    let tax_json: Value = serde_json::from_slice(&tax_out.stdout).expect("invalid tax JSON");
-    use std::str::FromStr as _;
-    let total_sales = Decimal::from_str(
-        tax_json
-            .get("annual_total_sales")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
-    let total_profit = Decimal::from_str(
-        tax_json
-            .get("annual_total_profit")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
-    let total_loss = Decimal::from_str(
-        tax_json
-            .get("annual_total_loss")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0"),
-    )?;
+    let tax_json = tax_report_json(&home, "2025")?;
+    let total_sales = decimal_from_value(&tax_json["annual_total_sales"])?;
+    let total_profit = decimal_from_value(&tax_json["annual_total_profit"])?;
+    let total_loss = decimal_from_value(&tax_json["annual_total_loss"])?;
     assert_eq!(total_sales, dec!(2300));
     assert_eq!(
         total_profit,

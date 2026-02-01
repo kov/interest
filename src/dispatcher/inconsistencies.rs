@@ -1,10 +1,11 @@
-use crate::utils::format_currency;
-use crate::{db, reports};
 use anyhow::Result;
 use rust_decimal::Decimal;
 use serde_json::{Map, Value};
 use std::io::{stdin, stdout, BufRead, Write};
 use std::str::FromStr;
+
+use crate::utils::format_currency;
+use crate::{db, formatters, reports};
 
 pub async fn dispatch_inconsistencies(
     action: &crate::cli::InconsistenciesCommands,
@@ -41,37 +42,11 @@ pub async fn dispatch_inconsistencies(
             };
             let issues = db::list_inconsistencies(&conn, status, issue_type, asset.as_deref())?;
 
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&issues)?);
-                return Ok(());
-            }
-
-            if issues.is_empty() {
-                println!("No inconsistencies found.");
-                return Ok(());
-            }
-
-            for issue in issues {
-                let qty = issue
-                    .quantity
-                    .as_ref()
-                    .map(|q| q.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                let date = issue
-                    .trade_date
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                let ticker = issue.ticker.clone().unwrap_or_else(|| "-".to_string());
-                println!(
-                    "#{:<5} {:<9} {:<24} {:<8} {:<10} qty={}",
-                    issue.id.unwrap_or(0),
-                    issue.status.as_str(),
-                    issue.issue_type.as_str(),
-                    ticker,
-                    date,
-                    qty
-                );
-            }
+            let mode = formatters::OutputMode::from_json_flag(json_output);
+            println!(
+                "{}",
+                formatters::inconsistencies::format_inconsistencies_list(&issues, mode)
+            );
             Ok(())
         }
         crate::cli::InconsistenciesCommands::Show { id } => {
@@ -231,11 +206,11 @@ pub async fn dispatch_inconsistencies(
                 apply_inconsistency_resolution(&conn, issue, &resolution)?;
                 resolved_count += 1;
 
-                if json_output {
-                    println!("{}", serde_json::json!({"resolved": issue_id}));
-                } else {
-                    println!("Resolved inconsistency #{}\n", issue_id);
-                }
+                let mode = formatters::OutputMode::from_json_flag(json_output);
+                println!(
+                    "{}",
+                    formatters::inconsistencies::format_resolve(issue_id, mode)
+                );
             }
 
             if id.is_none() && total > 1 && !json_output {
