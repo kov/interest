@@ -91,7 +91,11 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
         },
         KeyValueRow {
             label: "Return".to_string(),
-            value: Value::Percent(total_return_pct(report.end_value, report.unrealized_gains)),
+            value: Value::Percent(total_return_pct(
+                report.end_value,
+                report.unrealized_gains,
+                report.realized_gains,
+            )),
         },
         KeyValueRow {
             label: "Time-weighted".to_string(),
@@ -176,9 +180,13 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
     }
 }
 
-fn total_return_pct(end_value: Decimal, unrealized_gains: Decimal) -> Decimal {
+fn total_return_pct(
+    end_value: Decimal,
+    unrealized_gains: Decimal,
+    realized_gains: Decimal,
+) -> Decimal {
     if end_value > Decimal::ZERO {
-        (unrealized_gains / end_value) * Decimal::from(100)
+        ((unrealized_gains + realized_gains) / (end_value - unrealized_gains)) * Decimal::from(100)
     } else {
         Decimal::ZERO
     }

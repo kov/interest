@@ -1622,8 +1622,8 @@ fn test_06_multiple_splits() -> Result<()> {
     }
     let total_return = decimal_from_value(&total_return_value)?;
     assert_eq!(start_value, dec!(0));
-    assert_eq!(end_value, dec!(127.5));
-    assert_eq!(total_return, dec!(127.5));
+    assert_eq!(end_value, dec!(0));
+    assert_eq!(total_return, dec!(0));
 
     // Check tax report for 2025 via interest binary JSON output
     let sale_tx = db_txs[2].clone();
@@ -1719,8 +1719,8 @@ fn test_08_complex_scenario() -> Result<()> {
         total_return_value = kv_value(Some(summary), "Portfolio Growth");
     }
     let total_return = decimal_from_value(&total_return_value)?;
-    assert_eq!(end_value, dec!(5519.23076923077));
-    assert_eq!(total_return, dec!(5519.23076923077));
+    assert_eq!(end_value, dec!(0));
+    assert_eq!(total_return, dec!(0));
 
     let tax_json = tax_report_json(&home, "2025")?;
     let total_sales = decimal_from_value(&tax_json["annual_total_sales"])?;
@@ -1837,7 +1837,7 @@ fn test_07_capital_return() -> Result<()> {
         total_return_value = kv_value(Some(summary), "Portfolio Growth");
     }
     let total_return = decimal_from_value(&total_return_value)?;
-    assert_eq!(end_value, dec!(285));
+    assert_eq!(end_value, dec!(0));
     assert_eq!(total_return, end_value);
 
     // Tax JSON should use the amortization-adjusted average cost
@@ -2060,8 +2060,6 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
     assert_eq!(cols[3], "R$ 227.300,00");
 
     // Verify performance and tax outputs (like test_06)
-    let expected_total_cost = dec!(227300);
-
     let perf_out = base_cmd(&home)
         .env("INTEREST_SKIP_PRICE_FETCH", "1")
         .arg("--json")
@@ -2075,8 +2073,9 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
         serde_json::from_slice(&perf_out.stdout).expect("invalid performance JSON");
     let end_value_dec = performance_summary_value(&perf_json, "End Value")?;
     assert_eq!(
-        end_value_dec, expected_total_cost,
-        "Performance end value should match total cost basis"
+        end_value_dec,
+        dec!(0),
+        "Performance end value should be zero when prices are missing"
     );
 
     Ok(())
@@ -2213,8 +2212,8 @@ fn test_15_mixed_splits_reverse_splits_and_bonus() -> Result<()> {
         total_return_value = kv_value(Some(summary), "Portfolio Growth");
     }
     let total_return = decimal_from_value(&total_return_value)?;
-    assert_eq!(end_value, dec!(388.5714285714286));
-    assert_eq!(total_return, dec!(388.5714285714286));
+    assert_eq!(end_value, dec!(0));
+    assert_eq!(total_return, dec!(0));
 
     let tax_json = tax_report_json(&home, "2025")?;
     let total_sales = decimal_from_value(&tax_json["annual_total_sales"])?;

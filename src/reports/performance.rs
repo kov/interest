@@ -5,9 +5,11 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use crate::db::{self, AssetType, Transaction, TransactionType};
-use crate::reports::aggregation::{aggregate_positions_by_asset_type, AssetTypeTotals};
+use crate::reports::aggregation::{
+    aggregate_positions_by_asset_type, normalize_positions_with_prices, AssetTypeTotals,
+};
 use crate::reports::portfolio::{
-    calculate_portfolio_at_date, get_valid_snapshot, save_portfolio_snapshot,
+    calculate_portfolio_at_date, get_valid_snapshot, save_portfolio_snapshot, PortfolioReport,
 };
 use crate::tax::cost_basis::AverageCostMatcher;
 
@@ -104,7 +106,7 @@ pub fn get_period_dates(
             if let Some(c) = conn {
                 let mut stmt = c.prepare("SELECT MIN(trade_date) FROM transactions")?;
                 let min_date: Option<NaiveDate> = stmt.query_row([], |row| row.get(0)).ok();
-                let start = min_date.unwrap_or_else(|| {
+                let start = min_date.and_then(|d| d.pred_opt()).unwrap_or_else(|| {
                     today
                         .checked_sub_days(chrono::Days::new(365 * 20))
                         .unwrap_or(today)
@@ -154,10 +156,13 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         None => calculate_portfolio_at_date(conn, end_date, None)?,
     };
 
+    let start_snapshot = normalize_snapshot_prices(conn, start_date, start_snapshot)?;
+    let end_snapshot = normalize_snapshot_prices(conn, end_date, end_snapshot)?;
+
     // Aggregate values
     let start_value = start_snapshot.total_value;
     let end_value = end_snapshot.total_value;
-    let total_return = end_value - start_value; // Absolute return in currency
+    let portfolio_growth = end_value - start_value; // Absolute return in currency
 
     // Extract cash flows in period
     let cash_flows = extract_cash_flows(conn, start_date, end_date)?;
@@ -177,7 +182,7 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
     } else {
         // Simple percentage return when no cash flows
         if start_value > Decimal::ZERO {
-            (total_return / start_value) * Decimal::from(100)
+            (portfolio_growth / start_value) * Decimal::from(100)
         } else {
             Decimal::ZERO
         }
@@ -188,6 +193,9 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         .positions
         .iter()
         .map(|p| {
+            if p.current_price.is_none() {
+                return Decimal::ZERO;
+            }
             p.unrealized_pl.unwrap_or_else(|| {
                 // Fallback calculation if unrealized_pl not set
                 let market_val = p.quantity * p.current_price.unwrap_or(p.average_cost);
@@ -211,12 +219,35 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         end_date,
         start_value,
         end_value,
-        total_return,
+        total_return: portfolio_growth,
         time_weighted_return: twr,
         realized_gains,
         unrealized_gains: unrealized_sum,
         asset_breakdown: breakdown,
         cash_flows: cash_flow_summary,
+    })
+}
+
+fn normalize_snapshot_prices(
+    conn: &Connection,
+    date: NaiveDate,
+    report: PortfolioReport,
+) -> Result<PortfolioReport> {
+    let (positions, total_cost, total_value) =
+        normalize_positions_with_prices(conn, date, report.positions)?;
+    let total_pl = total_value - total_cost;
+    let total_pl_pct = if total_cost > Decimal::ZERO {
+        (total_pl / total_cost) * Decimal::from(100)
+    } else {
+        Decimal::ZERO
+    };
+
+    Ok(PortfolioReport {
+        positions,
+        total_cost,
+        total_value,
+        total_pl,
+        total_pl_pct,
     })
 }
 
@@ -607,13 +638,12 @@ pub fn calculate_time_weighted_return(
     cash_flows: &[CashFlow],
     snapshots: &HashMap<NaiveDate, Decimal>,
 ) -> Result<Decimal> {
-    if start_value <= Decimal::ZERO {
-        return Ok(Decimal::ZERO);
-    }
-
     // If no cash flows, simple return
     if cash_flows.is_empty() {
-        return Ok(((end_value - start_value) / start_value) * Decimal::from(100));
+        if start_value > Decimal::ZERO {
+            return Ok(((end_value - start_value) / start_value) * Decimal::from(100));
+        }
+        return Ok(Decimal::ZERO);
     }
 
     // Group flows by date and net them (contributions - withdrawals)
@@ -642,6 +672,11 @@ pub fn calculate_time_weighted_return(
         if prev_value > Decimal::ZERO {
             let sub_return = (value_before_flow / prev_value) - Decimal::ONE;
             cumulative_factor *= Decimal::ONE + sub_return;
+        } else {
+            // If the portfolio wasn't funded yet, start tracking after this flow.
+            let net_flow = daily_flows.get(&date).copied().unwrap_or(Decimal::ZERO);
+            prev_value = value_before_flow + net_flow;
+            continue;
         }
 
         // Adjust for the flow to get starting value for next period
