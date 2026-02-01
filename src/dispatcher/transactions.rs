@@ -1,10 +1,10 @@
 use anyhow::Result;
 
-use crate::formatters;
+use crate::{formatters, options};
 
 pub async fn dispatch_transactions(
     action: &crate::cli::TransactionCommands,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     match action {
         crate::cli::TransactionCommands::Add {
@@ -26,11 +26,12 @@ pub async fn dispatch_transactions(
                 fees,
                 *day_trade,
                 notes.as_deref(),
+                options,
             )
             .await
         }
         crate::cli::TransactionCommands::List { ticker } => {
-            dispatch_transactions_list(ticker.as_deref(), json_output).await
+            dispatch_transactions_list(ticker.as_deref(), options).await
         }
     }
 }
@@ -45,6 +46,7 @@ async fn dispatch_transaction_add(
     fees_str: &str,
     day_trade: bool,
     notes: Option<&str>,
+    options: options::OutputOptions,
 ) -> Result<()> {
     use anyhow::Context;
     use chrono::NaiveDate;
@@ -131,13 +133,17 @@ async fn dispatch_transaction_add(
             fees,
             total_cost,
             notes,
+            options,
         )
     );
 
     Ok(())
 }
 
-async fn dispatch_transactions_list(ticker: Option<&str>, json_output: bool) -> Result<()> {
+async fn dispatch_transactions_list(
+    ticker: Option<&str>,
+    options: options::OutputOptions,
+) -> Result<()> {
     crate::db::init_database(None)?;
     let conn = crate::db::open_db(None)?;
 
@@ -198,10 +204,9 @@ async fn dispatch_transactions_list(ticker: Option<&str>, json_output: bool) -> 
         }
     }
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::transactions::format_transactions_list(&rows, mode)
+        formatters::transactions::format_transactions_list(&rows, options)
     );
 
     Ok(())

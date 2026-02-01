@@ -1,20 +1,20 @@
 use crate::reports::cashflow;
-use crate::{db, formatters, reports};
+use crate::{db, formatters, options, reports};
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 
 pub async fn dispatch_cashflow(
     action: &crate::cli::CashFlowCommands,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     match action {
         crate::cli::CashFlowCommands::Show { period } => {
             let period_str = period.as_deref().unwrap_or("ALL");
-            dispatch_cashflow_show(period_str, json_output).await
+            dispatch_cashflow_show(period_str, options).await
         }
         crate::cli::CashFlowCommands::Stats { period } => {
             let period_str = period.as_deref().unwrap_or("ALL");
-            dispatch_cashflow_stats(period_str, json_output).await
+            dispatch_cashflow_stats(period_str, options).await
         }
     }
 }
@@ -56,7 +56,7 @@ fn parse_period_string(period: &str) -> Result<reports::Period> {
     }
 }
 
-async fn dispatch_cashflow_show(period_str: &str, json_output: bool) -> Result<()> {
+async fn dispatch_cashflow_show(period_str: &str, options: options::OutputOptions) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
@@ -71,33 +71,31 @@ async fn dispatch_cashflow_show(period_str: &str, json_output: bool) -> Result<(
 
     let report = cashflow::calculate_cash_flow_report(&conn, from_date, to_date)?;
 
-    if report.years.is_empty() && !json_output {
+    if report.years.is_empty() && !options.is_json() {
         println!("\nℹ No cash flow data found for the selected period.\n");
         return Ok(());
     }
 
     // Print cash flow output (JSON or table)
     // Even if there are no years, output valid JSON for json_output mode
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-
     // For table output, check if we should show monthly breakdown
-    if is_single_year && mode == formatters::OutputMode::Table {
+    if is_single_year && !options.is_json() {
         let entries = cashflow::cash_flow_entries(&conn, from_date, to_date)?;
         println!(
             "{}",
-            formatters::cashflow::format_cashflow_show_monthly(&report, &entries, mode)
+            formatters::cashflow::format_cashflow_show_monthly(&report, &entries, options)
         );
     } else {
         println!(
             "{}",
-            formatters::cashflow::format_cashflow_show(&report, mode)
+            formatters::cashflow::format_cashflow_show(&report, options)
         );
     }
 
     Ok(())
 }
 
-async fn dispatch_cashflow_stats(period_str: &str, json_output: bool) -> Result<()> {
+async fn dispatch_cashflow_stats(period_str: &str, options: options::OutputOptions) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
@@ -111,10 +109,9 @@ async fn dispatch_cashflow_stats(period_str: &str, json_output: bool) -> Result<
     let to_str = to_date.format("%Y-%m-%d").to_string();
 
     // Print cash flow stats output (JSON or table)
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::cashflow::format_cashflow_stats(&stats, &from_str, &to_str, mode)
+        formatters::cashflow::format_cashflow_stats(&stats, &from_str, &to_str, options)
     );
 
     Ok(())

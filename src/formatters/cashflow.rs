@@ -1,7 +1,7 @@
 //! Cashflow report formatting (JSON and terminal table)
 
 use crate::db::AssetType;
-use crate::formatters::OutputMode;
+use crate::formatters::OutputOptions;
 use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, Value, ValueKind,
 };
@@ -18,9 +18,9 @@ type MonthlyBreakdown = HashMap<(i32, u32), HashMap<AssetType, (Decimal, Decimal
 // =============================================================================
 
 /// Format cash flow report (standard year-by-year breakdown)
-pub fn format_cashflow_show(report: &CashFlowReport, mode: OutputMode) -> String {
+pub fn format_cashflow_show(report: &CashFlowReport, options: OutputOptions) -> String {
     let document = build_cashflow_show_document(report);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format cash flow with monthly breakdown (single-year periods only, table mode)
@@ -28,10 +28,10 @@ pub fn format_cashflow_show(report: &CashFlowReport, mode: OutputMode) -> String
 pub fn format_cashflow_show_monthly(
     report: &CashFlowReport,
     entries: &[CashFlowEntry],
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_cashflow_monthly_document(report, entries);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format cash flow stats
@@ -39,10 +39,10 @@ pub fn format_cashflow_stats(
     stats: &CashFlowStats,
     from_date: &str,
     to_date: &str,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_cashflow_stats_document(stats, from_date, to_date);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 // Internal implementations below
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn test_cashflow_show_json_decimals_as_strings() {
         let report = create_test_report();
-        let json_str = format_cashflow_show(&report, OutputMode::Json);
+        let json_str = format_cashflow_show(&report, OutputOptions::from_flags(true, false));
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -558,7 +558,12 @@ mod tests {
     #[test]
     fn test_cashflow_stats_json_decimals_as_strings() {
         let stats = create_test_stats();
-        let json_str = format_cashflow_stats(&stats, "2024-01-01", "2024-12-31", OutputMode::Json);
+        let json_str = format_cashflow_stats(
+            &stats,
+            "2024-01-01",
+            "2024-12-31",
+            OutputOptions::from_flags(true, false),
+        );
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -617,7 +622,7 @@ mod tests {
     #[test]
     fn test_cashflow_show_table_has_key_sections() {
         let report = create_test_report();
-        let output = format_cashflow_show(&report, OutputMode::Table);
+        let output = format_cashflow_show(&report, OutputOptions::from_flags(false, false));
 
         assert!(output.contains("Cash Flow Summary"));
         assert!(output.contains("Yearly Breakdown"));
@@ -628,7 +633,12 @@ mod tests {
     #[test]
     fn test_cashflow_stats_table_has_key_sections() {
         let stats = create_test_stats();
-        let output = format_cashflow_stats(&stats, "2024-01-01", "2024-12-31", OutputMode::Table);
+        let output = format_cashflow_stats(
+            &stats,
+            "2024-01-01",
+            "2024-12-31",
+            OutputOptions::from_flags(false, false),
+        );
 
         assert!(output.contains("Cash Flow Statistics"));
         assert!(output.contains("Averages"));

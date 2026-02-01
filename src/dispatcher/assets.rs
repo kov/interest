@@ -1,34 +1,37 @@
 use anyhow::{Context, Result};
 use std::io::{stdin, stdout, Write};
 
-use crate::{db, formatters, reports, scraping};
+use crate::{db, formatters, options, reports, scraping};
 
-pub async fn dispatch_assets(action: &crate::cli::AssetsCommands, json_output: bool) -> Result<()> {
+pub async fn dispatch_assets(
+    action: &crate::cli::AssetsCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     match action {
         crate::cli::AssetsCommands::List { asset_type } => {
-            list_assets(asset_type.as_deref(), json_output)
+            list_assets(asset_type.as_deref(), options)
         }
-        crate::cli::AssetsCommands::Show { ticker } => show_asset(ticker, json_output),
+        crate::cli::AssetsCommands::Show { ticker } => show_asset(ticker, options),
         crate::cli::AssetsCommands::Add {
             ticker,
             asset_type,
             name,
-        } => add_asset(ticker, asset_type.as_deref(), name.as_deref(), json_output),
+        } => add_asset(ticker, asset_type.as_deref(), name.as_deref(), options),
         crate::cli::AssetsCommands::SetType { ticker, asset_type } => {
-            set_asset_type(ticker, asset_type, json_output)
+            set_asset_type(ticker, asset_type, options)
         }
         crate::cli::AssetsCommands::SetName { ticker, name } => {
-            set_asset_name(ticker, name, json_output)
+            set_asset_name(ticker, name, options)
         }
         crate::cli::AssetsCommands::Rename {
             old_ticker,
             new_ticker,
-        } => rename_asset(old_ticker, new_ticker, json_output),
-        crate::cli::AssetsCommands::Remove { ticker } => remove_asset(ticker, json_output),
+        } => rename_asset(old_ticker, new_ticker, options),
+        crate::cli::AssetsCommands::Remove { ticker } => remove_asset(ticker, options),
         crate::cli::AssetsCommands::SyncMaisRetorno {
             asset_type,
             dry_run,
-        } => sync_maisretorno(asset_type.as_deref(), *dry_run, json_output).await,
+        } => sync_maisretorno(asset_type.as_deref(), *dry_run, options).await,
     }
 }
 
@@ -37,7 +40,7 @@ fn open_conn() -> Result<rusqlite::Connection> {
     db::open_db(None)
 }
 
-fn list_assets(asset_type: Option<&str>, json_output: bool) -> Result<()> {
+fn list_assets(asset_type: Option<&str>, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     let assets = if let Some(type_str) = asset_type {
         let parsed = parse_asset_type(type_str)?;
@@ -46,21 +49,22 @@ fn list_assets(asset_type: Option<&str>, json_output: bool) -> Result<()> {
         db::get_all_assets(&conn)?
     };
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    println!("{}", formatters::assets::format_assets_list(&assets, mode));
+    println!(
+        "{}",
+        formatters::assets::format_assets_list(&assets, options)
+    );
 
     Ok(())
 }
 
-fn show_asset(ticker: &str, json_output: bool) -> Result<()> {
+fn show_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Ticker not found in assets")?;
     let tx_count = db::count_transactions_for_asset(&conn, &asset.ticker)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_asset_show(&asset, tx_count, mode)
+        formatters::assets::format_asset_show(&asset, tx_count, options)
     );
 
     Ok(())
@@ -70,7 +74,7 @@ fn add_asset(
     ticker: &str,
     asset_type: Option<&str>,
     name: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     let conn = open_conn()?;
     if db::asset_exists(&conn, ticker)? {
@@ -85,43 +89,40 @@ fn add_asset(
     };
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Asset not found after insert")?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_asset_add(asset_id, &asset, mode)
+        formatters::assets::format_asset_add(asset_id, &asset, options)
     );
 
     Ok(())
 }
 
-fn set_asset_type(ticker: &str, asset_type: &str, json_output: bool) -> Result<()> {
+fn set_asset_type(ticker: &str, asset_type: &str, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     let parsed = parse_asset_type(asset_type)?;
     db::update_asset_type(&conn, ticker, &parsed)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_asset_set_type(ticker, &parsed, mode)
+        formatters::assets::format_asset_set_type(ticker, &parsed, options)
     );
 
     Ok(())
 }
 
-fn set_asset_name(ticker: &str, name: &str, json_output: bool) -> Result<()> {
+fn set_asset_name(ticker: &str, name: &str, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     db::update_asset_name(&conn, ticker, name)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_asset_set_name(ticker, name, mode)
+        formatters::assets::format_asset_set_name(ticker, name, options)
     );
 
     Ok(())
 }
 
-fn rename_asset(old_ticker: &str, new_ticker: &str, json_output: bool) -> Result<()> {
+fn rename_asset(old_ticker: &str, new_ticker: &str, options: options::OutputOptions) -> Result<()> {
     println!(
         "Are you sure you want to rename {} to {}?",
         old_ticker, new_ticker
@@ -135,16 +136,15 @@ fn rename_asset(old_ticker: &str, new_ticker: &str, json_output: bool) -> Result
     let conn = open_conn()?;
     db::update_asset_ticker(&conn, old_ticker, new_ticker)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_asset_rename(old_ticker, new_ticker, mode)
+        formatters::assets::format_asset_rename(old_ticker, new_ticker, options)
     );
 
     Ok(())
 }
 
-fn remove_asset(ticker: &str, json_output: bool) -> Result<()> {
+fn remove_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Ticker not found in assets")?;
     let tx_count = db::count_transactions_for_asset(&conn, &asset.ticker)?;
@@ -168,10 +168,9 @@ fn remove_asset(ticker: &str, json_output: bool) -> Result<()> {
         reports::invalidate_snapshots_after(&conn, date)?;
     }
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_asset_remove(&asset.ticker, mode)
+        formatters::assets::format_asset_remove(&asset.ticker, options)
     );
 
     Ok(())
@@ -180,7 +179,7 @@ fn remove_asset(ticker: &str, json_output: bool) -> Result<()> {
 async fn sync_maisretorno(
     asset_type: Option<&str>,
     dry_run: bool,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     let conn = open_conn()?;
     let parsed_type = asset_type.map(parse_asset_type).transpose()?;
@@ -189,7 +188,7 @@ async fn sync_maisretorno(
         anyhow::bail!("No Mais Retorno sources available for this asset type");
     }
 
-    let printer = crate::ui::progress::ProgressPrinter::new(json_output);
+    let printer = crate::ui::progress::ProgressPrinter::new(options);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ui::progress::ProgressEvent>();
     let progress_handle = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -199,14 +198,13 @@ async fn sync_maisretorno(
 
     let stats = scraping::maisretorno::sync_registry(&conn, &sources, dry_run, Some(tx)).await?;
     let _ = progress_handle.await;
-    if !json_output {
+    if !options.is_json() {
         crate::ui::progress::clear_progress_line();
     }
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::assets::format_sync_maisretorno(&sources, &stats, mode)
+        formatters::assets::format_sync_maisretorno(&sources, &stats, options)
     );
 
     Ok(())

@@ -1,4 +1,4 @@
-use crate::{db, formatters, reports};
+use crate::{db, formatters, options, reports};
 use anyhow::Result;
 use colored::Colorize;
 
@@ -6,7 +6,7 @@ pub async fn dispatch_import(
     file: &str,
     dry_run: bool,
     force_reimport: bool,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     use crate::importers::{self, ImportResult};
 
@@ -22,7 +22,7 @@ pub async fn dispatch_import(
 
     match import_result {
         ImportResult::Cei(raw_transactions) => {
-            if !json_output {
+            if !options.is_json() {
                 println!(
                     "\n{} Found {} transactions\n",
                     "✓".green().bold(),
@@ -30,16 +30,16 @@ pub async fn dispatch_import(
                 );
             }
 
-            if !json_output {
+            if !options.is_json() {
                 if let Some(table) =
-                    formatters::imports::format_cei_preview_table(&raw_transactions)
+                    formatters::imports::format_cei_preview_table(&raw_transactions, options)
                 {
                     println!("{}", table);
                 }
             }
 
             if dry_run {
-                if !json_output {
+                if !options.is_json() {
                     println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
                 }
                 return Ok(());
@@ -50,7 +50,7 @@ pub async fn dispatch_import(
 
             let stats = crate::dispatcher::imports_helpers::import_cei(&conn, &raw_transactions)?;
 
-            if !json_output {
+            if !options.is_json() {
                 println!("\n{} Import complete!", "✓".green().bold());
                 println!("  Imported: {}", stats.imported.to_string().green());
                 if stats.skipped_old > 0 {
@@ -68,7 +68,7 @@ pub async fn dispatch_import(
         }
 
         ImportResult::Movimentacao(entries) => {
-            if !json_output {
+            if !options.is_json() {
                 println!(
                     "\n{} Found {} movimentacao entries\n",
                     "✓".green().bold(),
@@ -86,7 +86,7 @@ pub async fn dispatch_import(
                 .filter(|e| !e.is_trade() && !e.is_corporate_action() && !e.is_income_event())
                 .collect();
 
-            if !json_output {
+            if !options.is_json() {
                 println!("{} Summary:", "📊".cyan().bold());
                 println!(
                     "  {} Trades (buy/sell/term)",
@@ -105,18 +105,18 @@ pub async fn dispatch_import(
             }
 
             // Show preview of trades
-            if !json_output && !trades.is_empty() {
+            if !options.is_json() && !trades.is_empty() {
                 println!("{} Sample trades:", "💰".cyan().bold());
                 let cloned_trades: Vec<_> = trades.iter().map(|e| (*e).clone()).collect();
                 if let Some(table) =
-                    formatters::imports::format_movimentacao_preview_table(&cloned_trades)
+                    formatters::imports::format_movimentacao_preview_table(&cloned_trades, options)
                 {
                     println!("{}\n", table);
                 }
             }
 
             // Show preview of corporate actions
-            if !json_output && !corporate_actions.is_empty() {
+            if !options.is_json() && !corporate_actions.is_empty() {
                 println!("{} Corporate actions:", "🏢".cyan().bold());
 
                 for action in corporate_actions.iter().take(5) {
@@ -131,13 +131,13 @@ pub async fn dispatch_import(
             }
 
             // Show preview of income events
-            if !json_output && !income_events.is_empty() {
+            if !options.is_json() && !income_events.is_empty() {
                 println!("{} Income events:", "💵".cyan().bold());
 
                 for event in income_events.iter().take(5) {
                     let value = event
                         .operation_value
-                        .map(crate::utils::format_currency)
+                        .map(|amount| crate::utils::format_currency(amount, options))
                         .unwrap_or_else(|| "-".to_string());
 
                     println!(
@@ -152,7 +152,7 @@ pub async fn dispatch_import(
             }
 
             if dry_run {
-                if !json_output {
+                if !options.is_json() {
                     println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
                     println!("\n{} What would be imported:", "📝".cyan().bold());
                     println!("  • {} trade transactions", trades.len());
@@ -183,7 +183,7 @@ pub async fn dispatch_import(
                 if let Some(from_date) = earliest_date {
                     let source = "MOVIMENTACAO";
 
-                    if !json_output {
+                    if !options.is_json() {
                         println!(
                             "\n{} Force reimport: deleting {} data from {} onwards...",
                             "⚠".yellow().bold(),
@@ -206,7 +206,7 @@ pub async fn dispatch_import(
                         rusqlite::params![source],
                     )?;
 
-                    if !json_output {
+                    if !options.is_json() {
                         println!(
                             "  {} Deleted: {} transactions, {} corporate actions, {} income events",
                             "✓".green(),
@@ -218,7 +218,7 @@ pub async fn dispatch_import(
                 }
             }
 
-            if !json_output {
+            if !options.is_json() {
                 println!(
                     "{} Importing trades, corporate actions, and income events...",
                     "⏳".cyan().bold()
@@ -231,14 +231,16 @@ pub async fn dispatch_import(
                 reports::invalidate_snapshots_after(&conn, date)?;
             }
 
-            let mode = formatters::OutputMode::from_json_flag(json_output);
-            println!("{}", formatters::imports::format_import_stats(&stats, mode));
+            println!(
+                "{}",
+                formatters::imports::format_import_stats(&stats, options)
+            );
 
             Ok(())
         }
 
         ImportResult::OfertasPublicas(entries) => {
-            if !json_output {
+            if !options.is_json() {
                 println!(
                     "\n{} Found {} ofertas públicas entries\n",
                     "✓".green().bold(),
@@ -246,14 +248,16 @@ pub async fn dispatch_import(
                 );
             }
 
-            if !json_output {
-                if let Some(table) = formatters::imports::format_ofertas_preview_table(&entries) {
+            if !options.is_json() {
+                if let Some(table) =
+                    formatters::imports::format_ofertas_preview_table(&entries, options)
+                {
                     println!("{}", table);
                 }
             }
 
             if dry_run {
-                if !json_output {
+                if !options.is_json() {
                     println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
                     println!("\n{} What would be imported:", "📝".cyan().bold());
                     println!("  • {} offer allocation transactions", entries.len());
@@ -264,13 +268,13 @@ pub async fn dispatch_import(
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
-            if !json_output {
+            if !options.is_json() {
                 println!("{} Importing offer allocations...", "⏳".cyan().bold());
             }
 
             let stats = crate::dispatcher::imports_helpers::import_ofertas(&conn, &entries)?;
 
-            if !json_output {
+            if !options.is_json() {
                 println!("\n{} Import complete!", "✓".green().bold());
                 println!("  Imported: {}", stats.imported.to_string().green());
                 if stats.skipped_old > 0 {

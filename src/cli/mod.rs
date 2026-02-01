@@ -1,3 +1,4 @@
+use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 
 pub mod help;
@@ -19,6 +20,10 @@ pub struct Cli {
     /// Output results in JSON format
     #[arg(long = "json", global = true)]
     pub json: bool,
+
+    /// Hide currency values in output
+    #[arg(long = "privacy", global = true)]
+    pub privacy: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -138,6 +143,18 @@ pub enum Commands {
 
     /// Launch interactive TUI mode
     Interactive,
+
+    /// Toggle privacy mode (TUI session only)
+    Privacy {
+        #[arg(value_enum)]
+        mode: PrivacyToggle,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum PrivacyToggle {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]

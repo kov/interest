@@ -5,6 +5,7 @@ use colored::Colorize;
 use rustyline::error::ReadlineError;
 
 use crate::dispatcher::dispatch_command;
+use crate::options::{OutputMode, OutputOptions, PrivacyMode};
 use crate::ui::readline;
 
 /// Parse TUI-style command input into clap Commands
@@ -80,12 +81,15 @@ const COMMAND_PATTERNS: &[&[&str]] = &[
     &["prices", "clear-cache"],
     &["tickers", "status"],
     &["help"],
+    &["privacy"],
     &["exit"],
     &["quit"],
 ];
 
 /// Launch the interactive TUI REPL.
-pub async fn launch_tui() -> Result<()> {
+pub async fn launch_tui(mut output_options: OutputOptions) -> Result<()> {
+    output_options.output_mode = OutputMode::Table;
+
     println!("{}", "Interest - Interactive Mode".bold());
     println!(
         "Type {} for help, {} to exit\n",
@@ -111,7 +115,20 @@ pub async fn launch_tui() -> Result<()> {
 
                 match parse_tui_command(trimmed) {
                     Ok(cmd) => {
-                        if let Err(e) = dispatch_command(&cmd, false).await {
+                        if let crate::cli::Commands::Privacy { mode } = cmd {
+                            output_options.privacy = match mode {
+                                crate::cli::PrivacyToggle::On => PrivacyMode::Private,
+                                crate::cli::PrivacyToggle::Off => PrivacyMode::Full,
+                            };
+                            let status = match output_options.privacy {
+                                PrivacyMode::Private => "ON",
+                                PrivacyMode::Full => "OFF",
+                            };
+                            println!("Privacy mode: {}", status);
+                            continue;
+                        }
+
+                        if let Err(e) = dispatch_command(&cmd, output_options).await {
                             eprintln!("{} {}", "Error:".red().bold(), e);
                         }
                     }

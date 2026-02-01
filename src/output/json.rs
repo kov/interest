@@ -1,5 +1,6 @@
 //! JSON renderer for OutputDocument.
 
+use crate::options::{OutputOptions, PrivacyMode};
 use crate::output::{
     AlignmentHint, ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions,
     TableStyle, Value, ValueKind,
@@ -9,8 +10,8 @@ use serde::Serialize;
 pub struct JsonRenderer;
 
 impl JsonRenderer {
-    pub fn render(doc: &OutputDocument) -> String {
-        let json_doc = OutputDocumentJson::from_document(doc);
+    pub fn render(doc: &OutputDocument, options: OutputOptions) -> String {
+        let json_doc = OutputDocumentJson::from_document(doc, options);
         serde_json::to_string_pretty(&json_doc)
             .unwrap_or_else(|e| format!(r#"{{"error": "JSON serialization failed: {}"}}"#, e))
     }
@@ -92,10 +93,14 @@ struct ValueJson {
 }
 
 impl OutputDocumentJson {
-    fn from_document(doc: &OutputDocument) -> Self {
+    fn from_document(doc: &OutputDocument, options: OutputOptions) -> Self {
         Self {
             title: doc.title.clone(),
-            blocks: doc.blocks.iter().map(OutputBlockJson::from_block).collect(),
+            blocks: doc
+                .blocks
+                .iter()
+                .map(|block| OutputBlockJson::from_block(block, options))
+                .collect(),
             meta: OutputMetaJson {
                 generated_at: doc
                     .meta
@@ -107,7 +112,7 @@ impl OutputDocumentJson {
 }
 
 impl OutputBlockJson {
-    fn from_block(block: &OutputBlock) -> Self {
+    fn from_block(block: &OutputBlock, output_options: OutputOptions) -> Self {
         match block {
             OutputBlock::Header { level, text } => OutputBlockJson::Header {
                 level: *level,
@@ -119,7 +124,10 @@ impl OutputBlockJson {
             },
             OutputBlock::KeyValue { title, rows } => OutputBlockJson::KeyValue {
                 title: title.clone(),
-                rows: rows.iter().map(KeyValueRowJson::from_row).collect(),
+                rows: rows
+                    .iter()
+                    .map(|row| KeyValueRowJson::from_row(row, output_options))
+                    .collect(),
             },
             OutputBlock::Table {
                 title,
@@ -130,23 +138,31 @@ impl OutputBlockJson {
             } => OutputBlockJson::Table {
                 title: title.clone(),
                 columns: columns.iter().map(ColumnDefJson::from_column).collect(),
-                rows: rows.iter().map(RowJson::from_row).collect(),
-                footer: footer.as_ref().map(RowJson::from_row),
+                rows: rows
+                    .iter()
+                    .map(|row| RowJson::from_row(row, output_options))
+                    .collect(),
+                footer: footer
+                    .as_ref()
+                    .map(|row| RowJson::from_row(row, output_options)),
                 options: TableOptionsJson::from_options(options),
             },
             OutputBlock::Section { title, blocks } => OutputBlockJson::Section {
                 title: title.clone(),
-                blocks: blocks.iter().map(OutputBlockJson::from_block).collect(),
+                blocks: blocks
+                    .iter()
+                    .map(|block| OutputBlockJson::from_block(block, output_options))
+                    .collect(),
             },
         }
     }
 }
 
 impl KeyValueRowJson {
-    fn from_row(row: &KeyValueRow) -> Self {
+    fn from_row(row: &KeyValueRow, options: OutputOptions) -> Self {
         Self {
             label: row.label.clone(),
-            value: ValueJson::from_value(&row.value),
+            value: ValueJson::from_value(&row.value, options),
         }
     }
 }
@@ -175,9 +191,13 @@ impl AlignmentHintJson {
 }
 
 impl RowJson {
-    fn from_row(row: &Row) -> Self {
+    fn from_row(row: &Row, options: OutputOptions) -> Self {
         Self {
-            cells: row.cells.iter().map(ValueJson::from_value).collect(),
+            cells: row
+                .cells
+                .iter()
+                .map(|value| ValueJson::from_value(value, options))
+                .collect(),
         }
     }
 }
@@ -203,12 +223,20 @@ impl TableStyleJson {
 }
 
 impl ValueJson {
-    fn from_value(value: &Value) -> Self {
+    fn from_value(value: &Value, options: OutputOptions) -> Self {
         let kind = value.kind().as_str().to_string();
-        let raw = value.to_raw_json_value();
-        let value = match value.kind() {
-            ValueKind::Null => None,
-            _ => Some(raw),
+        let redacted = options.privacy == PrivacyMode::Private
+            && matches!(
+                value.kind(),
+                ValueKind::Currency | ValueKind::CurrencyDelta | ValueKind::Quantity
+            );
+        let value = if redacted {
+            None
+        } else {
+            match value.kind() {
+                ValueKind::Null => None,
+                _ => Some(value.to_raw_json_value()),
+            }
         };
         Self { kind, value }
     }

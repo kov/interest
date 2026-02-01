@@ -4,12 +4,12 @@ use serde_json::{Map, Value};
 use std::io::{stdin, stdout, BufRead, Write};
 use std::str::FromStr;
 
-use crate::utils::format_currency;
-use crate::{db, formatters, reports};
+use crate::utils::{format_currency, format_quantity};
+use crate::{db, formatters, options, reports};
 
 pub async fn dispatch_inconsistencies(
     action: &crate::cli::InconsistenciesCommands,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     db::init_database(None)?;
     let conn = db::open_db(None)?;
@@ -42,10 +42,9 @@ pub async fn dispatch_inconsistencies(
             };
             let issues = db::list_inconsistencies(&conn, status, issue_type, asset.as_deref())?;
 
-            let mode = formatters::OutputMode::from_json_flag(json_output);
             println!(
                 "{}",
-                formatters::inconsistencies::format_inconsistencies_list(&issues, mode)
+                formatters::inconsistencies::format_inconsistencies_list(&issues, options)
             );
             Ok(())
         }
@@ -53,7 +52,7 @@ pub async fn dispatch_inconsistencies(
             let issue = db::get_inconsistency(&conn, *id)?
                 .ok_or_else(|| anyhow::anyhow!("Inconsistency {} not found", id))?;
 
-            if json_output {
+            if options.is_json() {
                 println!("{}", serde_json::to_string_pretty(&issue)?);
                 return Ok(());
             }
@@ -77,7 +76,7 @@ pub async fn dispatch_inconsistencies(
                 "Quantity: {}",
                 issue
                     .quantity
-                    .map(|q| q.to_string())
+                    .map(|q| format_quantity(q, options))
                     .unwrap_or_else(|| "-".to_string())
             );
             println!(
@@ -151,10 +150,10 @@ pub async fn dispatch_inconsistencies(
                     // Interactive mode: prompt based on issue type
                     let result = match &issue.issue_type {
                         crate::db::InconsistencyType::MissingCostBasis => {
-                            prompt_missing_cost_basis(issue)
+                            prompt_missing_cost_basis(issue, options)
                         }
                         crate::db::InconsistencyType::MissingPurchaseHistory => {
-                            prompt_missing_purchase_history(issue)
+                            prompt_missing_purchase_history(issue, options)
                         }
                         crate::db::InconsistencyType::InvalidTicker
                         | crate::db::InconsistencyType::InvalidDate => {
@@ -206,14 +205,13 @@ pub async fn dispatch_inconsistencies(
                 apply_inconsistency_resolution(&conn, issue, &resolution)?;
                 resolved_count += 1;
 
-                let mode = formatters::OutputMode::from_json_flag(json_output);
                 println!(
                     "{}",
-                    formatters::inconsistencies::format_resolve(issue_id, mode)
+                    formatters::inconsistencies::format_resolve(issue_id, options)
                 );
             }
 
-            if id.is_none() && total > 1 && !json_output {
+            if id.is_none() && total > 1 && !options.is_json() {
                 println!(
                     "Done. Resolved {}/{} inconsistencies.",
                     resolved_count, total
@@ -224,7 +222,7 @@ pub async fn dispatch_inconsistencies(
         }
         crate::cli::InconsistenciesCommands::Ignore { id, reason } => {
             crate::db::ignore_inconsistency(&conn, *id, reason.as_deref())?;
-            if json_output {
+            if options.is_json() {
                 println!("{}", serde_json::json!({"ignored": id}));
             } else {
                 println!("Ignored inconsistency {}", id);
@@ -347,7 +345,10 @@ fn prompt_confirm(msg: &str) -> Result<bool> {
     Ok(input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes"))
 }
 
-fn prompt_missing_cost_basis(issue: &db::Inconsistency) -> Result<Map<String, Value>> {
+fn prompt_missing_cost_basis(
+    issue: &db::Inconsistency,
+    options: options::OutputOptions,
+) -> Result<Map<String, Value>> {
     println!(
         "\nResolving inconsistency #{}: MissingCostBasis",
         issue.id.unwrap_or(0)
@@ -364,7 +365,7 @@ fn prompt_missing_cost_basis(issue: &db::Inconsistency) -> Result<Map<String, Va
         "  Quantity: {}",
         issue
             .quantity
-            .map(|q| q.to_string())
+            .map(|q| format_quantity(q, options))
             .unwrap_or_else(|| "-".to_string())
     );
     println!();
@@ -386,10 +387,10 @@ fn prompt_missing_cost_basis(issue: &db::Inconsistency) -> Result<Map<String, Va
     println!(
         "  {} x {} @ {} + {} fees = {}",
         issue.ticker.as_deref().unwrap_or("?"),
-        quantity,
-        format_currency(price),
-        format_currency(fees),
-        format_currency(total_cost)
+        format_quantity(quantity, options),
+        format_currency(price, options),
+        format_currency(fees, options),
+        format_currency(total_cost, options)
     );
 
     if !prompt_confirm("Confirm?")? {
@@ -410,7 +411,10 @@ fn prompt_missing_cost_basis(issue: &db::Inconsistency) -> Result<Map<String, Va
     Ok(map)
 }
 
-fn prompt_missing_purchase_history(issue: &db::Inconsistency) -> Result<Map<String, Value>> {
+fn prompt_missing_purchase_history(
+    issue: &db::Inconsistency,
+    options: options::OutputOptions,
+) -> Result<Map<String, Value>> {
     println!(
         "\nResolving inconsistency #{}: MissingPurchaseHistory",
         issue.id.unwrap_or(0)
@@ -427,7 +431,7 @@ fn prompt_missing_purchase_history(issue: &db::Inconsistency) -> Result<Map<Stri
         "  Quantity: {}",
         issue
             .quantity
-            .map(|q| q.to_string())
+            .map(|q| format_quantity(q, options))
             .unwrap_or_else(|| "-".to_string())
     );
     println!();
@@ -451,10 +455,10 @@ fn prompt_missing_purchase_history(issue: &db::Inconsistency) -> Result<Map<Stri
     println!(
         "  {} x {} @ {} + {} fees = {}",
         issue.ticker.as_deref().unwrap_or("?"),
-        quantity,
-        format_currency(price),
-        format_currency(fees),
-        format_currency(total_cost)
+        format_quantity(quantity, options),
+        format_currency(price, options),
+        format_currency(fees, options),
+        format_currency(total_cost, options)
     );
 
     if !prompt_confirm("Confirm?")? {

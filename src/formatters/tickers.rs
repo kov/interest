@@ -1,5 +1,5 @@
 /// Formatters for ticker/B3 cache commands
-use crate::formatters::OutputMode;
+use crate::formatters::OutputOptions;
 use crate::output::{ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, Value, ValueKind};
 
 //
@@ -7,9 +7,9 @@ use crate::output::{ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, Va
 //
 
 /// Format refresh confirmation
-pub fn format_refresh(path: &str, mode: OutputMode) -> String {
+pub fn format_refresh(path: &str, options: OutputOptions) -> String {
     let document = build_refresh_document(path);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format status output
@@ -19,7 +19,7 @@ pub fn format_status(
     fetched_at: Option<&str>,
     source_url: Option<&str>,
     unknown_count: usize,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_status_document(
         cache_path,
@@ -28,19 +28,19 @@ pub fn format_status(
         source_url,
         unknown_count,
     );
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format resolve confirmation
-pub fn format_resolve(ticker: &str, asset_type: &str, mode: OutputMode) -> String {
+pub fn format_resolve(ticker: &str, asset_type: &str, options: OutputOptions) -> String {
     let document = build_resolve_document(ticker, asset_type);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format unknown assets list
-pub fn format_unknown_list(assets: &[crate::db::Asset], mode: OutputMode) -> String {
+pub fn format_unknown_list(assets: &[crate::db::Asset], options: OutputOptions) -> String {
     let document = build_unknown_list_document(assets);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 // Internal implementations below
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_refresh_json_structure() {
-        let json_str = format_refresh("/path/to/cache", OutputMode::Json);
+        let json_str = format_refresh("/path/to/cache", OutputOptions::from_flags(true, false));
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let blocks = value["blocks"].as_array().expect("blocks array missing");
         let mut values = Vec::new();
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_resolve_json_structure() {
-        let json_str = format_resolve("PETR4", "STOCK", OutputMode::Json);
+        let json_str = format_resolve("PETR4", "STOCK", OutputOptions::from_flags(true, false));
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let blocks = value["blocks"].as_array().expect("blocks array missing");
         let mut values = Vec::new();
@@ -230,7 +230,14 @@ mod tests {
     #[test]
     fn test_status_table_format() {
         let path = std::path::Path::new("/cache/tickers.csv");
-        let output = format_status(path, true, Some("2024-01-01"), None, 5, OutputMode::Table);
+        let output = format_status(
+            path,
+            true,
+            Some("2024-01-01"),
+            None,
+            5,
+            OutputOptions::from_flags(false, false),
+        );
         assert!(output.contains("B3 Tickers Cache Status"));
         assert!(output.contains("Unknown assets"));
     }

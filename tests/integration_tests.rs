@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use assert_cmd::prelude::*;
 use chrono::{Datelike, Duration, NaiveDate};
 use predicates::prelude::*;
+use regex::Regex;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::Value;
@@ -25,7 +26,7 @@ mod cli_helpers;
 use cli_helpers::{
     add_asset, add_income, add_transaction, base_cmd, cache_root_for_home, extract_table_rows,
     find_key_value_block, import_stats_from_doc, income_detail_json, kv_value,
-    list_split_actions_json, list_transactions_json, portfolio_json, run_cmd,
+    list_split_actions_json, list_transactions_json, portfolio_json, run_cmd, run_cmd_json,
     setup_test_tickers_cache, tax_report_json,
 };
 mod sqlite_helpers;
@@ -123,6 +124,85 @@ fn seed_basic_flow_data(home: &TempDir, asset_type: &str) -> Result<()> {
 
 fn db_path(home: &TempDir) -> PathBuf {
     home.path().join(".interest").join("data.db")
+}
+
+#[test]
+fn test_privacy_masks_currency_in_portfolio_table() -> Result<()> {
+    let home = TempDir::new()?;
+    add_asset(&home, "PRIV1", "STOCK")?;
+    add_transaction(&home, "PRIV1", "buy", "10", "10", "2024-01-02", false)?;
+
+    let output = base_cmd(&home)
+        .arg("--privacy")
+        .arg("portfolio")
+        .arg("show")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let masked = Regex::new(r"R\$\s+\*{3}").unwrap();
+    assert!(masked.is_match(&stdout));
+    assert!(!stdout.contains("10.00"));
+    assert!(!stdout.contains("R$ 10,00"));
+
+    Ok(())
+}
+
+#[test]
+fn test_privacy_omits_currency_in_portfolio_json() -> Result<()> {
+    let home = TempDir::new()?;
+    add_asset(&home, "PRIV2", "STOCK")?;
+    add_transaction(&home, "PRIV2", "buy", "10", "10", "2024-01-02", false)?;
+
+    let doc = run_cmd_json(&home, &["--json", "--privacy", "portfolio", "show"])?;
+    let rows = extract_table_rows(&doc, None, Some("avg_cost"))?;
+    let row = rows.first().context("missing portfolio row")?;
+
+    assert!(row.get("avg_cost").unwrap_or(&Value::Null).is_null());
+    assert!(row.get("total_cost").unwrap_or(&Value::Null).is_null());
+    assert!(row.get("quantity").unwrap_or(&Value::Null).is_null());
+
+    Ok(())
+}
+
+#[test]
+fn test_privacy_masks_currency_in_performance_table() -> Result<()> {
+    let home = TempDir::new()?;
+    add_asset(&home, "PRF1", "STOCK")?;
+    add_transaction(&home, "PRF1", "buy", "10", "10", "2024-01-02", false)?;
+
+    let output = base_cmd(&home)
+        .arg("--privacy")
+        .arg("performance")
+        .arg("show")
+        .arg("ALL")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let masked = Regex::new(r"R\$\s+\*{3}").unwrap();
+    assert!(masked.is_match(&stdout));
+
+    Ok(())
+}
+
+#[test]
+fn test_privacy_omits_currency_in_performance_json() -> Result<()> {
+    let home = TempDir::new()?;
+    add_asset(&home, "PRF2", "STOCK")?;
+    add_transaction(&home, "PRF2", "buy", "10", "10", "2024-01-02", false)?;
+
+    let doc = run_cmd_json(
+        &home,
+        &["--json", "--privacy", "performance", "show", "ALL"],
+    )?;
+    let summary = find_key_value_block(&doc, "Summary").context("missing summary block")?;
+
+    assert!(kv_value(Some(summary), "Start Value").is_null());
+    assert!(kv_value(Some(summary), "End Value").is_null());
+    assert!(!kv_value(Some(summary), "Return").is_null());
+
+    Ok(())
 }
 
 #[test]
