@@ -91,16 +91,13 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
         },
         KeyValueRow {
             label: "Return".to_string(),
-            value: Value::Percent(report.return_pct()),
+            value: Value::Percent(total_return_pct(report.end_value, report.unrealized_gains)),
+        },
+        KeyValueRow {
+            label: "Time-weighted".to_string(),
+            value: Value::Percent(report.time_weighted_return),
         },
     ];
-
-    if report.cash_flows.is_some() {
-        summary_rows.push(KeyValueRow {
-            label: "Investment Return".to_string(),
-            value: Value::Percent(report.time_weighted_return),
-        });
-    }
 
     summary_rows.push(KeyValueRow {
         label: "Realized Gains".to_string(),
@@ -138,17 +135,19 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
 
     if !report.asset_breakdown.is_empty() {
         let mut breakdown_vec: Vec<_> = report.asset_breakdown.iter().collect();
-        breakdown_vec.sort_by(|a, b| b.1.start_value.cmp(&a.1.start_value));
+        breakdown_vec.sort_by(|a, b| b.1.cost_basis.cmp(&a.1.cost_basis));
 
         let rows = breakdown_vec
             .iter()
             .map(|(asset_type, perf)| Row {
                 cells: vec![
                     Value::Text(asset_type.as_str().to_string()),
-                    Value::Currency(perf.start_value),
-                    Value::Currency(perf.end_value),
+                    Value::Currency(perf.cost_basis),
+                    Value::Currency(perf.market_value),
+                    Value::CurrencyDelta(perf.unrealized_pl),
                     Value::Percent(perf.return_pct),
                     Value::Percent(perf.contribution_to_total),
+                    Value::CurrencyDelta(perf.realized_gains),
                 ],
             })
             .collect();
@@ -157,10 +156,12 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
             title: Some("By Asset Type".to_string()),
             columns: vec![
                 ColumnDef::new("asset_type", "Asset Type", ValueKind::Text),
-                ColumnDef::new("start_value", "Start Value", ValueKind::Currency),
-                ColumnDef::new("end_value", "End Value", ValueKind::Currency),
+                ColumnDef::new("cost_basis", "Cost", ValueKind::Currency),
+                ColumnDef::new("market_value", "Value", ValueKind::Currency),
+                ColumnDef::new("unrealized_pl", "P&L", ValueKind::CurrencyDelta),
                 ColumnDef::new("return", "Return", ValueKind::Percent),
                 ColumnDef::new("contribution", "Contribution", ValueKind::Percent),
+                ColumnDef::new("realized_gains", "Realized Gains", ValueKind::CurrencyDelta),
             ],
             rows,
             footer: None,
@@ -172,6 +173,14 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
         title: None,
         blocks,
         meta: Default::default(),
+    }
+}
+
+fn total_return_pct(end_value: Decimal, unrealized_gains: Decimal) -> Decimal {
+    if end_value > Decimal::ZERO {
+        (unrealized_gains / end_value) * Decimal::from(100)
+    } else {
+        Decimal::ZERO
     }
 }
 
@@ -191,10 +200,12 @@ mod tests {
             AssetType::Stock,
             AssetPerformance {
                 asset_type: AssetType::Stock,
-                start_value: dec!(10000),
-                end_value: dec!(11000),
+                cost_basis: dec!(10000),
+                market_value: dec!(11000),
+                unrealized_pl: dec!(1000),
                 return_pct: dec!(10.0),
                 contribution_to_total: dec!(5.0),
+                realized_gains: dec!(200),
             },
         );
 

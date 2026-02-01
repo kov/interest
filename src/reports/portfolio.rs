@@ -442,7 +442,7 @@ fn get_asset_transactions_before(
 }
 
 /// Get all transactions for an asset up to and including a cutoff date.
-fn get_asset_transactions_until(
+pub(crate) fn get_asset_transactions_until(
     conn: &Connection,
     asset_id: i64,
     cutoff_date: NaiveDate,
@@ -463,7 +463,7 @@ fn get_asset_transactions_until(
     Ok(transactions)
 }
 
-fn build_rename_carryover_transaction(
+pub(crate) fn build_rename_carryover_transaction(
     conn: &Connection,
     source_asset: &Asset,
     target_asset_id: i64,
