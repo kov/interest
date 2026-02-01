@@ -15,6 +15,7 @@ use std::str::FromStr;
 use tracing::{info, warn};
 
 use crate::db::models::{Transaction, TransactionType};
+use crate::options::OutputOptions;
 use crate::utils::format_currency;
 
 /// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
@@ -226,7 +227,7 @@ pub fn process_term_liquidations(conn: &Connection) -> Result<usize> {
             base_ticker,
             quantity,
             matches.len(),
-            format_currency(avg_cost)
+            format_currency(avg_cost, OutputOptions::from_flags(false, false))
         );
 
         processed += 1;

@@ -5,6 +5,7 @@ mod db;
 mod dispatcher;
 mod formatters;
 mod importers;
+mod options;
 mod output;
 mod pricing;
 mod reports;
@@ -19,6 +20,7 @@ mod utils;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
+use options::OutputOptions;
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
@@ -49,6 +51,8 @@ async fn main() -> Result<()> {
     let stdout_is_tty = std::io::stdout().is_terminal();
     let disable_color = cli.no_color || !stdout_is_tty || cli.json;
 
+    let output_options = OutputOptions::from_flags(cli.json, cli.privacy);
+
     // Initialize logging - always write to stderr to keep stdout clean
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn"))
@@ -77,8 +81,8 @@ async fn main() -> Result<()> {
     };
 
     if matches!(command, Commands::Interactive) {
-        return crate::ui::launch_tui().await;
+        return crate::ui::launch_tui(output_options).await;
     }
 
-    dispatcher::dispatch_command(&command, cli.json).await
+    dispatcher::dispatch_command(&command, output_options).await
 }

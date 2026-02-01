@@ -1,7 +1,7 @@
 //! Portfolio report formatting (JSON and terminal table)
 
 use crate::db::models::AssetType;
-use crate::formatters::OutputMode;
+use crate::formatters::OutputOptions;
 use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, Value, ValueKind,
 };
@@ -30,10 +30,10 @@ use std::collections::BTreeMap;
 pub fn format(
     report: &PortfolioReport,
     asset_type_filter: Option<AssetType>,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_portfolio_document(report, asset_type_filter);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Print portfolio report to stdout
@@ -46,8 +46,12 @@ pub fn format(
 /// let mode = OutputMode::from_json_flag(json_output);
 /// formatters::portfolio::print(&report, Some(AssetType::Fii), mode);
 /// ```
-pub fn print(report: &PortfolioReport, asset_type_filter: Option<AssetType>, mode: OutputMode) {
-    println!("{}", format(report, asset_type_filter, mode));
+pub fn print(
+    report: &PortfolioReport,
+    asset_type_filter: Option<AssetType>,
+    options: OutputOptions,
+) {
+    println!("{}", format(report, asset_type_filter, options));
 }
 
 fn build_portfolio_document(
@@ -227,7 +231,7 @@ pub fn format_empty_portfolio() -> String {
         }],
         meta: Default::default(),
     };
-    crate::formatters::render_document(&document, OutputMode::Table)
+    crate::formatters::render_document(&document, OutputOptions::from_flags(false, false))
 }
 
 #[cfg(test)]
@@ -307,7 +311,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let json_str = format(&report, None, OutputMode::Json);
+        let json_str = format(&report, None, OutputOptions::from_flags(true, false));
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -413,7 +417,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format(&report, None, OutputMode::Table);
+        let output = format(&report, None, OutputOptions::from_flags(false, false));
 
         // Verify grouping by asset type
         assert!(output.contains("Stocks (STOCK)"));
@@ -463,7 +467,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format(&report, None, OutputMode::Table);
+        let output = format(&report, None, OutputOptions::from_flags(false, false));
 
         // Find positions in output - they should be in alphabetical order
         let bbas_idx = output.find("BBAS3").unwrap();
@@ -512,7 +516,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format(&report, None, OutputMode::Table);
+        let output = format(&report, None, OutputOptions::from_flags(false, false));
 
         // Verify subtotals are shown
         assert!(

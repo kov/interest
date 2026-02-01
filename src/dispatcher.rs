@@ -19,13 +19,16 @@ mod terms;
 mod tickers;
 mod transactions;
 use crate::utils::format_currency;
-use crate::{db, formatters, tax};
+use crate::{db, formatters, options, tax};
 use anyhow::Result;
 use colored::Colorize;
 use tracing::info;
 
 /// Route a parsed command to its handler
-pub async fn dispatch_command(command: &crate::cli::Commands, json_output: bool) -> Result<()> {
+pub async fn dispatch_command(
+    command: &crate::cli::Commands,
+    options: options::OutputOptions,
+) -> Result<()> {
     use crate::cli::Commands;
 
     match command {
@@ -33,58 +36,69 @@ pub async fn dispatch_command(command: &crate::cli::Commands, json_output: bool)
             file,
             dry_run,
             force_reimport,
-        } => imports::dispatch_import(file, *dry_run, *force_reimport, json_output).await,
+        } => imports::dispatch_import(file, *dry_run, *force_reimport, options).await,
         Commands::ImportIrpf {
             file,
             year,
             dry_run,
-        } => irpf::dispatch_irpf_import(file, *year, *dry_run).await,
-        Commands::Portfolio { action } => portfolio::dispatch_portfolio(action, json_output).await,
-        Commands::Performance { action } => dispatch_performance(action, json_output).await,
-        Commands::CashFlow { action } => cashflow::dispatch_cashflow(action, json_output).await,
-        Commands::Tax { action } => dispatch_tax(action, json_output).await,
-        Commands::Income { action } => dispatch_income(action, json_output).await,
-        Commands::Actions { action } => actions::dispatch_actions(action, json_output).await,
-        Commands::Prices { action } => prices::dispatch_prices(action, json_output).await,
+        } => irpf::dispatch_irpf_import(file, *year, *dry_run, options).await,
+        Commands::Portfolio { action } => portfolio::dispatch_portfolio(action, options).await,
+        Commands::Performance { action } => dispatch_performance(action, options).await,
+        Commands::CashFlow { action } => cashflow::dispatch_cashflow(action, options).await,
+        Commands::Tax { action } => dispatch_tax(action, options).await,
+        Commands::Income { action } => dispatch_income(action, options).await,
+        Commands::Actions { action } => actions::dispatch_actions(action, options).await,
+        Commands::Prices { action } => prices::dispatch_prices(action, options).await,
         Commands::Transactions { action } => {
-            transactions::dispatch_transactions(action, json_output).await
+            transactions::dispatch_transactions(action, options).await
         }
         Commands::Inspect { file, full, column } => {
             inspect::dispatch_inspect(file, *full, *column).await
         }
         Commands::ProcessTerms => terms::dispatch_process_terms().await,
         Commands::Inconsistencies { action } => {
-            inconsistencies::dispatch_inconsistencies(action, json_output).await
+            inconsistencies::dispatch_inconsistencies(action, options).await
         }
-        Commands::Tickers { action } => tickers::dispatch_tickers(action, json_output).await,
-        Commands::Assets { action } => assets::dispatch_assets(action, json_output).await,
+        Commands::Tickers { action } => tickers::dispatch_tickers(action, options).await,
+        Commands::Assets { action } => assets::dispatch_assets(action, options).await,
         Commands::Interactive => {
             // This should never be reached since main.rs handles Interactive separately
             Err(anyhow::anyhow!(
                 "Interactive mode should be handled by main.rs"
             ))
         }
+        Commands::Privacy { .. } => Err(anyhow::anyhow!(
+            "Privacy mode is only supported in interactive mode. Use --privacy for CLI commands."
+        )),
     }
 }
 
-async fn dispatch_tax(action: &crate::cli::TaxCommands, json_output: bool) -> Result<()> {
+async fn dispatch_tax(
+    action: &crate::cli::TaxCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     match action {
         crate::cli::TaxCommands::Report { year, export } => {
-            dispatch_tax_report(*year, *export, json_output).await
+            dispatch_tax_report(*year, *export, options).await
         }
-        crate::cli::TaxCommands::Summary { year } => dispatch_tax_summary(*year, json_output).await,
-        crate::cli::TaxCommands::Calculate { month } => dispatch_tax_calculate(month).await,
+        crate::cli::TaxCommands::Summary { year } => dispatch_tax_summary(*year, options).await,
+        crate::cli::TaxCommands::Calculate { month } => {
+            dispatch_tax_calculate(month, options).await
+        }
     }
 }
 
-async fn dispatch_income(action: &crate::cli::IncomeCommands, json_output: bool) -> Result<()> {
+async fn dispatch_income(
+    action: &crate::cli::IncomeCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     match action {
-        crate::cli::IncomeCommands::Show { year } => dispatch_income_show(*year, json_output).await,
+        crate::cli::IncomeCommands::Show { year } => dispatch_income_show(*year, options).await,
         crate::cli::IncomeCommands::Detail { year, asset } => {
-            dispatch_income_detail(*year, asset.as_deref(), json_output).await
+            dispatch_income_detail(*year, asset.as_deref(), options).await
         }
         crate::cli::IncomeCommands::Summary { year } => {
-            dispatch_income_summary(*year, json_output).await
+            dispatch_income_summary(*year, options).await
         }
         crate::cli::IncomeCommands::Add {
             ticker,
@@ -105,14 +119,18 @@ async fn dispatch_income(action: &crate::cli::IncomeCommands, json_output: bool)
                 withholding,
                 amount_per_quota,
                 notes.as_deref(),
-                json_output,
+                options,
             )
             .await
         }
     }
 }
 
-async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> Result<()> {
+async fn dispatch_tax_report(
+    year: i32,
+    export_csv: bool,
+    options: options::OutputOptions,
+) -> Result<()> {
     info!("Generating IRPF annual report for {}", year);
 
     // Initialize database
@@ -120,19 +138,18 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
     let conn = db::open_db(None)?;
 
     // Generate report; suppress progress output in JSON mode
-    let report = if json_output {
+    let report = if options.is_json() {
         tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
     } else {
-        let mut printer = TaxProgressPrinter::new();
+        let mut printer = TaxProgressPrinter::new(options);
         tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
     };
 
     let income_summary = formatters::tax::build_income_summary(&conn, year)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::tax::format_tax_report(&report, &income_summary, year, mode)
+        formatters::tax::format_tax_report(&report, &income_summary, year, options)
     );
 
     if export_csv {
@@ -146,7 +163,7 @@ async fn dispatch_tax_report(year: i32, export_csv: bool, json_output: bool) -> 
     Ok(())
 }
 
-async fn dispatch_tax_summary(year: i32, json_output: bool) -> Result<()> {
+async fn dispatch_tax_summary(year: i32, options: options::OutputOptions) -> Result<()> {
     info!("Generating tax summary for {}", year);
 
     // Initialize database
@@ -155,24 +172,23 @@ async fn dispatch_tax_summary(year: i32, json_output: bool) -> Result<()> {
 
     // Generate report with in-place spinner progress (terse)
     // Suppress progress output in JSON mode
-    let report = if json_output {
+    let report = if options.is_json() {
         tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
     } else {
-        let mut printer = TaxProgressPrinter::new();
+        let mut printer = TaxProgressPrinter::new(options);
         tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
     };
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::tax::format_tax_summary(&report, year, mode)
+        formatters::tax::format_tax_summary(&report, year, options)
     );
 
     Ok(())
 }
 
 /// Show income summary by asset, grouped by asset type
-async fn dispatch_income_show(year: Option<i32>, json_output: bool) -> Result<()> {
+async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions) -> Result<()> {
     use chrono::Datelike;
     use rust_decimal::Decimal;
     use std::collections::HashMap;
@@ -267,11 +283,10 @@ async fn dispatch_income_show(year: Option<i32>, json_output: bool) -> Result<()
         }
     }
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    let output = if mode == formatters::OutputMode::Json {
-        formatters::income::format_income_show_json(&all_assets)
+    let output = if options.is_json() {
+        formatters::income::format_income_show_json(&all_assets, options)
     } else {
-        formatters::income::format_income_show_table(&ordered, year_val)
+        formatters::income::format_income_show_table(&ordered, year_val, options)
     };
     println!("{}", output);
 
@@ -282,7 +297,7 @@ async fn dispatch_income_show(year: Option<i32>, json_output: bool) -> Result<()
 async fn dispatch_income_detail(
     year: Option<i32>,
     asset: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     use chrono::Datelike;
 
@@ -326,11 +341,10 @@ async fn dispatch_income_detail(
     }
 
     let year_val = year.unwrap_or_else(|| today.year());
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    let output = if mode == formatters::OutputMode::Json {
-        formatters::income::format_income_detail_json(&events)
+    let output = if options.is_json() {
+        formatters::income::format_income_detail_json(&events, options)
     } else {
-        formatters::income::format_income_detail_table(&events, year_val)
+        formatters::income::format_income_detail_table(&events, year_val, options)
     };
     println!("{}", output);
 
@@ -338,15 +352,16 @@ async fn dispatch_income_detail(
 }
 
 /// Show income summary - monthly breakdown if year given, yearly totals otherwise
-pub async fn dispatch_income_summary(year: Option<i32>, json_output: bool) -> Result<()> {
+pub async fn dispatch_income_summary(
+    year: Option<i32>,
+    options: options::OutputOptions,
+) -> Result<()> {
     use chrono::Datelike;
     use rust_decimal::Decimal;
     use std::collections::BTreeMap;
 
     db::init_database(None)?;
     let conn = db::open_db(None)?;
-
-    let mode = formatters::OutputMode::from_json_flag(json_output);
 
     match year {
         Some(y) => {
@@ -439,7 +454,7 @@ pub async fn dispatch_income_summary(year: Option<i32>, json_output: bool) -> Re
                 &totals_by_type,
                 stats,
                 totals,
-                mode,
+                options,
             );
             println!("{}", output);
         }
@@ -514,7 +529,7 @@ pub async fn dispatch_income_summary(year: Option<i32>, json_output: bool) -> Re
                 &totals_by_type,
                 stats,
                 totals,
-                mode,
+                options,
             );
             println!("{}", output);
         }
@@ -533,7 +548,7 @@ async fn dispatch_income_add(
     withholding_str: &str,
     amount_per_quota_str: &str,
     notes: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     use anyhow::Context;
     use chrono::NaiveDate;
@@ -581,16 +596,15 @@ async fn dispatch_income_add(
 
     let event_id = db::insert_income_event(&conn, &event)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::income::format_income_add(event_id, ticker, event_date, total_amount, mode)
+        formatters::income::format_income_add(event_id, ticker, event_date, total_amount, options)
     );
 
     Ok(())
 }
 
-async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
+async fn dispatch_tax_calculate(month_str: &str, options: options::OutputOptions) -> Result<()> {
     use anyhow::Context;
     use colored::Colorize;
 
@@ -645,25 +659,25 @@ async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
         );
         println!(
             "  Total Sales:      {}",
-            format_currency(calc.total_sales).cyan()
+            format_currency(calc.total_sales, options).cyan()
         );
         println!(
             "  Total Cost Basis: {}",
-            format_currency(calc.total_cost_basis).cyan()
+            format_currency(calc.total_cost_basis, options).cyan()
         );
         println!(
             "  Gross Profit:     {}",
-            format_currency(calc.total_profit).green()
+            format_currency(calc.total_profit, options).green()
         );
         println!(
             "  Gross Loss:       {}",
-            format_currency(calc.total_loss).red()
+            format_currency(calc.total_loss, options).red()
         );
 
         let net_str = if calc.net_profit >= rust_decimal::Decimal::ZERO {
-            format_currency(calc.net_profit).green()
+            format_currency(calc.net_profit, options).green()
         } else {
-            format_currency(calc.net_profit).red()
+            format_currency(calc.net_profit, options).red()
         };
         println!("  Net P&L:          {}", net_str);
 
@@ -671,25 +685,27 @@ async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
         if calc.loss_offset_applied > rust_decimal::Decimal::ZERO {
             println!(
                 "  Loss Offset:      {} (from previous months)",
-                format_currency(calc.loss_offset_applied).cyan()
+                format_currency(calc.loss_offset_applied, options).cyan()
             );
             println!(
                 "  After Loss Offset: {}",
-                format_currency(calc.profit_after_loss_offset).green()
+                format_currency(calc.profit_after_loss_offset, options).green()
             );
         }
 
         if calc.exemption_applied > rust_decimal::Decimal::ZERO {
             println!(
                 "  Exemption:        {} (sales under R$20.000)",
-                format_currency(calc.exemption_applied).yellow().bold()
+                format_currency(calc.exemption_applied, options)
+                    .yellow()
+                    .bold()
             );
         }
 
         if calc.taxable_amount > rust_decimal::Decimal::ZERO {
             println!(
                 "  Taxable Amount:   {}",
-                format_currency(calc.taxable_amount).yellow()
+                format_currency(calc.taxable_amount, options).yellow()
             );
             let tax_rate_pct = calc.tax_rate * rust_decimal::Decimal::from(100);
             println!(
@@ -699,12 +715,14 @@ async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
             println!(
                 "  {} {}",
                 "Tax Due:".bold(),
-                format_currency(calc.tax_due).red().bold()
+                format_currency(calc.tax_due, options).red().bold()
             );
         } else if calc.profit_after_loss_offset < rust_decimal::Decimal::ZERO {
             println!(
                 "  {} Loss to carry forward",
-                format_currency(calc.net_profit.abs()).yellow().bold()
+                format_currency(calc.net_profit.abs(), options)
+                    .yellow()
+                    .bold()
             );
         } else {
             println!("  {} No tax due (exempt)", "Tax Due:".bold().green());
@@ -722,7 +740,7 @@ async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
             "📋".cyan().bold(),
             month,
             year,
-            format_currency(total_tax).red().bold()
+            format_currency(total_tax, options).red().bold()
         );
 
         // Generate DARF payments
@@ -738,7 +756,10 @@ async fn dispatch_tax_calculate(month_str: &str) -> Result<()> {
                     payment.darf_code,
                     payment.description
                 );
-                println!("    Amount:   {}", format_currency(payment.tax_due).red());
+                println!(
+                    "    Amount:   {}",
+                    format_currency(payment.tax_due, options).red()
+                );
                 println!(
                     "    Due Date: {}",
                     payment.due_date.format("%d/%m/%Y").to_string().yellow()
@@ -769,9 +790,9 @@ struct TaxProgressPrinter {
 }
 
 impl TaxProgressPrinter {
-    fn new() -> Self {
+    fn new(options: options::OutputOptions) -> Self {
         Self {
-            printer: crate::ui::progress::ProgressPrinter::new(false),
+            printer: crate::ui::progress::ProgressPrinter::new(options),
             in_progress: false,
             from_year: None,
             target_year: None,

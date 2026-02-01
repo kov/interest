@@ -2,7 +2,7 @@
 use rust_decimal::Decimal;
 
 use crate::db;
-use crate::formatters::OutputMode;
+use crate::formatters::OutputOptions;
 use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, TableStyle, Value,
     ValueKind,
@@ -101,10 +101,10 @@ pub fn format_tax_report(
     report: &tax::irpf::AnnualTaxReport,
     income_summary: &[IncomeByType],
     year: i32,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_tax_report_document(report, income_summary, year);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 fn build_tax_report_document(
@@ -293,10 +293,10 @@ fn build_tax_report_document(
 pub fn format_tax_summary(
     report: &tax::irpf::AnnualTaxReport,
     year: i32,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_tax_summary_document(report, year);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 fn build_tax_summary_document(report: &tax::irpf::AnnualTaxReport, year: i32) -> OutputDocument {
@@ -409,7 +409,8 @@ mod tests {
             losses_to_carry_forward: HashMap::new(),
         };
 
-        let json_str = format_tax_report(&report, &[], 2024, OutputMode::Json);
+        let json_str =
+            format_tax_report(&report, &[], 2024, OutputOptions::from_flags(true, false));
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");

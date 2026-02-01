@@ -1,6 +1,6 @@
 /// Formatters for corporate actions (renames, splits, bonuses, exchanges)
 use crate::db;
-use crate::formatters::OutputMode;
+use crate::formatters::OutputOptions;
 use crate::output::{ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, Value, ValueKind};
 
 //
@@ -14,25 +14,25 @@ pub fn format_rename_add(
     to: &str,
     effective_date: chrono::NaiveDate,
     notes: Option<&str>,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_rename_add_document(id, from, to, effective_date, notes);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format renames list
 pub fn format_renames_list(
     rows: &[(db::AssetRename, db::Asset, db::Asset)],
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_renames_list_document(rows);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format rename remove confirmation
-pub fn format_rename_remove(id: i64, mode: OutputMode) -> String {
+pub fn format_rename_remove(id: i64, options: OutputOptions) -> String {
     let document = build_rename_remove_document(id);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 // Internal implementations below
@@ -151,7 +151,7 @@ pub fn format_corporate_action_add(
     quantity_adjustment: rust_decimal::Decimal,
     ex_date: chrono::NaiveDate,
     notes: Option<&str>,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_corporate_action_add_document(
         id,
@@ -161,22 +161,22 @@ pub fn format_corporate_action_add(
         ex_date,
         notes,
     );
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format corporate actions list
 pub fn format_corporate_actions_list(
     filtered: &[(db::CorporateAction, db::Asset)],
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_corporate_actions_list_document(filtered);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format corporate action remove confirmation
-pub fn format_corporate_action_remove(id: i64, mode: OutputMode) -> String {
+pub fn format_corporate_action_remove(id: i64, options: OutputOptions) -> String {
     let document = build_corporate_action_remove_document(id);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 // Internal implementations below
@@ -310,7 +310,7 @@ pub fn format_exchange_add(
     allocated_cost: rust_decimal::Decimal,
     cash_amount: rust_decimal::Decimal,
     notes: Option<&str>,
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_exchange_add_document(
         id,
@@ -323,22 +323,22 @@ pub fn format_exchange_add(
         cash_amount,
         notes,
     );
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format exchanges list
 pub fn format_exchanges_list(
     rows: &[(db::AssetExchange, db::Asset, db::Asset)],
-    mode: OutputMode,
+    options: OutputOptions,
 ) -> String {
     let document = build_exchanges_list_document(rows);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Format exchange remove confirmation
-pub fn format_exchange_remove(id: i64, mode: OutputMode) -> String {
+pub fn format_exchange_remove(id: i64, options: OutputOptions) -> String {
     let document = build_exchange_remove_document(id);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 // Internal implementations below
@@ -494,7 +494,7 @@ mod tests {
             "PETR4",
             NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             None,
-            OutputMode::Json,
+            OutputOptions::from_flags(true, false),
         );
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -530,7 +530,7 @@ mod tests {
             Decimal::from_str("100").unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             None,
-            OutputMode::Json,
+            OutputOptions::from_flags(true, false),
         );
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -570,7 +570,7 @@ mod tests {
             Decimal::from_str("1234.56").unwrap(),
             Decimal::from_str("10.00").unwrap(),
             None,
-            OutputMode::Json,
+            OutputOptions::from_flags(true, false),
         );
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 

@@ -3,7 +3,7 @@ use std::io::{stdin, stdout, Write};
 
 use crate::{
     db::{self, AssetType},
-    formatters,
+    formatters, options,
 };
 
 const KNOWN_TYPES: &[&str] = &[
@@ -13,15 +13,17 @@ const KNOWN_TYPES: &[&str] = &[
 
 pub async fn dispatch_tickers(
     action: &crate::cli::TickersCommands,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     match action {
         crate::cli::TickersCommands::Refresh { force } => {
             let force = *force;
             let path = crate::tickers::refresh_b3_tickers(force)?;
             let path_str = path.display().to_string();
-            let mode = formatters::OutputMode::from_json_flag(json_output);
-            println!("{}", formatters::tickers::format_refresh(&path_str, mode));
+            println!(
+                "{}",
+                formatters::tickers::format_refresh(&path_str, options)
+            );
             Ok(())
         }
         crate::cli::TickersCommands::Status => {
@@ -37,7 +39,6 @@ pub async fn dispatch_tickers(
             let source_url = meta.as_ref().map(|m| m.source_url.clone());
             let unknown_count = unknown_assets.len();
 
-            let mode = formatters::OutputMode::from_json_flag(json_output);
             println!(
                 "{}",
                 formatters::tickers::format_status(
@@ -46,7 +47,7 @@ pub async fn dispatch_tickers(
                     fetched_at.as_deref(),
                     source_url.as_deref(),
                     unknown_count,
-                    mode,
+                    options,
                 )
             );
             Ok(())
@@ -56,10 +57,9 @@ pub async fn dispatch_tickers(
             let conn = db::open_db(None)?;
             let unknown_assets = db::list_assets_by_type(&conn, AssetType::Unknown)?;
 
-            let mode = formatters::OutputMode::from_json_flag(json_output);
             println!(
                 "{}",
-                formatters::tickers::format_unknown_list(&unknown_assets, mode)
+                formatters::tickers::format_unknown_list(&unknown_assets, options)
             );
             Ok(())
         }
@@ -67,7 +67,7 @@ pub async fn dispatch_tickers(
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
-            if json_output && ticker.is_none() {
+            if options.is_json() && ticker.is_none() {
                 anyhow::bail!("tickers resolve without a ticker is not supported in JSON mode");
             }
 
@@ -77,10 +77,9 @@ pub async fn dispatch_tickers(
                 })?;
                 let parsed = parse_asset_type(&asset_type)?;
                 db::update_asset_type(&conn, ticker, &parsed)?;
-                let mode = formatters::OutputMode::from_json_flag(json_output);
                 println!(
                     "{}",
-                    formatters::tickers::format_resolve(ticker, parsed.as_str(), mode)
+                    formatters::tickers::format_resolve(ticker, parsed.as_str(), options)
                 );
                 return Ok(());
             }

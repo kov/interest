@@ -5,7 +5,7 @@
 //! ## Architecture
 //!
 //! - **Separation of concerns**: Dispatchers handle business logic, formatters handle presentation
-//! - **Standard interface**: Formatters build an `OutputDocument` and render via OutputMode
+//! - **Standard interface**: Formatters build an `OutputDocument` and render via OutputOptions
 //! - **Consistent policies**: Renderer enforces decimal/date formatting rules
 //!
 //! ## Output Policies
@@ -17,11 +17,10 @@
 //!
 //! ```rust,ignore
 //! // In dispatcher module:
-//! pub async fn dispatch_command(json_output: bool) -> Result<()> {
+//! pub async fn dispatch_command(options: OutputOptions) -> Result<()> {
 //!     let report = calculate_report(...)?;
 //!
-//!     let mode = formatters::OutputMode::from_json_flag(json_output);
-//!     println!("{}", formatters::command::format(&report, mode));
+//!     println!("{}", formatters::command::format(&report, options));
 //!     Ok(())
 //! }
 //! ```
@@ -29,14 +28,14 @@
 //! For formatters that need extra parameters:
 //!
 //! ```rust,ignore
-//! let mode = formatters::OutputMode::from_json_flag(json_output);
-//! println!("{}", formatters::portfolio::format(&report, asset_type_filter, mode));
+//! let options = OutputOptions::from_flags(json_output, false);
+//! println!("{}", formatters::portfolio::format(&report, asset_type_filter, options));
 //! ```
 //!
 //! ## Checklist for Adding New Formatters
 //!
 //! 1. Create `src/formatters/command_name.rs` with:
-//!    - `pub fn format(&Report, ..., mode: OutputMode) -> String`
+//!    - `pub fn format(&Report, ..., options: OutputOptions) -> String`
 //!    - `fn build_*_document(&Report, ...) -> OutputDocument`
 //!
 //! 2. Add JSON schema lock test in `tests/json_schema_tests.rs`:
@@ -46,8 +45,8 @@
 //! 3. Update dispatcher to use new API:
 //!    - Remove inline `serde_json::json!` constructs
 //!    - Remove inline `#[derive(Tabled)]` structs
-//!    - Add: `let mode = formatters::OutputMode::from_json_flag(json_output);`
-//!    - Call: `println!("{}", formatters::command::format(&data, mode));`
+//!    - Add: `let options = OutputOptions::from_flags(json_output, false);`
+//!    - Call: `println!("{}", formatters::command::format(&data, options));`
 //!
 //! 4. Run before/after JSON diff to ensure backward compatibility
 //!
@@ -66,76 +65,12 @@ pub mod tax;
 pub mod tickers;
 pub mod transactions;
 
-/// Output format for command results
-///
-/// This enum provides a type-safe, extensible alternative to boolean flags.
-/// Future formats (CSV, HTML, YAML) can be added without breaking existing code.
-///
-/// # Example
-///
-/// ```ignore
-/// let mode = OutputMode::from_json_flag(json_output);
-/// println!("{}", formatters::portfolio::format(&report, asset_type, mode));
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    /// Human-readable terminal table (default)
-    Table,
-    /// JSON (machine-readable, preserves all precision)
-    Json,
-}
-
-impl OutputMode {
-    /// Create from legacy boolean flag
-    ///
-    /// This helper enables gradual migration from `bool` to `OutputMode`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use interest::formatters::OutputMode;
-    ///
-    /// assert_eq!(OutputMode::from_json_flag(false), OutputMode::Table);
-    /// assert_eq!(OutputMode::from_json_flag(true), OutputMode::Json);
-    /// ```
-    pub fn from_json_flag(json_output: bool) -> Self {
-        if json_output {
-            Self::Json
-        } else {
-            Self::Table
-        }
-    }
-}
+pub use crate::options::{OutputMode, OutputOptions};
 
 /// Render an OutputDocument using the selected output mode.
-pub fn render_document(doc: &crate::output::OutputDocument, mode: OutputMode) -> String {
-    match mode {
-        OutputMode::Table => crate::output::terminal::TerminalRenderer::render(doc),
-        OutputMode::Json => crate::output::json::JsonRenderer::render(doc),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_output_mode_from_json_flag() {
-        assert_eq!(OutputMode::from_json_flag(false), OutputMode::Table);
-        assert_eq!(OutputMode::from_json_flag(true), OutputMode::Json);
-    }
-
-    #[test]
-    fn test_output_mode_equality() {
-        assert_eq!(OutputMode::Table, OutputMode::Table);
-        assert_eq!(OutputMode::Json, OutputMode::Json);
-        assert_ne!(OutputMode::Table, OutputMode::Json);
-    }
-
-    #[test]
-    fn test_output_mode_debug() {
-        // Verify Debug implementation works
-        assert_eq!(format!("{:?}", OutputMode::Table), "Table");
-        assert_eq!(format!("{:?}", OutputMode::Json), "Json");
+pub fn render_document(doc: &crate::output::OutputDocument, options: OutputOptions) -> String {
+    match options.output_mode {
+        OutputMode::Table => crate::output::terminal::TerminalRenderer::render(doc, options),
+        OutputMode::Json => crate::output::json::JsonRenderer::render(doc, options),
     }
 }

@@ -1,7 +1,7 @@
 //! Performance command dispatcher implementation
 
 use crate::ui::progress::{ProgressEvent, ProgressPrinter};
-use crate::{db, formatters, reports};
+use crate::{db, formatters, options, reports};
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use tracing;
@@ -45,7 +45,10 @@ fn parse_period_string(period: &str) -> Result<reports::Period> {
     }
 }
 
-pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> Result<()> {
+pub async fn dispatch_performance_show(
+    period_str: &str,
+    options: options::OutputOptions,
+) -> Result<()> {
     db::init_database(None)?;
     let mut conn = db::open_db(None)?;
 
@@ -81,9 +84,9 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
             let today = period_end;
             let price_start = std::cmp::max(earliest_date, period_start);
 
-            if !json_output && !skip_price_fetch {
+            if !options.is_json() && !skip_price_fetch {
                 let total = priceable_assets.len();
-                let printer = ProgressPrinter::new(json_output);
+                let printer = ProgressPrinter::new(options);
 
                 // Show initial spinner
                 printer.handle_event(&ProgressEvent::Spinner {
@@ -94,15 +97,40 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                     &mut conn,
                     &assets,
                     (price_start, today),
+                    options,
                     |event| {
                         // For ticker results, also update the spinner with current count
-                        if let ProgressEvent::TickerResult { current, total, .. } = event {
-                            printer.handle_event(event);
-                            printer.handle_event(&ProgressEvent::Spinner {
-                                message: format!("Fetching prices {}/{}...", current, total),
-                            });
-                        } else {
-                            printer.handle_event(event);
+                        match event {
+                            ProgressEvent::TickerResult {
+                                ticker,
+                                price,
+                                current,
+                                total,
+                            } => {
+                                let masked = if options.is_private() {
+                                    ProgressEvent::TickerResult {
+                                        ticker: ticker.clone(),
+                                        price: price
+                                            .as_ref()
+                                            .map(|_| "R$ ***".to_string())
+                                            .map_err(|err| err.clone()),
+                                        current: *current,
+                                        total: *total,
+                                    }
+                                } else {
+                                    ProgressEvent::TickerResult {
+                                        ticker: ticker.clone(),
+                                        price: price.clone(),
+                                        current: *current,
+                                        total: *total,
+                                    }
+                                };
+                                printer.handle_event(&masked);
+                                printer.handle_event(&ProgressEvent::Spinner {
+                                    message: format!("Fetching prices {}/{}...", current, total),
+                                });
+                            }
+                            _ => printer.handle_event(event),
                         }
                     },
                 )
@@ -118,6 +146,7 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
                     &mut conn,
                     &assets,
                     (price_start, today),
+                    options,
                 )
                 .await
                 .or_else(|e: anyhow::Error| {
@@ -132,19 +161,18 @@ pub async fn dispatch_performance_show(period_str: &str, json_output: bool) -> R
     let report = reports::calculate_performance(&mut conn, period)?;
 
     // Print performance output (JSON or table)
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    formatters::performance::print(&report, mode);
+    formatters::performance::print(&report, options);
 
     Ok(())
 }
 
 pub async fn dispatch_performance(
     action: &crate::cli::PerformanceCommands,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     match action {
         crate::cli::PerformanceCommands::Show { period } => {
-            dispatch_performance_show(period, json_output).await
+            dispatch_performance_show(period, options).await
         }
     }
 }

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::options::OutputOptions;
 use crate::utils::format_currency;
 
 use crate::db::models::{Asset, AssetType};
@@ -100,8 +101,9 @@ pub async fn ensure_prices_available(
     conn: &mut Connection,
     assets: &[Asset],
     date_range: (NaiveDate, NaiveDate),
+    options: OutputOptions,
 ) -> Result<()> {
-    ensure_prices_available_internal(conn, assets, date_range, &mut |_| {}).await
+    ensure_prices_available_internal(conn, assets, date_range, options, &mut |_| {}).await
 }
 
 /// Version with progress callback for UI updates
@@ -111,12 +113,13 @@ pub async fn ensure_prices_available_with_progress<F>(
     conn: &mut Connection,
     assets: &[Asset],
     date_range: (NaiveDate, NaiveDate),
+    options: OutputOptions,
     mut progress: F,
 ) -> Result<()>
 where
     F: FnMut(&ProgressEvent),
 {
-    ensure_prices_available_internal(conn, assets, date_range, &mut progress).await
+    ensure_prices_available_internal(conn, assets, date_range, options, &mut progress).await
 }
 
 /// Internal implementation that accepts optional progress callback
@@ -124,6 +127,7 @@ async fn ensure_prices_available_internal<F>(
     conn: &mut Connection,
     assets: &[Asset],
     date_range: (NaiveDate, NaiveDate),
+    options: OutputOptions,
     progress: &mut F,
 ) -> Result<()>
 where
@@ -274,7 +278,8 @@ where
                     "Fetching current prices for {} assets from Yahoo",
                     need_update_assets.len()
                 );
-                fetch_current_prices_with_progress(conn, &need_update_assets, progress).await?;
+                fetch_current_prices_with_progress(conn, &need_update_assets, options, progress)
+                    .await?;
                 progress(&ProgressEvent::Success {
                     message: "Price updates complete!".to_string(),
                 });
@@ -304,7 +309,7 @@ where
                 "Fetching current prices for {} assets from Yahoo",
                 priceable_assets.len()
             );
-            fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
+            fetch_current_prices_with_progress(conn, &priceable_assets, options, progress).await?;
             progress(&ProgressEvent::Success {
                 message: "Price updates complete!".to_string(),
             });
@@ -481,7 +486,7 @@ where
             "Fetching current prices for {} assets from Yahoo",
             priceable_assets.len()
         );
-        fetch_current_prices_with_progress(conn, &priceable_assets, progress).await?;
+        fetch_current_prices_with_progress(conn, &priceable_assets, options, progress).await?;
         progress(&ProgressEvent::Success {
             message: "Price updates complete!".to_string(),
         });
@@ -620,6 +625,7 @@ pub(crate) fn filter_priceable_assets(assets: &[Asset]) -> Vec<Asset> {
 async fn fetch_current_prices_with_progress<F>(
     conn: &Connection,
     assets: &[Asset],
+    options: OutputOptions,
     progress: &mut F,
 ) -> Result<()>
 where
@@ -659,7 +665,7 @@ where
                 successful_prices.push((asset_id, price));
                 progress(&ProgressEvent::TickerResult {
                     ticker: ticker.clone(),
-                    price: Ok(format_currency(price)),
+                    price: Ok(format_currency(price, options)),
                     current: completed,
                     total,
                 });

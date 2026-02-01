@@ -3,39 +3,45 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
-use crate::{db, formatters, reports};
+use crate::{db, formatters, options, reports};
 
 pub async fn dispatch_actions(
     action: &crate::cli::ActionCommands,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     match action {
-        crate::cli::ActionCommands::Rename { action } => dispatch_rename(action, json_output),
-        crate::cli::ActionCommands::Split { action } => dispatch_split(action, json_output),
-        crate::cli::ActionCommands::Bonus { action } => dispatch_bonus(action, json_output),
+        crate::cli::ActionCommands::Rename { action } => dispatch_rename(action, options),
+        crate::cli::ActionCommands::Split { action } => dispatch_split(action, options),
+        crate::cli::ActionCommands::Bonus { action } => dispatch_bonus(action, options),
         crate::cli::ActionCommands::Spinoff { action } => {
-            dispatch_exchange(action, json_output, db::AssetExchangeType::Spinoff)
+            dispatch_exchange(action, options, db::AssetExchangeType::Spinoff)
         }
         crate::cli::ActionCommands::Merger { action } => {
-            dispatch_exchange(action, json_output, db::AssetExchangeType::Merger)
+            dispatch_exchange(action, options, db::AssetExchangeType::Merger)
         }
     }
 }
 
-fn dispatch_rename(action: &crate::cli::RenameCommands, json_output: bool) -> Result<()> {
+fn dispatch_rename(
+    action: &crate::cli::RenameCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     match action {
         crate::cli::RenameCommands::Add {
             from,
             to,
             date,
             notes,
-        } => add_rename(from, to, date, notes.as_deref(), json_output),
-        crate::cli::RenameCommands::List { ticker } => list_renames(ticker.as_deref(), json_output),
-        crate::cli::RenameCommands::Remove { id } => remove_rename(*id, json_output),
+        } => add_rename(from, to, date, notes.as_deref(), options),
+        crate::cli::RenameCommands::List { ticker } => list_renames(ticker.as_deref(), options),
+        crate::cli::RenameCommands::Remove { id } => remove_rename(*id, options),
     }
 }
 
-fn dispatch_split(action: &crate::cli::SplitCommands, json_output: bool) -> Result<()> {
+fn dispatch_split(
+    action: &crate::cli::SplitCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     match action {
         crate::cli::SplitCommands::Add {
             ticker,
@@ -47,12 +53,12 @@ fn dispatch_split(action: &crate::cli::SplitCommands, json_output: bool) -> Resu
             quantity_adjustment,
             date,
             notes.as_deref(),
-            json_output,
+            options,
             db::CorporateActionType::Split,
         ),
         crate::cli::SplitCommands::List { ticker } => list_corporate_actions(
             ticker.as_deref(),
-            json_output,
+            options,
             &[
                 db::CorporateActionType::Split,
                 db::CorporateActionType::ReverseSplit,
@@ -60,7 +66,7 @@ fn dispatch_split(action: &crate::cli::SplitCommands, json_output: bool) -> Resu
         ),
         crate::cli::SplitCommands::Remove { id } => remove_corporate_action(
             *id,
-            json_output,
+            options,
             &[
                 db::CorporateActionType::Split,
                 db::CorporateActionType::ReverseSplit,
@@ -69,7 +75,10 @@ fn dispatch_split(action: &crate::cli::SplitCommands, json_output: bool) -> Resu
     }
 }
 
-fn dispatch_bonus(action: &crate::cli::BonusCommands, json_output: bool) -> Result<()> {
+fn dispatch_bonus(
+    action: &crate::cli::BonusCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     match action {
         crate::cli::BonusCommands::Add {
             ticker,
@@ -81,23 +90,23 @@ fn dispatch_bonus(action: &crate::cli::BonusCommands, json_output: bool) -> Resu
             quantity_adjustment,
             date,
             notes.as_deref(),
-            json_output,
+            options,
             db::CorporateActionType::Bonus,
         ),
         crate::cli::BonusCommands::List { ticker } => list_corporate_actions(
             ticker.as_deref(),
-            json_output,
+            options,
             &[db::CorporateActionType::Bonus],
         ),
         crate::cli::BonusCommands::Remove { id } => {
-            remove_corporate_action(*id, json_output, &[db::CorporateActionType::Bonus])
+            remove_corporate_action(*id, options, &[db::CorporateActionType::Bonus])
         }
     }
 }
 
 fn dispatch_exchange(
     action: &crate::cli::ExchangeCommands,
-    json_output: bool,
+    options: options::OutputOptions,
     event_type: db::AssetExchangeType,
 ) -> Result<()> {
     match action {
@@ -117,15 +126,13 @@ fn dispatch_exchange(
             allocated_cost,
             cash.as_deref(),
             notes.as_deref(),
-            json_output,
+            options,
             event_type,
         ),
         crate::cli::ExchangeCommands::List { ticker } => {
-            list_exchanges(ticker.as_deref(), json_output, event_type)
+            list_exchanges(ticker.as_deref(), options, event_type)
         }
-        crate::cli::ExchangeCommands::Remove { id } => {
-            remove_exchange(*id, json_output, event_type)
-        }
+        crate::cli::ExchangeCommands::Remove { id } => remove_exchange(*id, options, event_type),
     }
 }
 
@@ -139,7 +146,7 @@ fn add_rename(
     to: &str,
     date_str: &str,
     notes: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
 ) -> Result<()> {
     let effective_date = parse_date(date_str)?;
     let conn = open_conn()?;
@@ -160,26 +167,27 @@ fn add_rename(
     let rename_id = db::insert_asset_rename(&conn, &rename)?;
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::actions::format_rename_add(rename_id, from, to, effective_date, notes, mode)
+        formatters::actions::format_rename_add(rename_id, from, to, effective_date, notes, options)
     );
 
     Ok(())
 }
 
-fn list_renames(ticker: Option<&str>, json_output: bool) -> Result<()> {
+fn list_renames(ticker: Option<&str>, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     let rows = db::list_asset_renames_with_assets(&conn, ticker)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    println!("{}", formatters::actions::format_renames_list(&rows, mode));
+    println!(
+        "{}",
+        formatters::actions::format_renames_list(&rows, options)
+    );
 
     Ok(())
 }
 
-fn remove_rename(id: i64, json_output: bool) -> Result<()> {
+fn remove_rename(id: i64, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
     let rename = db::get_asset_rename(&conn, id)?.context("Rename id not found")?;
     let effective_date = rename.effective_date;
@@ -190,8 +198,7 @@ fn remove_rename(id: i64, json_output: bool) -> Result<()> {
     }
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    println!("{}", formatters::actions::format_rename_remove(id, mode));
+    println!("{}", formatters::actions::format_rename_remove(id, options));
 
     Ok(())
 }
@@ -201,7 +208,7 @@ fn add_split_or_bonus(
     quantity_str: &str,
     date_str: &str,
     notes: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
     action_type: db::CorporateActionType,
 ) -> Result<()> {
     let ex_date = parse_date(date_str)?;
@@ -246,7 +253,6 @@ fn add_split_or_bonus(
         crate::corporate_actions::apply_corporate_action(&conn, &action, &asset)?;
     }
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
         formatters::actions::format_corporate_action_add(
@@ -256,7 +262,7 @@ fn add_split_or_bonus(
             quantity_adjustment,
             ex_date,
             notes,
-            mode,
+            options,
         )
     );
 
@@ -265,7 +271,7 @@ fn add_split_or_bonus(
 
 fn list_corporate_actions(
     ticker: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
     types: &[db::CorporateActionType],
 ) -> Result<()> {
     let conn = open_conn()?;
@@ -275,10 +281,9 @@ fn list_corporate_actions(
         .filter(|(action, _)| types.contains(&action.action_type))
         .collect();
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::actions::format_corporate_actions_list(&filtered, mode)
+        formatters::actions::format_corporate_actions_list(&filtered, options)
     );
 
     Ok(())
@@ -286,7 +291,7 @@ fn list_corporate_actions(
 
 fn remove_corporate_action(
     id: i64,
-    json_output: bool,
+    options: options::OutputOptions,
     allowed_types: &[db::CorporateActionType],
 ) -> Result<()> {
     let conn = open_conn()?;
@@ -303,10 +308,9 @@ fn remove_corporate_action(
     }
     reports::invalidate_snapshots_after(&conn, action.ex_date)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::actions::format_corporate_action_remove(id, mode)
+        formatters::actions::format_corporate_action_remove(id, options)
     );
 
     Ok(())
@@ -321,7 +325,7 @@ fn add_exchange(
     allocated_cost_str: &str,
     cash_str: Option<&str>,
     notes: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
     event_type: db::AssetExchangeType,
 ) -> Result<()> {
     let effective_date = parse_date(date_str)?;
@@ -354,7 +358,6 @@ fn add_exchange(
     let exchange_id = db::insert_asset_exchange(&conn, &exchange)?;
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
         formatters::actions::format_exchange_add(
@@ -367,7 +370,7 @@ fn add_exchange(
             allocated_cost,
             cash_amount,
             notes,
-            mode,
+            options,
         )
     );
 
@@ -376,7 +379,7 @@ fn add_exchange(
 
 fn list_exchanges(
     ticker: Option<&str>,
-    json_output: bool,
+    options: options::OutputOptions,
     event_type: db::AssetExchangeType,
 ) -> Result<()> {
     let conn = open_conn()?;
@@ -386,16 +389,19 @@ fn list_exchanges(
         .filter(|(exchange, _, _)| exchange.event_type == event_type)
         .collect();
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
     println!(
         "{}",
-        formatters::actions::format_exchanges_list(&filtered, mode)
+        formatters::actions::format_exchanges_list(&filtered, options)
     );
 
     Ok(())
 }
 
-fn remove_exchange(id: i64, json_output: bool, event_type: db::AssetExchangeType) -> Result<()> {
+fn remove_exchange(
+    id: i64,
+    options: options::OutputOptions,
+    event_type: db::AssetExchangeType,
+) -> Result<()> {
     let conn = open_conn()?;
     let exchange = db::get_asset_exchange(&conn, id)?.context("Exchange id not found")?;
 
@@ -409,8 +415,10 @@ fn remove_exchange(id: i64, json_output: bool, event_type: db::AssetExchangeType
     }
     reports::invalidate_snapshots_after(&conn, exchange.effective_date)?;
 
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    println!("{}", formatters::actions::format_exchange_remove(id, mode));
+    println!(
+        "{}",
+        formatters::actions::format_exchange_remove(id, options)
+    );
 
     Ok(())
 }

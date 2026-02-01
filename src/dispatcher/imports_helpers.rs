@@ -188,11 +188,16 @@ pub(crate) fn import_ofertas(
 #[cfg(test)]
 mod tests {
     use crate::formatters;
+    use crate::options::OutputOptions;
 
     #[test]
     fn ceil_importstats_maps_correctly() {
         // Basic smoke test to ensure CEI mapping populates fields
         let txs: Vec<crate::importers::RawTransaction> = vec![];
-        assert!(formatters::imports::format_cei_preview_table(&txs).is_none());
+        assert!(formatters::imports::format_cei_preview_table(
+            &txs,
+            OutputOptions::from_flags(false, false)
+        )
+        .is_none());
     }
 }

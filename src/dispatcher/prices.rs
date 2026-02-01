@@ -3,13 +3,17 @@ use colored::Colorize;
 use std::collections::HashSet;
 
 use crate::formatters;
+use crate::options;
 
-pub async fn dispatch_prices(action: &crate::cli::PriceCommands, json_output: bool) -> Result<()> {
+pub async fn dispatch_prices(
+    action: &crate::cli::PriceCommands,
+    options: options::OutputOptions,
+) -> Result<()> {
     use crate::db;
     use crate::importers::b3_cotahist;
 
     match action {
-        crate::cli::PriceCommands::Update => dispatch_price_update().await,
+        crate::cli::PriceCommands::Update => dispatch_price_update(options).await,
         crate::cli::PriceCommands::ImportB3 { year, no_cache } => {
             let year = *year;
             let no_cache = *no_cache;
@@ -17,7 +21,7 @@ pub async fn dispatch_prices(action: &crate::cli::PriceCommands, json_output: bo
 
             // Initialize database
             db::init_database(None)?;
-            let printer = crate::ui::progress::ProgressPrinter::new(json_output);
+            let printer = crate::ui::progress::ProgressPrinter::new(options);
             printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
                 message: format!("Importing B3 COTAHIST for year {}...", year),
             });
@@ -129,12 +133,12 @@ pub async fn dispatch_prices(action: &crate::cli::PriceCommands, json_output: bo
             Ok(())
         }
         crate::cli::PriceCommands::History { ticker, from, to } => {
-            dispatch_price_history(ticker, from, to).await
+            dispatch_price_history(ticker, from, to, options).await
         }
     }
 }
 
-async fn dispatch_price_update() -> Result<()> {
+async fn dispatch_price_update(options: options::OutputOptions) -> Result<()> {
     use crate::pricing::PriceFetcher;
     use colored::Colorize;
 
@@ -184,7 +188,11 @@ async fn dispatch_price_update() -> Result<()> {
 
                 match crate::db::insert_price_history(&conn, &price_history) {
                     Ok(_) => {
-                        println!("{} {}", "✓".green(), crate::utils::format_currency(price));
+                        println!(
+                            "{} {}",
+                            "✓".green(),
+                            crate::utils::format_currency(price, options)
+                        );
                         updated += 1;
                     }
                     Err(e) => {
@@ -209,7 +217,12 @@ async fn dispatch_price_update() -> Result<()> {
     Ok(())
 }
 
-async fn dispatch_price_history(ticker: &str, from: &str, to: &str) -> Result<()> {
+async fn dispatch_price_history(
+    ticker: &str,
+    from: &str,
+    to: &str,
+    options: options::OutputOptions,
+) -> Result<()> {
     use anyhow::Context;
     use chrono::NaiveDate;
     use colored::Colorize;
@@ -234,7 +247,10 @@ async fn dispatch_price_history(ticker: &str, from: &str, to: &str) -> Result<()
 
     let prices = crate::pricing::yahoo::fetch_historical_prices(ticker, from_date, to_date).await?;
 
-    println!("\n{}", formatters::prices::format_prices_table(&prices));
+    println!(
+        "\n{}",
+        formatters::prices::format_prices_table(&prices, options)
+    );
 
     if !prices.is_empty() {
         println!(

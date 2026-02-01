@@ -1,6 +1,6 @@
 //! Performance report formatting (JSON and terminal table)
 
-use crate::formatters::OutputMode;
+use crate::formatters::OutputOptions;
 use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, Value, ValueKind,
 };
@@ -24,9 +24,9 @@ use rust_decimal::Decimal;
 /// let output = formatters::performance::format(&report, mode);
 /// println!("{}", output);
 /// ```
-pub fn format(report: &PerformanceReport, mode: OutputMode) -> String {
+pub fn format(report: &PerformanceReport, options: OutputOptions) -> String {
     let document = build_performance_document(report);
-    crate::formatters::render_document(&document, mode)
+    crate::formatters::render_document(&document, options)
 }
 
 /// Print performance report to stdout
@@ -39,8 +39,8 @@ pub fn format(report: &PerformanceReport, mode: OutputMode) -> String {
 /// let mode = OutputMode::from_json_flag(json_output);
 /// formatters::performance::print(&report, mode);
 /// ```
-pub fn print(report: &PerformanceReport, mode: OutputMode) {
-    println!("{}", format(report, mode));
+pub fn print(report: &PerformanceReport, options: OutputOptions) {
+    println!("{}", format(report, options));
 }
 
 fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_json_decimals_as_strings() {
         let report = create_test_report();
-        let json_str = format(&report, OutputMode::Json);
+        let json_str = format(&report, OutputOptions::from_flags(true, false));
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn test_json_dates_as_strings() {
         let report = create_test_report();
-        let json_str = format(&report, OutputMode::Json);
+        let json_str = format(&report, OutputOptions::from_flags(true, false));
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn test_table_has_key_sections() {
         let report = create_test_report();
-        let output = format(&report, OutputMode::Table);
+        let output = format(&report, OutputOptions::from_flags(false, false));
 
         assert!(output.contains("Performance Report"));
         assert!(output.contains("Start Value"));

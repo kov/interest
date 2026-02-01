@@ -4,8 +4,9 @@
 //! the concerns of data calculation from presentation.
 
 use crate::db::models::AssetType;
+use crate::options::OutputOptions;
 use crate::reports::PortfolioReport;
-use crate::utils::format_currency;
+use crate::utils::{format_currency, format_quantity};
 use colored::Colorize;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -69,7 +70,11 @@ pub fn format_portfolio_json(report: &PortfolioReport) -> String {
 }
 
 /// Format a portfolio report for terminal table output
-pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Option<&str>) -> String {
+pub fn format_portfolio_table(
+    report: &PortfolioReport,
+    asset_type_filter: Option<&str>,
+    options: OutputOptions,
+) -> String {
     let mut output = String::new();
 
     // Display header
@@ -155,21 +160,21 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
             .map(|p| {
                 let price_str = p
                     .current_price
-                    .map(|pr: Decimal| format_currency(pr))
+                    .map(|pr: Decimal| format_currency(pr, options))
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let value_str = p
                     .current_value
-                    .map(|v: Decimal| format_currency(v))
+                    .map(|v: Decimal| format_currency(v, options))
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let pl_str = p
                     .unrealized_pl
                     .map(|pl: Decimal| {
                         if pl >= Decimal::ZERO {
-                            format_currency(pl).green().to_string()
+                            format_currency(pl, options).green().to_string()
                         } else {
-                            format_currency(pl).red().to_string()
+                            format_currency(pl, options).red().to_string()
                         }
                     })
                     .unwrap_or_else(|| "N/A".to_string());
@@ -188,9 +193,9 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
 
                 PositionRow {
                     ticker: p.asset.ticker.clone(),
-                    quantity: format!("{:.2}", p.quantity),
-                    avg_cost: format_currency(p.average_cost),
-                    total_cost: format_currency(p.total_cost),
+                    quantity: format_quantity(p.quantity, options),
+                    avg_cost: format_currency(p.average_cost, options),
+                    total_cost: format_currency(p.total_cost, options),
                     price: price_str,
                     value: value_str,
                     pl: pl_str,
@@ -210,14 +215,14 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
         output.push_str(&format!("\n{} Subtotal", "─".repeat(40).bright_black()));
         output.push_str(&format!(
             "\n  Cost: {}  |  Value: {}  |  ",
-            format_currency(subtotal_cost),
-            format_currency(subtotal_value)
+            format_currency(subtotal_cost, options),
+            format_currency(subtotal_value, options)
         ));
 
         let pl_colored = if subtotal_pl >= Decimal::ZERO {
-            format!("P&L: {}", format_currency(subtotal_pl)).green()
+            format!("P&L: {}", format_currency(subtotal_pl, options)).green()
         } else {
-            format!("P&L: {}", format_currency(subtotal_pl)).red()
+            format!("P&L: {}", format_currency(subtotal_pl, options)).red()
         };
         output.push_str(&pl_colored);
 
@@ -238,18 +243,18 @@ pub fn format_portfolio_table(report: &PortfolioReport, asset_type_filter: Optio
     output.push_str(&format!(
         "\n{:<20} {}",
         "Total Cost:".bold(),
-        format_currency(report.total_cost)
+        format_currency(report.total_cost, options)
     ));
     output.push_str(&format!(
         "\n{:<20} {}",
         "Total Value:".bold(),
-        format_currency(report.total_value)
+        format_currency(report.total_value, options)
     ));
 
     let pl_colored = if report.total_pl >= Decimal::ZERO {
-        format_currency(report.total_pl).green()
+        format_currency(report.total_pl, options).green()
     } else {
-        format_currency(report.total_pl).red()
+        format_currency(report.total_pl, options).red()
     };
     output.push_str(&format!("\n{:<20} {}", "Total P&L:".bold(), pl_colored));
 
@@ -399,7 +404,8 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format_portfolio_table(&report, None);
+        let options = OutputOptions::from_flags(false, false);
+        let output = format_portfolio_table(&report, None, options);
 
         // Verify grouping by asset type
         assert!(output.contains("## Stocks (STOCK)"));
@@ -449,7 +455,8 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format_portfolio_table(&report, None);
+        let options = OutputOptions::from_flags(false, false);
+        let output = format_portfolio_table(&report, None, options);
 
         // Find positions in output - they should be in alphabetical order
         let bbas_idx = output.find("BBAS3").unwrap();
@@ -498,7 +505,8 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format_portfolio_table(&report, None);
+        let options = OutputOptions::from_flags(false, false);
+        let output = format_portfolio_table(&report, None, options);
 
         // Verify subtotals are shown
         assert!(
@@ -564,7 +572,8 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format_portfolio_table(&report, Some("STOCK"));
+        let options = OutputOptions::from_flags(false, false);
+        let output = format_portfolio_table(&report, Some("STOCK"), options);
 
         // Should only show Stocks group
         assert!(
@@ -615,7 +624,8 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format_portfolio_table(&report, None);
+        let options = OutputOptions::from_flags(false, false);
+        let output = format_portfolio_table(&report, None, options);
 
         // Verify overall summary section
         assert!(

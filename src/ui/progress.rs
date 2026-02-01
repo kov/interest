@@ -1,3 +1,4 @@
+use crate::options::OutputOptions;
 use crate::ui::crossterm_engine::Spinner;
 use colored::Colorize;
 use std::io::{self, IsTerminal, Write};
@@ -97,8 +98,8 @@ pub struct ProgressPrinter {
 }
 
 impl ProgressPrinter {
-    pub fn new(json_output: bool) -> Self {
-        let enabled = !json_output
+    pub fn new(options: OutputOptions) -> Self {
+        let enabled = !options.is_json()
             && io::stdout().is_terminal()
             && std::env::var("INTEREST_NO_SPINNER").ok().as_deref() != Some("1");
         let state = Arc::new(Mutex::new(SpinnerState::new()));

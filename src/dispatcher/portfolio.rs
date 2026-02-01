@@ -10,7 +10,7 @@ use formatters::portfolio::format_empty_portfolio;
 pub async fn dispatch_portfolio_show(
     asset_type: Option<&str>,
     as_of_date: Option<&str>,
-    json_output: bool,
+    options: crate::options::OutputOptions,
 ) -> Result<()> {
     tracing::info!("Generating portfolio report");
 
@@ -68,7 +68,7 @@ pub async fn dispatch_portfolio_show(
     let earliest_date = db::get_earliest_transaction_date(&conn)?;
     if earliest_date.is_none() {
         // No transactions - nothing to show
-        if !json_output {
+        if !options.is_json() {
             println!("{}", format_empty_portfolio());
         }
         return Ok(());
@@ -86,7 +86,7 @@ pub async fn dispatch_portfolio_show(
     };
 
     if report.positions.is_empty() {
-        if !json_output {
+        if !options.is_json() {
             println!("{}", format_empty_portfolio());
         }
         return Ok(());
@@ -94,7 +94,7 @@ pub async fn dispatch_portfolio_show(
 
     // Now fetch prices ONLY for assets that have current positions
     if !skip_price_fetch {
-        if !json_output {
+        if !options.is_json() {
             let assets_with_positions: Vec<_> =
                 report.positions.iter().map(|p| p.asset.clone()).collect();
             let priceable_assets =
@@ -102,7 +102,7 @@ pub async fn dispatch_portfolio_show(
 
             if !assets_with_positions.is_empty() {
                 let total = priceable_assets.len();
-                let printer = ProgressPrinter::new(json_output);
+                let printer = ProgressPrinter::new(options);
                 let price_range = if let Some(date) = historical_date {
                     (date, date)
                 } else {
@@ -118,15 +118,40 @@ pub async fn dispatch_portfolio_show(
                     &mut conn,
                     &assets_with_positions,
                     price_range,
+                    options,
                     |event| {
                         // For ticker results, also update the spinner with current count
-                        if let ProgressEvent::TickerResult { current, total, .. } = event {
-                            printer.handle_event(event);
-                            printer.handle_event(&ProgressEvent::Spinner {
-                                message: format!("Fetching prices {}/{}...", current, total),
-                            });
-                        } else {
-                            printer.handle_event(event);
+                        match event {
+                            ProgressEvent::TickerResult {
+                                ticker,
+                                price,
+                                current,
+                                total,
+                            } => {
+                                let masked = if options.is_private() {
+                                    ProgressEvent::TickerResult {
+                                        ticker: ticker.clone(),
+                                        price: price
+                                            .as_ref()
+                                            .map(|_| "R$ ***".to_string())
+                                            .map_err(|err| err.clone()),
+                                        current: *current,
+                                        total: *total,
+                                    }
+                                } else {
+                                    ProgressEvent::TickerResult {
+                                        ticker: ticker.clone(),
+                                        price: price.clone(),
+                                        current: *current,
+                                        total: *total,
+                                    }
+                                };
+                                printer.handle_event(&masked);
+                                printer.handle_event(&ProgressEvent::Spinner {
+                                    message: format!("Fetching prices {}/{}...", current, total),
+                                });
+                            }
+                            _ => printer.handle_event(event),
                         }
                     },
                 )
@@ -166,6 +191,7 @@ pub async fn dispatch_portfolio_show(
                     &mut conn,
                     &assets_with_positions,
                     price_range,
+                    options,
                 )
                 .await
                 .or_else(|e: anyhow::Error| {
@@ -185,11 +211,10 @@ pub async fn dispatch_portfolio_show(
     }
 
     // Print portfolio output (JSON or table)
-    let mode = formatters::OutputMode::from_json_flag(json_output);
-    formatters::portfolio::print(&report, asset_type_filter, mode);
+    formatters::portfolio::print(&report, asset_type_filter, options);
 
     // Display asset allocation if showing full portfolio in table mode
-    if !json_output && asset_type_filter.is_none() {
+    if !options.is_json() && asset_type_filter.is_none() {
         let allocation = calculate_allocation(&report);
 
         if allocation.len() > 1 {
@@ -200,12 +225,16 @@ pub async fn dispatch_portfolio_show(
 
             for (asset_type, (value, pct)) in alloc_vec {
                 let type_ref: &db::AssetType = asset_type;
-                println!(
-                    "  {}: {} ({:.2}%)",
-                    type_ref.as_str().to_uppercase(),
-                    format_currency(*value).cyan(),
-                    pct
-                );
+                if options.is_private() {
+                    println!("  {}: {:.2}%", type_ref.as_str().to_uppercase(), pct);
+                } else {
+                    println!(
+                        "  {}: {} ({:.2}%)",
+                        type_ref.as_str().to_uppercase(),
+                        format_currency(*value, options).cyan(),
+                        pct
+                    );
+                }
             }
         }
     }
@@ -216,11 +245,11 @@ pub async fn dispatch_portfolio_show(
 // Top-level dispatcher for portfolio sub-commands
 pub async fn dispatch_portfolio(
     action: &crate::cli::PortfolioCommands,
-    json_output: bool,
+    options: crate::options::OutputOptions,
 ) -> Result<()> {
     match action {
         crate::cli::PortfolioCommands::Show { asset_type, at } => {
-            dispatch_portfolio_show(asset_type.as_deref(), at.as_deref(), json_output).await
+            dispatch_portfolio_show(asset_type.as_deref(), at.as_deref(), options).await
         }
     }
 }

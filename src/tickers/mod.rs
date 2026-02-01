@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::db::AssetType;
+use crate::options::OutputOptions;
 pub(crate) mod ambima;
 
 const B3_REQUEST_BASE_URL: &str = "https://arquivos.b3.com.br/api/download/requestname?fileName=InstrumentsConsolidatedFile&date=";
@@ -317,7 +318,8 @@ fn refresh_registry_blocking() -> Result<()> {
     rt.block_on(async {
         let conn = crate::db::open_db(None)?;
         let sources = crate::scraping::maisretorno::select_sources(None);
-        let printer = crate::ui::progress::ProgressPrinter::new(false);
+        let printer =
+            crate::ui::progress::ProgressPrinter::new(OutputOptions::from_flags(false, false));
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::ui::progress::ProgressEvent>();
         let progress_handle = tokio::spawn(async move {
