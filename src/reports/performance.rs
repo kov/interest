@@ -243,23 +243,28 @@ fn build_asset_breakdown(
     }
 
     let mut breakdown = HashMap::new();
-    for (asset_type, start_val) in start_map.iter() {
-        let end_val = end_map.get(asset_type).cloned().unwrap_or(Decimal::ZERO);
-        let return_pct = if *start_val > Decimal::ZERO {
-            ((end_val - *start_val) / *start_val) * Decimal::from(100)
+    let mut asset_types: Vec<AssetType> = start_map.keys().chain(end_map.keys()).copied().collect();
+    asset_types.sort();
+    asset_types.dedup();
+
+    for asset_type in asset_types {
+        let start_val = start_map.get(&asset_type).cloned().unwrap_or(Decimal::ZERO);
+        let end_val = end_map.get(&asset_type).cloned().unwrap_or(Decimal::ZERO);
+        let return_pct = if start_val > Decimal::ZERO {
+            ((end_val - start_val) / start_val) * Decimal::from(100)
         } else {
             Decimal::ZERO
         };
         let contribution = if portfolio_start_value > Decimal::ZERO {
-            (*start_val / portfolio_start_value) * return_pct
+            (start_val / portfolio_start_value) * return_pct
         } else {
             Decimal::ZERO
         };
         breakdown.insert(
-            *asset_type,
+            asset_type,
             AssetPerformance {
-                asset_type: *asset_type,
-                start_value: *start_val,
+                asset_type,
+                start_value: start_val,
                 end_value: end_val,
                 return_pct,
                 contribution_to_total: contribution,
