@@ -665,7 +665,7 @@ where
                 successful_prices.push((asset_id, price));
                 progress(&ProgressEvent::TickerResult {
                     ticker: ticker.clone(),
-                    price: Ok(format_currency(price, options)),
+                    price: Ok(format_currency(price, &options)),
                     current: completed,
                     total,
                 });

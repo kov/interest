@@ -22,7 +22,7 @@ pub async fn dispatch_tickers(
             let path_str = path.display().to_string();
             println!(
                 "{}",
-                formatters::tickers::format_refresh(&path_str, options)
+                formatters::tickers::format_refresh(&path_str, options)?
             );
             Ok(())
         }
@@ -48,7 +48,7 @@ pub async fn dispatch_tickers(
                     source_url.as_deref(),
                     unknown_count,
                     options,
-                )
+                )?
             );
             Ok(())
         }
@@ -59,7 +59,7 @@ pub async fn dispatch_tickers(
 
             println!(
                 "{}",
-                formatters::tickers::format_unknown_list(&unknown_assets, options)
+                formatters::tickers::format_unknown_list(&unknown_assets, options)?
             );
             Ok(())
         }
@@ -79,7 +79,7 @@ pub async fn dispatch_tickers(
                 db::update_asset_type(&conn, ticker, &parsed)?;
                 println!(
                     "{}",
-                    formatters::tickers::format_resolve(ticker, parsed.as_str(), options)
+                    formatters::tickers::format_resolve(ticker, parsed.as_str(), options)?
                 );
                 return Ok(());
             }

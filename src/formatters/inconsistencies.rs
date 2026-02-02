@@ -1,15 +1,16 @@
 use crate::db;
-/// Formatters for inconsistency commands
 use crate::formatters::OutputOptions;
 use crate::output::{ColumnDef, Row, ValueKind};
 use crate::output::{KeyValueRow, OutputBlock, OutputDocument, Value};
+/// Formatters for inconsistency commands
+use anyhow::Result;
 
 //
 // 1. RESOLVE CONFIRMATION
 //
 
 /// Format resolve confirmation
-pub fn format_resolve(issue_id: i64, options: OutputOptions) -> String {
+pub fn format_resolve(issue_id: i64, options: OutputOptions) -> Result<String> {
     let document = build_resolve_document(issue_id);
     crate::formatters::render_document(&document, options)
 }
@@ -17,13 +18,16 @@ pub fn format_resolve(issue_id: i64, options: OutputOptions) -> String {
 /// Format ignore confirmation
 /// TODO: Hook up when inconsistencies ignore command is added
 #[allow(dead_code)]
-pub fn format_ignore(issue_id: i64, options: OutputOptions) -> String {
+pub fn format_ignore(issue_id: i64, options: OutputOptions) -> Result<String> {
     let document = build_ignore_document(issue_id);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format inconsistencies list
-pub fn format_inconsistencies_list(issues: &[db::Inconsistency], options: OutputOptions) -> String {
+pub fn format_inconsistencies_list(
+    issues: &[db::Inconsistency],
+    options: OutputOptions,
+) -> Result<String> {
     let document = build_inconsistencies_list_document(issues);
     crate::formatters::render_document(&document, options)
 }
@@ -114,7 +118,7 @@ mod tests {
 
     #[test]
     fn test_resolve_json_structure() {
-        let json_str = format_resolve(42, OutputOptions::from_flags(true, false));
+        let json_str = format_resolve(42, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let blocks = value["blocks"].as_array().expect("blocks array missing");
         let mut values = Vec::new();
@@ -136,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_ignore_json_structure() {
-        let json_str = format_ignore(99, OutputOptions::from_flags(true, false));
+        let json_str = format_ignore(99, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let blocks = value["blocks"].as_array().expect("blocks array missing");
         let mut values = Vec::new();
@@ -158,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_resolve_table_format() {
-        let output = format_resolve(42, OutputOptions::from_flags(false, false));
+        let output = format_resolve(42, OutputOptions::from_flags(false, false)).unwrap();
         assert!(output.contains("Inconsistency resolved"));
     }
 }

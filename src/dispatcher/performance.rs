@@ -86,7 +86,7 @@ pub async fn dispatch_performance_show(
 
             if !options.is_json() && !skip_price_fetch {
                 let total = priceable_assets.len();
-                let printer = ProgressPrinter::new(options);
+                let printer = ProgressPrinter::new(&options);
 
                 // Show initial spinner
                 printer.handle_event(&ProgressEvent::Spinner {
@@ -97,7 +97,7 @@ pub async fn dispatch_performance_show(
                     &mut conn,
                     &assets,
                     (price_start, today),
-                    options,
+                    options.clone(),
                     |event| {
                         // For ticker results, also update the spinner with current count
                         match event {
@@ -146,7 +146,7 @@ pub async fn dispatch_performance_show(
                     &mut conn,
                     &assets,
                     (price_start, today),
-                    options,
+                    options.clone(),
                 )
                 .await
                 .or_else(|e: anyhow::Error| {
@@ -161,7 +161,8 @@ pub async fn dispatch_performance_show(
     let report = reports::calculate_performance(&mut conn, period)?;
 
     // Print performance output (JSON or table)
-    formatters::performance::print(&report, options);
+    let output = formatters::performance::format(&report, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }

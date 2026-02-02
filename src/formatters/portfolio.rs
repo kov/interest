@@ -7,6 +7,7 @@ use crate::output::{
 };
 use crate::reports::aggregation::aggregate_positions_by_asset_type;
 use crate::reports::PortfolioReport;
+use anyhow::Result;
 use std::collections::BTreeMap;
 
 /// Format portfolio report (testable, no I/O)
@@ -24,34 +25,16 @@ use std::collections::BTreeMap;
 ///
 /// ```ignore
 /// let mode = OutputMode::from_json_flag(json_output);
-/// let output = formatters::portfolio::format(&report, Some(AssetType::Stock), mode);
+/// let output = formatters::portfolio::format(&report, Some(AssetType::Stock), mode)?;
 /// println!("{}", output);
 /// ```
 pub fn format(
     report: &PortfolioReport,
     asset_type_filter: Option<AssetType>,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_portfolio_document(report, asset_type_filter);
     crate::formatters::render_document(&document, options)
-}
-
-/// Print portfolio report to stdout
-///
-/// Wrapper around `format()` that handles I/O.
-///
-/// # Example
-///
-/// ```ignore
-/// let mode = OutputMode::from_json_flag(json_output);
-/// formatters::portfolio::print(&report, Some(AssetType::Fii), mode);
-/// ```
-pub fn print(
-    report: &PortfolioReport,
-    asset_type_filter: Option<AssetType>,
-    options: OutputOptions,
-) {
-    println!("{}", format(report, asset_type_filter, options));
 }
 
 fn build_portfolio_document(
@@ -232,6 +215,7 @@ pub fn format_empty_portfolio() -> String {
         meta: Default::default(),
     };
     crate::formatters::render_document(&document, OutputOptions::from_flags(false, false))
+        .unwrap_or_else(|_| "No positions found".to_string())
 }
 
 #[cfg(test)]
@@ -311,7 +295,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let json_str = format(&report, None, OutputOptions::from_flags(true, false));
+        let json_str = format(&report, None, OutputOptions::from_flags(true, false)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -417,7 +401,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format(&report, None, OutputOptions::from_flags(false, false));
+        let output = format(&report, None, OutputOptions::from_flags(false, false)).unwrap();
 
         // Verify grouping by asset type
         assert!(output.contains("Stocks (STOCK)"));
@@ -467,7 +451,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format(&report, None, OutputOptions::from_flags(false, false));
+        let output = format(&report, None, OutputOptions::from_flags(false, false)).unwrap();
 
         // Find positions in output - they should be in alphabetical order
         let bbas_idx = output.find("BBAS3").unwrap();
@@ -516,7 +500,7 @@ mod tests {
             total_pl_pct: ((total_value - total_cost) / total_cost) * Decimal::from(100),
         };
 
-        let output = format(&report, None, OutputOptions::from_flags(false, false));
+        let output = format(&report, None, OutputOptions::from_flags(false, false)).unwrap();
 
         // Verify subtotals are shown
         assert!(

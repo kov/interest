@@ -1,13 +1,14 @@
-/// Formatters for ticker/B3 cache commands
 use crate::formatters::OutputOptions;
 use crate::output::{ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, Value, ValueKind};
+/// Formatters for ticker/B3 cache commands
+use anyhow::Result;
 
 //
 // 1. REFRESH CONFIRMATION
 //
 
 /// Format refresh confirmation
-pub fn format_refresh(path: &str, options: OutputOptions) -> String {
+pub fn format_refresh(path: &str, options: OutputOptions) -> Result<String> {
     let document = build_refresh_document(path);
     crate::formatters::render_document(&document, options)
 }
@@ -20,7 +21,7 @@ pub fn format_status(
     source_url: Option<&str>,
     unknown_count: usize,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_status_document(
         cache_path,
         cache_exists,
@@ -32,13 +33,13 @@ pub fn format_status(
 }
 
 /// Format resolve confirmation
-pub fn format_resolve(ticker: &str, asset_type: &str, options: OutputOptions) -> String {
+pub fn format_resolve(ticker: &str, asset_type: &str, options: OutputOptions) -> Result<String> {
     let document = build_resolve_document(ticker, asset_type);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format unknown assets list
-pub fn format_unknown_list(assets: &[crate::db::Asset], options: OutputOptions) -> String {
+pub fn format_unknown_list(assets: &[crate::db::Asset], options: OutputOptions) -> Result<String> {
     let document = build_unknown_list_document(assets);
     crate::formatters::render_document(&document, options)
 }
@@ -184,7 +185,8 @@ mod tests {
 
     #[test]
     fn test_refresh_json_structure() {
-        let json_str = format_refresh("/path/to/cache", OutputOptions::from_flags(true, false));
+        let json_str =
+            format_refresh("/path/to/cache", OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let blocks = value["blocks"].as_array().expect("blocks array missing");
         let mut values = Vec::new();
@@ -206,7 +208,8 @@ mod tests {
 
     #[test]
     fn test_resolve_json_structure() {
-        let json_str = format_resolve("PETR4", "STOCK", OutputOptions::from_flags(true, false));
+        let json_str =
+            format_resolve("PETR4", "STOCK", OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let blocks = value["blocks"].as_array().expect("blocks array missing");
         let mut values = Vec::new();
@@ -237,7 +240,8 @@ mod tests {
             None,
             5,
             OutputOptions::from_flags(false, false),
-        );
+        )
+        .unwrap();
         assert!(output.contains("B3 Tickers Cache Status"));
         assert!(output.contains("Unknown assets"));
     }

@@ -1,3 +1,4 @@
+mod chat;
 mod cli;
 mod commands;
 mod corporate_actions;
@@ -51,7 +52,8 @@ async fn main() -> Result<()> {
     let stdout_is_tty = std::io::stdout().is_terminal();
     let disable_color = cli.no_color || !stdout_is_tty || cli.json;
 
-    let output_options = OutputOptions::from_flags(cli.json, cli.privacy);
+    let output_options =
+        OutputOptions::from_flags(cli.json, cli.privacy).with_color_enabled(!disable_color);
 
     // Initialize logging - always write to stderr to keep stdout clean
     let env_filter = EnvFilter::try_from_default_env()
@@ -80,9 +82,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    if matches!(command, Commands::Interactive) {
-        return crate::ui::launch_tui(output_options).await;
+    match command {
+        Commands::Interactive => crate::ui::launch_tui(output_options).await,
+        Commands::Chat => crate::ui::launch_chat(output_options).await,
+        _ => dispatcher::dispatch_command(&command, output_options).await,
     }
-
-    dispatcher::dispatch_command(&command, output_options).await
 }

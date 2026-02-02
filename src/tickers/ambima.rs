@@ -10,7 +10,7 @@ const AMBIMA_BASE_URL: &str = "https://data.anbima.com.br/debentures";
 pub fn is_debenture(ticker: &str) -> Result<bool> {
     let url = format!("{}/{}/caracteristicas", AMBIMA_BASE_URL, ticker);
     let prefix = format!("Checking if {} is a bond: ", ticker);
-    let printer = ProgressPrinter::new(OutputOptions::from_flags(false, false));
+    let printer = ProgressPrinter::new(&OutputOptions::from_flags(false, false));
     printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
         message: format!("{}Opening Ambima page", prefix),
     });

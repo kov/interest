@@ -6,6 +6,7 @@ use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, Value, ValueKind,
 };
 use crate::reports::cashflow::{CashFlowEntry, CashFlowReport, CashFlowStats, TrendDirection};
+use anyhow::Result;
 use chrono::Datelike;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -18,7 +19,7 @@ type MonthlyBreakdown = HashMap<(i32, u32), HashMap<AssetType, (Decimal, Decimal
 // =============================================================================
 
 /// Format cash flow report (standard year-by-year breakdown)
-pub fn format_cashflow_show(report: &CashFlowReport, options: OutputOptions) -> String {
+pub fn format_cashflow_show(report: &CashFlowReport, options: OutputOptions) -> Result<String> {
     let document = build_cashflow_show_document(report);
     crate::formatters::render_document(&document, options)
 }
@@ -29,7 +30,7 @@ pub fn format_cashflow_show_monthly(
     report: &CashFlowReport,
     entries: &[CashFlowEntry],
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_cashflow_monthly_document(report, entries);
     crate::formatters::render_document(&document, options)
 }
@@ -40,7 +41,7 @@ pub fn format_cashflow_stats(
     from_date: &str,
     to_date: &str,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_cashflow_stats_document(stats, from_date, to_date);
     crate::formatters::render_document(&document, options)
 }
@@ -505,7 +506,8 @@ mod tests {
     #[test]
     fn test_cashflow_show_json_decimals_as_strings() {
         let report = create_test_report();
-        let json_str = format_cashflow_show(&report, OutputOptions::from_flags(true, false));
+        let json_str =
+            format_cashflow_show(&report, OutputOptions::from_flags(true, false)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -563,7 +565,8 @@ mod tests {
             "2024-01-01",
             "2024-12-31",
             OutputOptions::from_flags(true, false),
-        );
+        )
+        .unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -622,7 +625,8 @@ mod tests {
     #[test]
     fn test_cashflow_show_table_has_key_sections() {
         let report = create_test_report();
-        let output = format_cashflow_show(&report, OutputOptions::from_flags(false, false));
+        let output =
+            format_cashflow_show(&report, OutputOptions::from_flags(false, false)).unwrap();
 
         assert!(output.contains("Cash Flow Summary"));
         assert!(output.contains("Yearly Breakdown"));
@@ -638,7 +642,8 @@ mod tests {
             "2024-01-01",
             "2024-12-31",
             OutputOptions::from_flags(false, false),
-        );
+        )
+        .unwrap();
 
         assert!(output.contains("Cash Flow Statistics"));
         assert!(output.contains("Averages"));

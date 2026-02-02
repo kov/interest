@@ -319,7 +319,7 @@ fn refresh_registry_blocking() -> Result<()> {
         let conn = crate::db::open_db(None)?;
         let sources = crate::scraping::maisretorno::select_sources(None);
         let printer =
-            crate::ui::progress::ProgressPrinter::new(OutputOptions::from_flags(false, false));
+            crate::ui::progress::ProgressPrinter::new(&OutputOptions::from_flags(false, false));
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::ui::progress::ProgressEvent>();
         let progress_handle = tokio::spawn(async move {

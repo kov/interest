@@ -13,6 +13,7 @@ A command-line tool for tracking investments on the Brazilian B3 stock exchange.
 - 🔄 Corporate action management (splits, renames, mergers, spin-offs)
 - 📥 Import from B3/CEI Excel exports (Negociação, Movimentação, IRPF PDFs)
 - 🎯 Interactive TUI with command history and tab completion
+- 🤖 AI chat assistant with natural language interface (OpenAI-compatible)
 
 **Target Audience:** Brazilian investors trading on B3 who need accurate cost basis tracking and tax reporting.
 
@@ -868,6 +869,120 @@ cargo run -- interactive
 exit
 quit
 q
+```
+
+### AI Chat Assistant Mode
+
+**Launch chat mode:**
+
+```bash
+interest chat
+```
+
+**What is it:**
+
+The chat mode provides an AI-powered assistant that can answer questions about your portfolio and execute Interest commands through natural language. It uses an OpenAI-compatible API endpoint (like Ollama, OpenAI, or other compatible services).
+
+**First-time setup:**
+
+On first run, you'll be prompted to configure:
+
+1. **LLM endpoint URL** (default: `http://localhost:11434/v1` for Ollama)
+2. **Model name** (default: `gpt-oss-20b`)
+3. **API key** (optional, press Enter to skip)
+
+The configuration is saved to `~/.interest/config.toml`.
+API keys are stored in plaintext. Consider restricting file permissions, e.g. `chmod 600 ~/.interest/config.toml`.
+
+**Example interactions:**
+
+```
+chat> Show my portfolio
+
+chat> What were my dividends last year?
+
+chat> Calculate taxes for December 2025
+
+chat> Add a buy transaction for PETR4: 100 shares at R$25.50 on 2025-01-15
+```
+
+**Tool execution:**
+
+The assistant has access to Interest tools and can:
+
+- **Read-only tools** (auto-approved):
+  - Show portfolio, performance, income
+  - Generate tax reports
+  - List assets and transactions
+  - Query database schema
+
+- **Mutating tools** (require approval):
+  - Import files
+  - Add transactions
+  - Add income events
+  - Update prices
+
+**Approval system:**
+
+When the assistant needs to execute a mutating operation, you'll be prompted:
+
+```
+Approval Required
+Tool: import_file
+Arguments: { "file_path": "negociacao.xlsx" }
+
+Options:
+  1. Allow once
+  2. Always allow in this session
+  3. Always allow
+  4. Cancel
+
+Your choice [1-4]:
+```
+
+**Slash commands:**
+
+```
+/config              - Show current configuration
+/config set endpoint <url>  - Change LLM endpoint
+/config set model <name>    - Change model
+/approvals status    - Show approval settings
+/approvals allow <tool>     - Add tool to always-allow list
+/approvals reset     - Reset session approvals
+/help                - Show help
+/exit                - Exit chat
+```
+
+**Database tools:**
+
+The assistant can explore the database:
+
+```
+chat> What tables are in the database?
+(Uses db_schema tool to show table structure)
+
+chat> Show me the 10 most recent transactions
+(Uses db_query tool with a SELECT query)
+```
+
+**Note:** Only read-only SQL queries (SELECT/PRAGMA) are allowed for security.
+
+**Recommended setup for Ollama:**
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull a model (example)
+ollama pull llama2
+
+# Run Ollama server
+ollama serve
+
+# Use with Interest
+interest chat
+# Use endpoint: http://localhost:11434/v1
+# Use model: llama2
 ```
 
 ### JSON Output for Scripting

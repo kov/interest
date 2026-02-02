@@ -128,7 +128,7 @@ pub async fn launch_tui(mut output_options: OutputOptions) -> Result<()> {
                             continue;
                         }
 
-                        if let Err(e) = dispatch_command(&cmd, output_options).await {
+                        if let Err(e) = dispatch_command(&cmd, output_options.clone()).await {
                             eprintln!("{} {}", "Error:".red().bold(), e);
                         }
                     }

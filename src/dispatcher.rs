@@ -67,6 +67,10 @@ pub async fn dispatch_command(
                 "Interactive mode should be handled by main.rs"
             ))
         }
+        Commands::Chat => {
+            // This should never be reached since main.rs handles Chat separately
+            Err(anyhow::anyhow!("Chat mode should be handled by main.rs"))
+        }
         Commands::Privacy { .. } => Err(anyhow::anyhow!(
             "Privacy mode is only supported in interactive mode. Use --privacy for CLI commands."
         )),
@@ -141,23 +145,26 @@ async fn dispatch_tax_report(
     let report = if options.is_json() {
         tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
     } else {
-        let mut printer = TaxProgressPrinter::new(options);
+        let mut printer = TaxProgressPrinter::new(&options);
         tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
     };
 
     let income_summary = formatters::tax::build_income_summary(&conn, year)?;
 
-    println!(
-        "{}",
-        formatters::tax::format_tax_report(&report, &income_summary, year, options)
-    );
+    let output =
+        formatters::tax::format_tax_report(&report, &income_summary, year, options.clone())?;
+    options.writer().writeln(&output)?;
 
     if export_csv {
         let csv_content = tax::irpf::export_to_csv(&report);
         let csv_path = format!("irpf_report_{}.csv", year);
         std::fs::write(&csv_path, csv_content)?;
 
-        println!("{} Report exported to: {}\n", "✓".green().bold(), csv_path);
+        options.writer().writeln(&format!(
+            "{} Report exported to: {}\n",
+            "✓".green().bold(),
+            csv_path
+        ))?;
     }
 
     Ok(())
@@ -175,14 +182,12 @@ async fn dispatch_tax_summary(year: i32, options: options::OutputOptions) -> Res
     let report = if options.is_json() {
         tax::generate_annual_report_with_progress(&conn, year, |_ev| {})?
     } else {
-        let mut printer = TaxProgressPrinter::new(options);
+        let mut printer = TaxProgressPrinter::new(&options);
         tax::generate_annual_report_with_progress(&conn, year, |ev| printer.on_event(ev))?
     };
 
-    println!(
-        "{}",
-        formatters::tax::format_tax_summary(&report, year, options)
-    );
+    let output = formatters::tax::format_tax_summary(&report, year, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -214,11 +219,11 @@ async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions
 
     let events = db::get_income_events_with_assets(&conn, from_date, to_date, None)?;
     if events.is_empty() {
-        println!(
+        options.writer().writeln(&format!(
             "\n{} No income events found for {}.\n",
             "ℹ".blue().bold(),
             year_val
-        );
+        ))?;
         return Ok(());
     }
 
@@ -284,11 +289,11 @@ async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions
     }
 
     let output = if options.is_json() {
-        formatters::income::format_income_show_json(&all_assets, options)
+        formatters::income::format_income_show_json(&all_assets, options.clone())?
     } else {
-        formatters::income::format_income_show_table(&ordered, year_val, options)
+        formatters::income::format_income_show_table(&ordered, year_val, options.clone())?
     };
-    println!("{}", output);
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -331,22 +336,22 @@ async fn dispatch_income_detail(
             .map(|y| y.to_string())
             .unwrap_or_else(|| today.year().to_string());
         let asset_str = asset.map(|a| format!(" for {}", a)).unwrap_or_default();
-        println!(
+        options.writer().writeln(&format!(
             "\n{} No income events found for {}{}.\n",
             "ℹ".blue().bold(),
             year_str,
             asset_str
-        );
+        ))?;
         return Ok(());
     }
 
     let year_val = year.unwrap_or_else(|| today.year());
     let output = if options.is_json() {
-        formatters::income::format_income_detail_json(&events, options)
+        formatters::income::format_income_detail_json(&events, options.clone())?
     } else {
-        formatters::income::format_income_detail_table(&events, year_val, options)
+        formatters::income::format_income_detail_table(&events, year_val, options.clone())?
     };
-    println!("{}", output);
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -374,11 +379,11 @@ pub async fn dispatch_income_summary(
                 db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
 
             if events.is_empty() {
-                println!(
+                options.writer().writeln(&format!(
                     "\n{} No income events found for {}.\n",
                     "ℹ".blue().bold(),
                     y
-                );
+                ))?;
                 return Ok(());
             }
 
@@ -454,9 +459,9 @@ pub async fn dispatch_income_summary(
                 &totals_by_type,
                 stats,
                 totals,
-                options,
-            );
-            println!("{}", output);
+                options.clone(),
+            )?;
+            options.writer().writeln(&output)?;
         }
         None => {
             info!("Showing income summary with yearly totals");
@@ -464,7 +469,10 @@ pub async fn dispatch_income_summary(
             let events = db::get_income_events_with_assets(&conn, None, None, None)?;
 
             if events.is_empty() {
-                println!("\n{} No income events found.\n", "ℹ".blue().bold());
+                options.writer().writeln(&format!(
+                    "\n{} No income events found.\n",
+                    "ℹ".blue().bold()
+                ))?;
                 return Ok(());
             }
 
@@ -529,9 +537,9 @@ pub async fn dispatch_income_summary(
                 &totals_by_type,
                 stats,
                 totals,
-                options,
-            );
-            println!("{}", output);
+                options.clone(),
+            )?;
+            options.writer().writeln(&output)?;
         }
     }
 
@@ -596,10 +604,14 @@ async fn dispatch_income_add(
 
     let event_id = db::insert_income_event(&conn, &event)?;
 
-    println!(
-        "{}",
-        formatters::income::format_income_add(event_id, ticker, event_date, total_amount, options)
-    );
+    let output = formatters::income::format_income_add(
+        event_id,
+        ticker,
+        event_date,
+        total_amount,
+        options.clone(),
+    )?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -634,144 +646,151 @@ async fn dispatch_tax_calculate(month_str: &str, options: options::OutputOptions
     let calculations = tax::calculate_monthly_tax(&conn, year, month, &mut carryforward)?;
 
     if calculations.is_empty() {
-        println!(
+        options.writer().writeln(&format!(
             "\n{} No sales found for {}/{}\n",
             "ℹ".blue().bold(),
             month,
             year
-        );
+        ))?;
         return Ok(());
     }
 
-    println!(
+    options.writer().writeln(&format!(
         "\n{} Swing Trade Tax Calculation - {}/{}\n",
         "💰".cyan().bold(),
         month,
         year
-    );
+    ))?;
 
     // Display results by tax category
     for calc in &calculations {
-        println!(
+        options.writer().writeln(&format!(
             "{} {}",
             "Tax Category:".bold(),
             calc.category.display_name()
-        );
-        println!(
+        ))?;
+        options.writer().writeln(&format!(
             "  Total Sales:      {}",
-            format_currency(calc.total_sales, options).cyan()
-        );
-        println!(
+            format_currency(calc.total_sales, &options).cyan()
+        ))?;
+        options.writer().writeln(&format!(
             "  Total Cost Basis: {}",
-            format_currency(calc.total_cost_basis, options).cyan()
-        );
-        println!(
+            format_currency(calc.total_cost_basis, &options).cyan()
+        ))?;
+        options.writer().writeln(&format!(
             "  Gross Profit:     {}",
-            format_currency(calc.total_profit, options).green()
-        );
-        println!(
+            format_currency(calc.total_profit, &options).green()
+        ))?;
+        options.writer().writeln(&format!(
             "  Gross Loss:       {}",
-            format_currency(calc.total_loss, options).red()
-        );
+            format_currency(calc.total_loss, &options).red()
+        ))?;
 
         let net_str = if calc.net_profit >= rust_decimal::Decimal::ZERO {
-            format_currency(calc.net_profit, options).green()
+            format_currency(calc.net_profit, &options).green()
         } else {
-            format_currency(calc.net_profit, options).red()
+            format_currency(calc.net_profit, &options).red()
         };
-        println!("  Net P&L:          {}", net_str);
+        options
+            .writer()
+            .writeln(&format!("  Net P&L:          {}", net_str))?;
 
         // Show loss offset if applied
         if calc.loss_offset_applied > rust_decimal::Decimal::ZERO {
-            println!(
+            options.writer().writeln(&format!(
                 "  Loss Offset:      {} (from previous months)",
-                format_currency(calc.loss_offset_applied, options).cyan()
-            );
-            println!(
+                format_currency(calc.loss_offset_applied, &options).cyan()
+            ))?;
+            options.writer().writeln(&format!(
                 "  After Loss Offset: {}",
-                format_currency(calc.profit_after_loss_offset, options).green()
-            );
+                format_currency(calc.profit_after_loss_offset, &options).green()
+            ))?;
         }
 
         if calc.exemption_applied > rust_decimal::Decimal::ZERO {
-            println!(
+            options.writer().writeln(&format!(
                 "  Exemption:        {} (sales under R$20.000)",
-                format_currency(calc.exemption_applied, options)
+                format_currency(calc.exemption_applied, &options)
                     .yellow()
                     .bold()
-            );
+            ))?;
         }
 
         if calc.taxable_amount > rust_decimal::Decimal::ZERO {
-            println!(
+            options.writer().writeln(&format!(
                 "  Taxable Amount:   {}",
-                format_currency(calc.taxable_amount, options).yellow()
-            );
+                format_currency(calc.taxable_amount, &options).yellow()
+            ))?;
             let tax_rate_pct = calc.tax_rate * rust_decimal::Decimal::from(100);
-            println!(
+            options.writer().writeln(&format!(
                 "  Tax Rate:         {}",
                 format!("{:.0}%", tax_rate_pct).yellow()
-            );
-            println!(
+            ))?;
+            options.writer().writeln(&format!(
                 "  {} {}",
                 "Tax Due:".bold(),
-                format_currency(calc.tax_due, options).red().bold()
-            );
+                format_currency(calc.tax_due, &options).red().bold()
+            ))?;
         } else if calc.profit_after_loss_offset < rust_decimal::Decimal::ZERO {
-            println!(
+            options.writer().writeln(&format!(
                 "  {} Loss to carry forward",
-                format_currency(calc.net_profit.abs(), options)
+                format_currency(calc.net_profit.abs(), &options)
                     .yellow()
                     .bold()
-            );
+            ))?;
         } else {
-            println!("  {} No tax due (exempt)", "Tax Due:".bold().green());
+            options.writer().writeln(&format!(
+                "  {} No tax due (exempt)",
+                "Tax Due:".bold().green()
+            ))?;
         }
 
-        println!();
+        options.writer().writeln("")?;
     }
 
     // Summary
     let total_tax: rust_decimal::Decimal = calculations.iter().map(|c| c.tax_due).sum();
 
     if total_tax > rust_decimal::Decimal::ZERO {
-        println!(
+        options.writer().writeln(&format!(
             "{} Total Tax Due for {}/{}: {}\n",
             "📋".cyan().bold(),
             month,
             year,
-            format_currency(total_tax, options).red().bold()
-        );
+            format_currency(total_tax, &options).red().bold()
+        ))?;
 
         // Generate DARF payments
         let darf_payments = tax::generate_darf_payments(calculations, year, month)?;
 
         if !darf_payments.is_empty() {
-            println!("{} DARF Payments:\n", "💳".cyan().bold());
+            options
+                .writer()
+                .writeln(&format!("{} DARF Payments:\n", "💳".cyan().bold()))?;
 
             for payment in &darf_payments {
-                println!(
+                options.writer().writeln(&format!(
                     "  {} Code {}: {}",
                     "DARF".yellow().bold(),
                     payment.darf_code,
                     payment.description
-                );
-                println!(
+                ))?;
+                options.writer().writeln(&format!(
                     "    Amount:   {}",
-                    format_currency(payment.tax_due, options).red()
-                );
-                println!(
+                    format_currency(payment.tax_due, &options).red()
+                ))?;
+                options.writer().writeln(&format!(
                     "    Due Date: {}",
                     payment.due_date.format("%d/%m/%Y").to_string().yellow()
-                );
-                println!();
+                ))?;
+                options.writer().writeln("")?;
             }
 
-            println!(
+            options.writer().writeln(&format!(
                 "{} Payment due by {}\n",
                 "⏰".yellow(),
                 darf_payments[0].due_date.format("%d/%m/%Y")
-            );
+            ))?;
         }
     }
 
@@ -790,7 +809,7 @@ struct TaxProgressPrinter {
 }
 
 impl TaxProgressPrinter {
-    fn new(options: options::OutputOptions) -> Self {
+    fn new(options: &options::OutputOptions) -> Self {
         Self {
             printer: crate::ui::progress::ProgressPrinter::new(options),
             in_progress: false,

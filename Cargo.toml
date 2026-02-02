@@ -72,6 +72,7 @@ crossterm = "0.29"
 rustyline = "17.0"
 indicatif = "0.18"
 unicode-width = "0.2"
+termimad = "0.26"
 
 # Utilities
 itertools = "0.14"

@@ -1,7 +1,8 @@
-/// Formatters for corporate actions (renames, splits, bonuses, exchanges)
 use crate::db;
 use crate::formatters::OutputOptions;
 use crate::output::{ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, Value, ValueKind};
+/// Formatters for corporate actions (renames, splits, bonuses, exchanges)
+use anyhow::Result;
 
 //
 // 1. RENAME FORMATTERS
@@ -15,7 +16,7 @@ pub fn format_rename_add(
     effective_date: chrono::NaiveDate,
     notes: Option<&str>,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_rename_add_document(id, from, to, effective_date, notes);
     crate::formatters::render_document(&document, options)
 }
@@ -24,13 +25,13 @@ pub fn format_rename_add(
 pub fn format_renames_list(
     rows: &[(db::AssetRename, db::Asset, db::Asset)],
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_renames_list_document(rows);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format rename remove confirmation
-pub fn format_rename_remove(id: i64, options: OutputOptions) -> String {
+pub fn format_rename_remove(id: i64, options: OutputOptions) -> Result<String> {
     let document = build_rename_remove_document(id);
     crate::formatters::render_document(&document, options)
 }
@@ -152,7 +153,7 @@ pub fn format_corporate_action_add(
     ex_date: chrono::NaiveDate,
     notes: Option<&str>,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_corporate_action_add_document(
         id,
         ticker,
@@ -168,13 +169,13 @@ pub fn format_corporate_action_add(
 pub fn format_corporate_actions_list(
     filtered: &[(db::CorporateAction, db::Asset)],
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_corporate_actions_list_document(filtered);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format corporate action remove confirmation
-pub fn format_corporate_action_remove(id: i64, options: OutputOptions) -> String {
+pub fn format_corporate_action_remove(id: i64, options: OutputOptions) -> Result<String> {
     let document = build_corporate_action_remove_document(id);
     crate::formatters::render_document(&document, options)
 }
@@ -311,7 +312,7 @@ pub fn format_exchange_add(
     cash_amount: rust_decimal::Decimal,
     notes: Option<&str>,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_exchange_add_document(
         id,
         event_type,
@@ -330,13 +331,13 @@ pub fn format_exchange_add(
 pub fn format_exchanges_list(
     rows: &[(db::AssetExchange, db::Asset, db::Asset)],
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_exchanges_list_document(rows);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format exchange remove confirmation
-pub fn format_exchange_remove(id: i64, options: OutputOptions) -> String {
+pub fn format_exchange_remove(id: i64, options: OutputOptions) -> Result<String> {
     let document = build_exchange_remove_document(id);
     crate::formatters::render_document(&document, options)
 }
@@ -495,7 +496,8 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             None,
             OutputOptions::from_flags(true, false),
-        );
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -531,7 +533,8 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             None,
             OutputOptions::from_flags(true, false),
-        );
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -571,7 +574,8 @@ mod tests {
             Decimal::from_str("10.00").unwrap(),
             None,
             OutputOptions::from_flags(true, false),
-        );
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");

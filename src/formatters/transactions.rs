@@ -1,4 +1,5 @@
 /// Formatters for transaction commands
+use anyhow::Result;
 use rust_decimal::Decimal;
 
 use crate::formatters::OutputOptions;
@@ -20,7 +21,7 @@ pub fn format_transaction_add_table(
     total_cost: Decimal,
     notes: Option<&str>,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let mut rows = vec![
         KeyValueRow {
             label: "Transaction ID".to_string(),
@@ -98,7 +99,7 @@ pub struct TransactionRow {
 }
 
 /// Format transactions list
-pub fn format_transactions_list(rows: &[TransactionRow], options: OutputOptions) -> String {
+pub fn format_transactions_list(rows: &[TransactionRow], options: OutputOptions) -> Result<String> {
     let document = build_transactions_list_document(rows);
     crate::formatters::render_document(&document, options)
 }
@@ -183,7 +184,8 @@ mod tests {
             Decimal::from_str("2555.00").unwrap(),
             Some("Test transaction"),
             OutputOptions::from_flags(false, false),
-        );
+        )
+        .unwrap();
 
         assert!(output.contains("Transaction ID") && output.contains("42"));
         assert!(output.contains("Ticker") && output.contains("PETR4"));
@@ -208,7 +210,8 @@ mod tests {
             source: "CEI".to_string(),
         }];
 
-        let json_str = format_transactions_list(&rows, OutputOptions::from_flags(true, false));
+        let json_str =
+            format_transactions_list(&rows, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -250,7 +253,8 @@ mod tests {
     #[test]
     fn test_transactions_list_table_empty() {
         let rows: Vec<TransactionRow> = vec![];
-        let output = format_transactions_list(&rows, OutputOptions::from_flags(false, false));
+        let output =
+            format_transactions_list(&rows, OutputOptions::from_flags(false, false)).unwrap();
         assert!(output.contains("No transactions found"));
     }
 }

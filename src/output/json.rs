@@ -11,7 +11,7 @@ pub struct JsonRenderer;
 
 impl JsonRenderer {
     pub fn render(doc: &OutputDocument, options: OutputOptions) -> String {
-        let json_doc = OutputDocumentJson::from_document(doc, options);
+        let json_doc = OutputDocumentJson::from_document(doc, &options);
         serde_json::to_string_pretty(&json_doc)
             .unwrap_or_else(|e| format!(r#"{{"error": "JSON serialization failed: {}"}}"#, e))
     }
@@ -93,7 +93,7 @@ struct ValueJson {
 }
 
 impl OutputDocumentJson {
-    fn from_document(doc: &OutputDocument, options: OutputOptions) -> Self {
+    fn from_document(doc: &OutputDocument, options: &OutputOptions) -> Self {
         Self {
             title: doc.title.clone(),
             blocks: doc
@@ -112,7 +112,7 @@ impl OutputDocumentJson {
 }
 
 impl OutputBlockJson {
-    fn from_block(block: &OutputBlock, output_options: OutputOptions) -> Self {
+    fn from_block(block: &OutputBlock, output_options: &OutputOptions) -> Self {
         match block {
             OutputBlock::Header { level, text } => OutputBlockJson::Header {
                 level: *level,
@@ -159,7 +159,7 @@ impl OutputBlockJson {
 }
 
 impl KeyValueRowJson {
-    fn from_row(row: &KeyValueRow, options: OutputOptions) -> Self {
+    fn from_row(row: &KeyValueRow, options: &OutputOptions) -> Self {
         Self {
             label: row.label.clone(),
             value: ValueJson::from_value(&row.value, options),
@@ -191,7 +191,7 @@ impl AlignmentHintJson {
 }
 
 impl RowJson {
-    fn from_row(row: &Row, options: OutputOptions) -> Self {
+    fn from_row(row: &Row, options: &OutputOptions) -> Self {
         Self {
             cells: row
                 .cells
@@ -223,7 +223,7 @@ impl TableStyleJson {
 }
 
 impl ValueJson {
-    fn from_value(value: &Value, options: OutputOptions) -> Self {
+    fn from_value(value: &Value, options: &OutputOptions) -> Self {
         let kind = value.kind().as_str().to_string();
         let redacted = options.privacy == PrivacyMode::Private
             && matches!(
@@ -239,5 +239,37 @@ impl ValueJson {
             }
         };
         Self { kind, value }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::{OutputMode, OutputOptions, PrivacyMode};
+    use crate::output::{KeyValueRow, OutputBlock, OutputDocument, Value};
+
+    #[test]
+    fn json_render_ignores_color_enabled() {
+        let doc = OutputDocument {
+            title: Some("Sample".to_string()),
+            blocks: vec![OutputBlock::KeyValue {
+                title: Some("Section".to_string()),
+                rows: vec![KeyValueRow {
+                    label: "Foo".to_string(),
+                    value: Value::Text("bar".to_string()),
+                }],
+            }],
+            meta: Default::default(),
+        };
+
+        let color =
+            OutputOptions::new(OutputMode::Json, PrivacyMode::Full).with_color_enabled(true);
+        let no_color =
+            OutputOptions::new(OutputMode::Json, PrivacyMode::Full).with_color_enabled(false);
+
+        let rendered_color = JsonRenderer::render(&doc, color);
+        let rendered_no_color = JsonRenderer::render(&doc, no_color);
+
+        assert_eq!(rendered_color, rendered_no_color);
     }
 }

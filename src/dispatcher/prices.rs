@@ -21,7 +21,7 @@ pub async fn dispatch_prices(
 
             // Initialize database
             db::init_database(None)?;
-            let printer = crate::ui::progress::ProgressPrinter::new(options);
+            let printer = crate::ui::progress::ProgressPrinter::new(&options);
             printer.handle_event(&crate::ui::progress::ProgressEvent::Spinner {
                 message: format!("Importing B3 COTAHIST for year {}...", year),
             });
@@ -120,11 +120,11 @@ pub async fn dispatch_prices(
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))??;
 
-            println!(
+            options.writer().writeln(&format!(
                 "{} Imported COTAHIST file: {} prices",
                 "✓".green(),
                 imported
-            );
+            ))?;
             Ok(())
         }
         crate::cli::PriceCommands::ClearCache { year } => {
@@ -152,23 +152,30 @@ async fn dispatch_price_update(options: options::OutputOptions) -> Result<()> {
     let assets = crate::db::get_all_assets(&conn)?;
 
     if assets.is_empty() {
-        println!("{} No assets found in database", "ℹ".blue().bold());
-        println!("Import transactions first using: interest import <file>");
+        options.writer().writeln(&format!(
+            "{} No assets found in database",
+            "ℹ".blue().bold()
+        ))?;
+        options
+            .writer()
+            .writeln("Import transactions first using: interest import <file>")?;
         return Ok(());
     }
 
-    println!(
+    options.writer().writeln(&format!(
         "\n{} Updating prices for {} assets\n",
         "→".cyan().bold(),
         assets.len()
-    );
+    ))?;
 
     let fetcher = PriceFetcher::new();
     let mut updated = 0;
     let mut errors = 0;
 
     for asset in &assets {
-        print!("  {} {}... ", asset.ticker, "→".cyan());
+        options
+            .writer()
+            .write(&format!("  {} {}... ", asset.ticker, "→".cyan()))?;
 
         match fetcher.fetch_price(&asset.ticker).await {
             Ok(price) => {
@@ -188,30 +195,36 @@ async fn dispatch_price_update(options: options::OutputOptions) -> Result<()> {
 
                 match crate::db::insert_price_history(&conn, &price_history) {
                     Ok(_) => {
-                        println!(
+                        options.writer().writeln(&format!(
                             "{} {}",
                             "✓".green(),
-                            crate::utils::format_currency(price, options)
-                        );
+                            crate::utils::format_currency(price, &options)
+                        ))?;
                         updated += 1;
                     }
                     Err(e) => {
-                        println!("{} {}", "✗".red(), e);
+                        options.writer().writeln(&format!("{} {}", "✗".red(), e))?;
                         errors += 1;
                     }
                 }
             }
             Err(e) => {
-                println!("{} {}", "✗".red(), e);
+                options.writer().writeln(&format!("{} {}", "✗".red(), e))?;
                 errors += 1;
             }
         }
     }
 
-    println!("\n{} Price update complete!", "✓".green().bold());
-    println!("  Updated: {}", updated.to_string().green());
+    options
+        .writer()
+        .writeln(&format!("\n{} Price update complete!", "✓".green().bold()))?;
+    options
+        .writer()
+        .writeln(&format!("  Updated: {}", updated.to_string().green()))?;
     if errors > 0 {
-        println!("  Errors: {}", errors.to_string().red());
+        options
+            .writer()
+            .writeln(&format!("  Errors: {}", errors.to_string().red()))?;
     }
 
     Ok(())
@@ -239,25 +252,23 @@ async fn dispatch_price_history(
     let to_date = NaiveDate::parse_from_str(to, "%Y-%m-%d")
         .context("Invalid to date. Use YYYY-MM-DD format")?;
 
-    println!(
+    options.writer().writeln(&format!(
         "\n{} Fetching historical prices for {}",
         "→".cyan().bold(),
         ticker
-    );
+    ))?;
 
     let prices = crate::pricing::yahoo::fetch_historical_prices(ticker, from_date, to_date).await?;
 
-    println!(
-        "\n{}",
-        formatters::prices::format_prices_table(&prices, options)
-    );
+    let table = formatters::prices::format_prices_table(&prices, options.clone())?;
+    options.writer().writeln(&format!("\n{}", table))?;
 
     if !prices.is_empty() {
-        println!(
+        options.writer().writeln(&format!(
             "\n{} Total: {} price points",
             "✓".green().bold(),
             prices.len()
-        );
+        ))?;
     }
 
     Ok(())

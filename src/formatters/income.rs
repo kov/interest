@@ -1,4 +1,5 @@
 /// Formatters for income commands
+use anyhow::Result;
 use rust_decimal::Decimal;
 
 use crate::db;
@@ -20,7 +21,7 @@ pub struct AssetIncome {
     pub amortization: Decimal,
 }
 
-pub fn format_income_show_json(assets: &[AssetIncome], options: OutputOptions) -> String {
+pub fn format_income_show_json(assets: &[AssetIncome], options: OutputOptions) -> Result<String> {
     let rows = assets
         .iter()
         .map(|asset| {
@@ -66,7 +67,7 @@ pub fn format_income_show_table(
     assets_by_type: &[(db::AssetType, Vec<AssetIncome>)],
     year: i32,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let mut blocks = Vec::new();
     blocks.push(OutputBlock::Header {
         level: 1,
@@ -105,7 +106,7 @@ pub fn format_income_show_table(
             title: Some(format!(
                 "{} ({})",
                 asset_type.as_str().to_uppercase(),
-                crate::utils::format_currency(type_total, options)
+                crate::utils::format_currency(type_total, &options)
             )),
             blocks: vec![OutputBlock::Table {
                 title: None,
@@ -148,7 +149,7 @@ pub fn format_income_show_table(
 pub fn format_income_detail_json(
     events: &[(db::IncomeEvent, db::Asset)],
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let rows = events
         .iter()
         .map(|(event, asset)| {
@@ -202,7 +203,7 @@ pub fn format_income_detail_table(
     events: &[(db::IncomeEvent, db::Asset)],
     year: i32,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let rows = events
         .iter()
         .map(|(event, asset)| {
@@ -304,7 +305,7 @@ pub fn format_income_summary_monthly(
     stats: IncomeSummaryStats,
     totals: IncomeTotals,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_income_summary_document(
         format!("Income Summary - {} (Monthly Breakdown)", year),
         "Month",
@@ -322,7 +323,7 @@ pub fn format_income_summary_yearly(
     stats: IncomeSummaryStats,
     totals: IncomeTotals,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_income_summary_document(
         "Income Summary (Yearly Breakdown)".to_string(),
         "Year",
@@ -431,7 +432,7 @@ pub fn format_income_add(
     event_date: chrono::NaiveDate,
     total_amount: Decimal,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_income_add_document(event_id, ticker, event_date, total_amount);
     crate::formatters::render_document(&document, options)
 }
@@ -491,7 +492,8 @@ mod tests {
             chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             Decimal::from_str("100.50").unwrap(),
             OutputOptions::from_flags(true, false),
-        );
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -528,7 +530,8 @@ mod tests {
             amortization: Decimal::ZERO,
         }];
 
-        let json_str = format_income_show_json(&assets, OutputOptions::from_flags(true, false));
+        let json_str =
+            format_income_show_json(&assets, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");

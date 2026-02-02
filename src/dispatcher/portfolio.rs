@@ -69,7 +69,7 @@ pub async fn dispatch_portfolio_show(
     if earliest_date.is_none() {
         // No transactions - nothing to show
         if !options.is_json() {
-            println!("{}", format_empty_portfolio());
+            options.writer().writeln(&format_empty_portfolio())?;
         }
         return Ok(());
     }
@@ -87,7 +87,7 @@ pub async fn dispatch_portfolio_show(
 
     if report.positions.is_empty() {
         if !options.is_json() {
-            println!("{}", format_empty_portfolio());
+            options.writer().writeln(&format_empty_portfolio())?;
         }
         return Ok(());
     }
@@ -102,7 +102,7 @@ pub async fn dispatch_portfolio_show(
 
             if !assets_with_positions.is_empty() {
                 let total = priceable_assets.len();
-                let printer = ProgressPrinter::new(options);
+                let printer = ProgressPrinter::new(&options);
                 let price_range = if let Some(date) = historical_date {
                     (date, date)
                 } else {
@@ -118,7 +118,7 @@ pub async fn dispatch_portfolio_show(
                     &mut conn,
                     &assets_with_positions,
                     price_range,
-                    options,
+                    options.clone(),
                     |event| {
                         // For ticker results, also update the spinner with current count
                         match event {
@@ -191,7 +191,7 @@ pub async fn dispatch_portfolio_show(
                     &mut conn,
                     &assets_with_positions,
                     price_range,
-                    options,
+                    options.clone(),
                 )
                 .await
                 .or_else(|e: anyhow::Error| {
@@ -211,14 +211,17 @@ pub async fn dispatch_portfolio_show(
     }
 
     // Print portfolio output (JSON or table)
-    formatters::portfolio::print(&report, asset_type_filter, options);
+    let output = formatters::portfolio::format(&report, asset_type_filter, options.clone())?;
+    options.writer().writeln(&output)?;
 
     // Display asset allocation if showing full portfolio in table mode
     if !options.is_json() && asset_type_filter.is_none() {
         let allocation = calculate_allocation(&report);
 
         if allocation.len() > 1 {
-            println!("\n{} Asset Allocation", "🎯".cyan().bold());
+            options
+                .writer()
+                .writeln(&format!("\n{} Asset Allocation", "🎯".cyan().bold()))?;
 
             let mut alloc_vec: Vec<_> = allocation.iter().collect();
             alloc_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
@@ -226,14 +229,18 @@ pub async fn dispatch_portfolio_show(
             for (asset_type, (value, pct)) in alloc_vec {
                 let type_ref: &db::AssetType = asset_type;
                 if options.is_private() {
-                    println!("  {}: {:.2}%", type_ref.as_str().to_uppercase(), pct);
+                    options.writer().writeln(&format!(
+                        "  {}: {:.2}%",
+                        type_ref.as_str().to_uppercase(),
+                        pct
+                    ))?;
                 } else {
-                    println!(
+                    options.writer().writeln(&format!(
                         "  {}: {} ({:.2}%)",
                         type_ref.as_str().to_uppercase(),
-                        format_currency(*value, options).cyan(),
+                        format_currency(*value, &options).cyan(),
                         pct
-                    );
+                    ))?;
                 }
             }
         }
