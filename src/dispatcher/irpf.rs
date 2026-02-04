@@ -77,8 +77,8 @@ pub async fn dispatch_irpf_import(
             .map(|pos| PositionPreview {
                 ticker: pos.ticker.clone(),
                 quantity: pos.quantity.to_string(),
-                total_cost: crate::utils::format_currency(pos.total_cost, options),
-                avg_cost: crate::utils::format_currency(pos.average_cost, options),
+                total_cost: crate::utils::format_currency(pos.total_cost, &options),
+                avg_cost: crate::utils::format_currency(pos.average_cost, &options),
                 date: format!("31/12/{}", pos.year),
             })
             .collect();
@@ -99,19 +99,19 @@ pub async fn dispatch_irpf_import(
         if losses.stock_swing_loss > Decimal::ZERO {
             println!(
                 "  • Stock Swing Trade: {}",
-                crate::utils::format_currency(losses.stock_swing_loss, options)
+                crate::utils::format_currency(losses.stock_swing_loss, &options)
             );
         }
         if losses.stock_day_loss > Decimal::ZERO {
             println!(
                 "  • Stock Day Trade: {}",
-                crate::utils::format_currency(losses.stock_day_loss, options)
+                crate::utils::format_currency(losses.stock_day_loss, &options)
             );
         }
         if losses.fii_fiagro_loss > Decimal::ZERO {
             println!(
                 "  • FII/FIAGRO: {}",
-                crate::utils::format_currency(losses.fii_fiagro_loss, options)
+                crate::utils::format_currency(losses.fii_fiagro_loss, &options)
             );
         }
     }
@@ -132,19 +132,19 @@ pub async fn dispatch_irpf_import(
             if losses.stock_swing_loss > Decimal::ZERO {
                 println!(
                     "    - Stock Swing Trade: {}",
-                    crate::utils::format_currency(losses.stock_swing_loss, options)
+                    crate::utils::format_currency(losses.stock_swing_loss, &options)
                 );
             }
             if losses.stock_day_loss > Decimal::ZERO {
                 println!(
                     "    - Stock Day Trade: {}",
-                    crate::utils::format_currency(losses.stock_day_loss, options)
+                    crate::utils::format_currency(losses.stock_day_loss, &options)
                 );
             }
             if losses.fii_fiagro_loss > Decimal::ZERO {
                 println!(
                     "    - FII/FIAGRO: {}",
-                    crate::utils::format_currency(losses.fii_fiagro_loss, options)
+                    crate::utils::format_currency(losses.fii_fiagro_loss, &options)
                 );
             }
         }
@@ -225,7 +225,7 @@ pub async fn dispatch_irpf_import(
                         "✓".green(),
                         position.quantity,
                         position.ticker.cyan(),
-                        crate::utils::format_currency(position.average_cost, options)
+                        crate::utils::format_currency(position.average_cost, &options)
                     );
                     imported += 1;
                 }
@@ -320,7 +320,7 @@ pub async fn dispatch_irpf_import(
                     println!(
                         "    • {}: {}",
                         category.display_name(),
-                        crate::utils::format_currency(*amount, options)
+                        crate::utils::format_currency(*amount, &options)
                     );
                 }
             }

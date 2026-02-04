@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use rusqlite::Connection;
 
-use crate::{db, importers, reports};
+use crate::{db, importers, options, reports};
 
 // The helpers expose ImportStats from the `importers` module
 use crate::importers::ImportStats;
@@ -11,6 +11,7 @@ use crate::importers::ImportStats;
 pub(crate) fn import_cei(
     conn: &Connection,
     raw_transactions: &[crate::importers::RawTransaction],
+    options: &options::OutputOptions,
 ) -> Result<ImportStats> {
     let mut imported: i64 = 0;
     let mut skipped_old: i64 = 0;
@@ -39,7 +40,9 @@ pub(crate) fn import_cei(
         let asset_id = match db::upsert_asset(conn, &normalized_ticker, &asset_type, None) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("Error upserting asset: {}", e);
+                options
+                    .error_writer()
+                    .writeln(&format!("Error upserting asset: {}", e))?;
                 errors += 1;
                 continue;
             }
@@ -48,7 +51,10 @@ pub(crate) fn import_cei(
         let mut transaction = match raw_tx.to_transaction(asset_id) {
             Ok(tx) => tx,
             Err(e) => {
-                eprintln!("Error converting transaction for {}: {}", raw_tx.ticker, e);
+                options.error_writer().writeln(&format!(
+                    "Error converting transaction for {}: {}",
+                    raw_tx.ticker, e
+                ))?;
                 errors += 1;
                 continue;
             }
@@ -71,7 +77,9 @@ pub(crate) fn import_cei(
                 });
             }
             Err(e) => {
-                eprintln!("Error inserting transaction: {}", e);
+                options
+                    .error_writer()
+                    .writeln(&format!("Error inserting transaction: {}", e))?;
                 errors += 1;
             }
         }
@@ -111,6 +119,7 @@ pub(crate) fn import_cei(
 pub(crate) fn import_ofertas(
     conn: &Connection,
     entries: &[crate::importers::OfertaPublicaEntry],
+    options: &options::OutputOptions,
 ) -> Result<ImportStats> {
     let mut imported: i64 = 0;
     let mut skipped_old: i64 = 0;
@@ -125,7 +134,9 @@ pub(crate) fn import_ofertas(
         let asset_id = match db::upsert_asset(conn, &entry.ticker, &asset_type, None) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("Error upserting asset {}: {}", entry.ticker, e);
+                options
+                    .error_writer()
+                    .writeln(&format!("Error upserting asset {}: {}", entry.ticker, e))?;
                 errors += 1;
                 continue;
             }
@@ -141,7 +152,9 @@ pub(crate) fn import_ofertas(
         let transaction = match entry.to_transaction(asset_id) {
             Ok(tx) => tx,
             Err(e) => {
-                eprintln!("Error converting offer to transaction: {}", e);
+                options
+                    .error_writer()
+                    .writeln(&format!("Error converting offer to transaction: {}", e))?;
                 errors += 1;
                 continue;
             }
@@ -156,7 +169,9 @@ pub(crate) fn import_ofertas(
                 });
             }
             Err(e) => {
-                eprintln!("Error inserting offer transaction: {}", e);
+                options
+                    .error_writer()
+                    .writeln(&format!("Error inserting offer transaction: {}", e))?;
                 errors += 1;
             }
         }
@@ -194,10 +209,11 @@ mod tests {
     fn ceil_importstats_maps_correctly() {
         // Basic smoke test to ensure CEI mapping populates fields
         let txs: Vec<crate::importers::RawTransaction> = vec![];
-        assert!(formatters::imports::format_cei_preview_table(
+        let preview = formatters::imports::format_cei_preview_table(
             &txs,
-            OutputOptions::from_flags(false, false)
+            OutputOptions::from_flags(false, false),
         )
-        .is_none());
+        .unwrap();
+        assert!(preview.is_none());
     }
 }

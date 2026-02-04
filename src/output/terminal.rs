@@ -242,13 +242,9 @@ fn render_section(
 fn format_value(value: &Value, privacy: PrivacyMode) -> String {
     match value {
         Value::Text(text) => text.clone(),
-        Value::Quantity(qty) => format_quantity(
-            *qty,
-            OutputOptions {
-                output_mode: OutputMode::Table,
-                privacy,
-            },
-        ),
+        Value::Quantity(qty) => {
+            format_quantity(*qty, &OutputOptions::new(OutputMode::Table, privacy))
+        }
         Value::Currency(amount) => format_currency_value(*amount, privacy),
         Value::CurrencyDelta(amount) => format_currency_delta(*amount, privacy),
         Value::Percent(pct) => format_signed_percent(*pct),
@@ -325,13 +321,8 @@ impl KeyValueRender {
                 }
             }
             Value::Quantity(quantity) => {
-                let numeric = format_quantity(
-                    *quantity,
-                    OutputOptions {
-                        output_mode: OutputMode::Table,
-                        privacy,
-                    },
-                );
+                let numeric =
+                    format_quantity(*quantity, &OutputOptions::new(OutputMode::Table, privacy));
                 let total_width = visible_len(&numeric);
                 Self {
                     prefix: String::new(),
@@ -379,19 +370,13 @@ impl KeyValueRender {
 }
 
 fn format_currency_value(value: Decimal, privacy: PrivacyMode) -> String {
-    let options = OutputOptions {
-        output_mode: OutputMode::Table,
-        privacy,
-    };
-    crate::utils::format_currency(value, options)
+    let options = OutputOptions::new(OutputMode::Table, privacy);
+    crate::utils::format_currency(value, &options)
 }
 
 fn format_currency_delta(value: Decimal, privacy: PrivacyMode) -> String {
-    let options = OutputOptions {
-        output_mode: OutputMode::Table,
-        privacy,
-    };
-    let formatted = crate::utils::format_currency(value, options);
+    let options = OutputOptions::new(OutputMode::Table, privacy);
+    let formatted = crate::utils::format_currency(value, &options);
     if value >= Decimal::ZERO {
         formatted.green().to_string()
     } else {

@@ -81,15 +81,12 @@ async fn dispatch_cashflow_show(period_str: &str, options: options::OutputOption
     // For table output, check if we should show monthly breakdown
     if is_single_year && !options.is_json() {
         let entries = cashflow::cash_flow_entries(&conn, from_date, to_date)?;
-        println!(
-            "{}",
-            formatters::cashflow::format_cashflow_show_monthly(&report, &entries, options)
-        );
+        let output =
+            formatters::cashflow::format_cashflow_show_monthly(&report, &entries, options)?;
+        println!("{}", output);
     } else {
-        println!(
-            "{}",
-            formatters::cashflow::format_cashflow_show(&report, options)
-        );
+        let output = formatters::cashflow::format_cashflow_show(&report, options)?;
+        println!("{}", output);
     }
 
     Ok(())
@@ -109,10 +106,8 @@ async fn dispatch_cashflow_stats(period_str: &str, options: options::OutputOptio
     let to_str = to_date.format("%Y-%m-%d").to_string();
 
     // Print cash flow stats output (JSON or table)
-    println!(
-        "{}",
-        formatters::cashflow::format_cashflow_stats(&stats, &from_str, &to_str, options)
-    );
+    let output = formatters::cashflow::format_cashflow_stats(&stats, &from_str, &to_str, options)?;
+    println!("{}", output);
 
     Ok(())
 }

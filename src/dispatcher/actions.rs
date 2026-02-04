@@ -169,7 +169,14 @@ fn add_rename(
 
     println!(
         "{}",
-        formatters::actions::format_rename_add(rename_id, from, to, effective_date, notes, options)
+        formatters::actions::format_rename_add(
+            rename_id,
+            from,
+            to,
+            effective_date,
+            notes,
+            options
+        )?
     );
 
     Ok(())
@@ -181,7 +188,7 @@ fn list_renames(ticker: Option<&str>, options: options::OutputOptions) -> Result
 
     println!(
         "{}",
-        formatters::actions::format_renames_list(&rows, options)
+        formatters::actions::format_renames_list(&rows, options)?
     );
 
     Ok(())
@@ -198,7 +205,10 @@ fn remove_rename(id: i64, options: options::OutputOptions) -> Result<()> {
     }
     reports::invalidate_snapshots_after(&conn, effective_date)?;
 
-    println!("{}", formatters::actions::format_rename_remove(id, options));
+    println!(
+        "{}",
+        formatters::actions::format_rename_remove(id, options)?
+    );
 
     Ok(())
 }
@@ -263,7 +273,7 @@ fn add_split_or_bonus(
             ex_date,
             notes,
             options,
-        )
+        )?
     );
 
     Ok(())
@@ -283,7 +293,7 @@ fn list_corporate_actions(
 
     println!(
         "{}",
-        formatters::actions::format_corporate_actions_list(&filtered, options)
+        formatters::actions::format_corporate_actions_list(&filtered, options)?
     );
 
     Ok(())
@@ -310,7 +320,7 @@ fn remove_corporate_action(
 
     println!(
         "{}",
-        formatters::actions::format_corporate_action_remove(id, options)
+        formatters::actions::format_corporate_action_remove(id, options)?
     );
 
     Ok(())
@@ -371,7 +381,7 @@ fn add_exchange(
             cash_amount,
             notes,
             options,
-        )
+        )?
     );
 
     Ok(())
@@ -391,7 +401,7 @@ fn list_exchanges(
 
     println!(
         "{}",
-        formatters::actions::format_exchanges_list(&filtered, options)
+        formatters::actions::format_exchanges_list(&filtered, options)?
     );
 
     Ok(())
@@ -417,7 +427,7 @@ fn remove_exchange(
 
     println!(
         "{}",
-        formatters::actions::format_exchange_remove(id, options)
+        formatters::actions::format_exchange_remove(id, options)?
     );
 
     Ok(())

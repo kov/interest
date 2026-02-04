@@ -160,21 +160,21 @@ pub fn format_portfolio_table(
             .map(|p| {
                 let price_str = p
                     .current_price
-                    .map(|pr: Decimal| format_currency(pr, options))
+                    .map(|pr: Decimal| format_currency(pr, &options))
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let value_str = p
                     .current_value
-                    .map(|v: Decimal| format_currency(v, options))
+                    .map(|v: Decimal| format_currency(v, &options))
                     .unwrap_or_else(|| "N/A".to_string());
 
                 let pl_str = p
                     .unrealized_pl
                     .map(|pl: Decimal| {
                         if pl >= Decimal::ZERO {
-                            format_currency(pl, options).green().to_string()
+                            format_currency(pl, &options).green().to_string()
                         } else {
-                            format_currency(pl, options).red().to_string()
+                            format_currency(pl, &options).red().to_string()
                         }
                     })
                     .unwrap_or_else(|| "N/A".to_string());
@@ -193,9 +193,9 @@ pub fn format_portfolio_table(
 
                 PositionRow {
                     ticker: p.asset.ticker.clone(),
-                    quantity: format_quantity(p.quantity, options),
-                    avg_cost: format_currency(p.average_cost, options),
-                    total_cost: format_currency(p.total_cost, options),
+                    quantity: format_quantity(p.quantity, &options),
+                    avg_cost: format_currency(p.average_cost, &options),
+                    total_cost: format_currency(p.total_cost, &options),
                     price: price_str,
                     value: value_str,
                     pl: pl_str,
@@ -215,14 +215,14 @@ pub fn format_portfolio_table(
         output.push_str(&format!("\n{} Subtotal", "─".repeat(40).bright_black()));
         output.push_str(&format!(
             "\n  Cost: {}  |  Value: {}  |  ",
-            format_currency(subtotal_cost, options),
-            format_currency(subtotal_value, options)
+            format_currency(subtotal_cost, &options),
+            format_currency(subtotal_value, &options)
         ));
 
         let pl_colored = if subtotal_pl >= Decimal::ZERO {
-            format!("P&L: {}", format_currency(subtotal_pl, options)).green()
+            format!("P&L: {}", format_currency(subtotal_pl, &options)).green()
         } else {
-            format!("P&L: {}", format_currency(subtotal_pl, options)).red()
+            format!("P&L: {}", format_currency(subtotal_pl, &options)).red()
         };
         output.push_str(&pl_colored);
 
@@ -243,18 +243,18 @@ pub fn format_portfolio_table(
     output.push_str(&format!(
         "\n{:<20} {}",
         "Total Cost:".bold(),
-        format_currency(report.total_cost, options)
+        format_currency(report.total_cost, &options)
     ));
     output.push_str(&format!(
         "\n{:<20} {}",
         "Total Value:".bold(),
-        format_currency(report.total_value, options)
+        format_currency(report.total_value, &options)
     ));
 
     let pl_colored = if report.total_pl >= Decimal::ZERO {
-        format_currency(report.total_pl, options).green()
+        format_currency(report.total_pl, &options).green()
     } else {
-        format_currency(report.total_pl, options).red()
+        format_currency(report.total_pl, &options).red()
     };
     output.push_str(&format!("\n{:<20} {}", "Total P&L:".bold(), pl_colored));
 

@@ -81,7 +81,7 @@ fn calculate_darf_due_date(year: i32, month: u32) -> Result<NaiveDate> {
 
 /// Format DARF payment for display
 #[allow(dead_code)]
-pub fn format_darf_payment(payment: &DarfPayment, options: OutputOptions) -> String {
+pub fn format_darf_payment(payment: &DarfPayment, options: &OutputOptions) -> String {
     format!(
         "DARF {code} - {description}\n  Vencimento: {due_date}\n  Valor: {amount}",
         code = payment.darf_code,
@@ -97,7 +97,7 @@ pub fn format_monthly_darf_summary(
     payments: &[DarfPayment],
     year: i32,
     month: u32,
-    options: OutputOptions,
+    options: &OutputOptions,
 ) -> String {
     if payments.is_empty() {
         return format!("Nenhum DARF a pagar para {}/{}", month, year);
@@ -157,7 +157,7 @@ mod tests {
         };
 
         let options = OutputOptions::from_flags(false, false);
-        let formatted = format_darf_payment(&payment, options);
+        let formatted = format_darf_payment(&payment, &options);
         assert!(formatted.contains("DARF 6015"));
         assert!(formatted.contains("Renda Variável"));
         assert!(formatted.contains("29/02/2024"));

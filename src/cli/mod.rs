@@ -144,6 +144,9 @@ pub enum Commands {
     /// Launch interactive TUI mode
     Interactive,
 
+    /// Launch AI chat assistant mode
+    Chat,
+
     /// Toggle privacy mode (TUI session only)
     Privacy {
         #[arg(value_enum)]

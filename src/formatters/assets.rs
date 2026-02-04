@@ -1,26 +1,35 @@
-/// Formatters for asset management commands
 use crate::db;
 use crate::formatters::OutputOptions;
 use crate::output::{ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, Value, ValueKind};
+/// Formatters for asset management commands
+use anyhow::Result;
 
 //
 // 1. ASSET LIST
 //
 
 /// Format assets list
-pub fn format_assets_list(assets: &[db::Asset], options: OutputOptions) -> String {
+pub fn format_assets_list(assets: &[db::Asset], options: OutputOptions) -> Result<String> {
     let document = build_assets_list_document(assets);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format asset show details
-pub fn format_asset_show(asset: &db::Asset, tx_count: i64, options: OutputOptions) -> String {
+pub fn format_asset_show(
+    asset: &db::Asset,
+    tx_count: i64,
+    options: OutputOptions,
+) -> Result<String> {
     let document = build_asset_show_document(asset, tx_count);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format asset add confirmation
-pub fn format_asset_add(asset_id: i64, asset: &db::Asset, options: OutputOptions) -> String {
+pub fn format_asset_add(
+    asset_id: i64,
+    asset: &db::Asset,
+    options: OutputOptions,
+) -> Result<String> {
     let document = build_asset_add_document(asset_id, asset);
     crate::formatters::render_document(&document, options)
 }
@@ -30,25 +39,29 @@ pub fn format_asset_set_type(
     ticker: &str,
     asset_type: &db::AssetType,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_asset_set_type_document(ticker, asset_type);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format asset set-name confirmation
-pub fn format_asset_set_name(ticker: &str, name: &str, options: OutputOptions) -> String {
+pub fn format_asset_set_name(ticker: &str, name: &str, options: OutputOptions) -> Result<String> {
     let document = build_asset_set_name_document(ticker, name);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format asset rename confirmation
-pub fn format_asset_rename(old_ticker: &str, new_ticker: &str, options: OutputOptions) -> String {
+pub fn format_asset_rename(
+    old_ticker: &str,
+    new_ticker: &str,
+    options: OutputOptions,
+) -> Result<String> {
     let document = build_asset_rename_document(old_ticker, new_ticker);
     crate::formatters::render_document(&document, options)
 }
 
 /// Format asset remove confirmation
-pub fn format_asset_remove(ticker: &str, options: OutputOptions) -> String {
+pub fn format_asset_remove(ticker: &str, options: OutputOptions) -> Result<String> {
     let document = build_asset_remove_document(ticker);
     crate::formatters::render_document(&document, options)
 }
@@ -58,7 +71,7 @@ pub fn format_sync_maisretorno(
     sources: &[&crate::scraping::maisretorno::MaisRetornoListSource],
     stats: &crate::scraping::maisretorno::SyncStats,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_sync_maisretorno_document(sources, stats);
     crate::formatters::render_document(&document, options)
 }
@@ -385,7 +398,8 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2024, 6, 15, 14, 30, 0).unwrap(),
         };
 
-        let json_str = format_asset_show(&asset, 10, OutputOptions::from_flags(true, false));
+        let json_str =
+            format_asset_show(&asset, 10, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -423,7 +437,8 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let json_str = format_asset_add(42, &asset, OutputOptions::from_flags(true, false));
+        let json_str =
+            format_asset_add(42, &asset, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -461,7 +476,7 @@ mod tests {
             updated_at: Utc::now(),
         }];
 
-        let json_str = format_assets_list(&assets, OutputOptions::from_flags(true, false));
+        let json_str = format_assets_list(&assets, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");

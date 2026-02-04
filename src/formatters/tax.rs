@@ -8,6 +8,7 @@ use crate::output::{
     ValueKind,
 };
 use crate::tax;
+use anyhow::Result;
 
 //
 // HELPER TYPES AND FUNCTIONS
@@ -102,7 +103,7 @@ pub fn format_tax_report(
     income_summary: &[IncomeByType],
     year: i32,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_tax_report_document(report, income_summary, year);
     crate::formatters::render_document(&document, options)
 }
@@ -294,7 +295,7 @@ pub fn format_tax_summary(
     report: &tax::irpf::AnnualTaxReport,
     year: i32,
     options: OutputOptions,
-) -> String {
+) -> Result<String> {
     let document = build_tax_summary_document(report, year);
     crate::formatters::render_document(&document, options)
 }
@@ -410,7 +411,7 @@ mod tests {
         };
 
         let json_str =
-            format_tax_report(&report, &[], 2024, OutputOptions::from_flags(true, false));
+            format_tax_report(&report, &[], 2024, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");

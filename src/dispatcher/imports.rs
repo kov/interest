@@ -23,24 +23,28 @@ pub async fn dispatch_import(
     match import_result {
         ImportResult::Cei(raw_transactions) => {
             if !options.is_json() {
-                println!(
+                options.writer().writeln(&format!(
                     "\n{} Found {} transactions\n",
                     "✓".green().bold(),
                     raw_transactions.len()
-                );
+                ))?;
             }
 
             if !options.is_json() {
-                if let Some(table) =
-                    formatters::imports::format_cei_preview_table(&raw_transactions, options)
-                {
-                    println!("{}", table);
+                if let Some(table) = formatters::imports::format_cei_preview_table(
+                    &raw_transactions,
+                    options.clone(),
+                )? {
+                    options.writer().writeln(&table)?;
                 }
             }
 
             if dry_run {
                 if !options.is_json() {
-                    println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
+                    options.writer().writeln(&format!(
+                        "\n{} Dry run - no changes saved",
+                        "ℹ".blue().bold()
+                    ))?;
                 }
                 return Ok(());
             }
@@ -48,19 +52,27 @@ pub async fn dispatch_import(
             db::init_database(None)?;
             let conn = db::open_db(None)?;
 
-            let stats = crate::dispatcher::imports_helpers::import_cei(&conn, &raw_transactions)?;
+            let stats =
+                crate::dispatcher::imports_helpers::import_cei(&conn, &raw_transactions, &options)?;
 
             if !options.is_json() {
-                println!("\n{} Import complete!", "✓".green().bold());
-                println!("  Imported: {}", stats.imported.to_string().green());
+                options
+                    .writer()
+                    .writeln(&format!("\n{} Import complete!", "✓".green().bold()))?;
+                options.writer().writeln(&format!(
+                    "  Imported: {}",
+                    stats.imported.to_string().green()
+                ))?;
                 if stats.skipped_old > 0 {
-                    println!(
+                    options.writer().writeln(&format!(
                         "  Skipped (before last import date): {}",
                         stats.skipped_old.to_string().yellow()
-                    );
+                    ))?;
                 }
                 if stats.errors > 0 {
-                    println!("  Errors: {}", stats.errors.to_string().red());
+                    options
+                        .writer()
+                        .writeln(&format!("  Errors: {}", stats.errors.to_string().red()))?;
                 }
             }
 
@@ -69,11 +81,11 @@ pub async fn dispatch_import(
 
         ImportResult::Movimentacao(entries) => {
             if !options.is_json() {
-                println!(
+                options.writer().writeln(&format!(
                     "\n{} Found {} movimentacao entries\n",
                     "✓".green().bold(),
                     entries.len()
-                );
+                ))?;
             }
 
             let trades: Vec<_> = entries.iter().filter(|e| e.is_trade()).collect();
@@ -87,80 +99,102 @@ pub async fn dispatch_import(
                 .collect();
 
             if !options.is_json() {
-                println!("{} Summary:", "📊".cyan().bold());
-                println!(
+                options
+                    .writer()
+                    .writeln(&format!("{} Summary:", "📊".cyan().bold()))?;
+                options.writer().writeln(&format!(
                     "  {} Trades (buy/sell/term)",
                     trades.len().to_string().green()
-                );
-                println!(
+                ))?;
+                options.writer().writeln(&format!(
                     "  {} Corporate actions (splits, bonuses, mergers)",
                     corporate_actions.len().to_string().yellow()
-                );
-                println!(
+                ))?;
+                options.writer().writeln(&format!(
                     "  {} Income events (dividends, yields, amortization)",
                     income_events.len().to_string().cyan()
-                );
-                println!("  {} Other movements", other.len().to_string().dimmed());
-                println!();
+                ))?;
+                options.writer().writeln(&format!(
+                    "  {} Other movements",
+                    other.len().to_string().dimmed()
+                ))?;
+                options.writer().writeln("")?;
             }
 
             // Show preview of trades
             if !options.is_json() && !trades.is_empty() {
-                println!("{} Sample trades:", "💰".cyan().bold());
+                options
+                    .writer()
+                    .writeln(&format!("{} Sample trades:", "💰".cyan().bold()))?;
                 let cloned_trades: Vec<_> = trades.iter().map(|e| (*e).clone()).collect();
-                if let Some(table) =
-                    formatters::imports::format_movimentacao_preview_table(&cloned_trades, options)
-                {
-                    println!("{}\n", table);
+                if let Some(table) = formatters::imports::format_movimentacao_preview_table(
+                    &cloned_trades,
+                    options.clone(),
+                )? {
+                    options.writer().writeln(&format!("{}\n", table))?;
                 }
             }
 
             // Show preview of corporate actions
             if !options.is_json() && !corporate_actions.is_empty() {
-                println!("{} Corporate actions:", "🏢".cyan().bold());
+                options
+                    .writer()
+                    .writeln(&format!("{} Corporate actions:", "🏢".cyan().bold()))?;
 
                 for action in corporate_actions.iter().take(5) {
-                    println!(
+                    options.writer().writeln(&format!(
                         "  {} {} - {}",
                         action.date.format("%d/%m/%Y").to_string().dimmed(),
                         action.movement_type.yellow(),
                         action.ticker.as_ref().unwrap_or(&action.product)
-                    );
+                    ))?;
                 }
-                println!();
+                options.writer().writeln("")?;
             }
 
             // Show preview of income events
             if !options.is_json() && !income_events.is_empty() {
-                println!("{} Income events:", "💵".cyan().bold());
+                options
+                    .writer()
+                    .writeln(&format!("{} Income events:", "💵".cyan().bold()))?;
 
                 for event in income_events.iter().take(5) {
                     let value = event
                         .operation_value
-                        .map(|amount| crate::utils::format_currency(amount, options))
+                        .map(|amount| crate::utils::format_currency(amount, &options))
                         .unwrap_or_else(|| "-".to_string());
 
-                    println!(
+                    options.writer().writeln(&format!(
                         "  {} {} - {} {}",
                         event.date.format("%d/%m/%Y").to_string().dimmed(),
                         event.movement_type.cyan(),
                         event.ticker.as_ref().unwrap_or(&event.product),
                         value.green()
-                    );
+                    ))?;
                 }
-                println!();
+                options.writer().writeln("")?;
             }
 
             if dry_run {
                 if !options.is_json() {
-                    println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
-                    println!("\n{} What would be imported:", "📝".cyan().bold());
-                    println!("  • {} trade transactions", trades.len());
-                    println!("  • {} corporate actions", corporate_actions.len());
-                    println!(
+                    options.writer().writeln(&format!(
+                        "\n{} Dry run - no changes saved",
+                        "ℹ".blue().bold()
+                    ))?;
+                    options
+                        .writer()
+                        .writeln(&format!("\n{} What would be imported:", "📝".cyan().bold()))?;
+                    options
+                        .writer()
+                        .writeln(&format!("  • {} trade transactions", trades.len()))?;
+                    options.writer().writeln(&format!(
+                        "  • {} corporate actions",
+                        corporate_actions.len()
+                    ))?;
+                    options.writer().writeln(&format!(
                         "  • {} income events (not yet implemented)",
                         income_events.len()
-                    );
+                    ))?;
                 }
                 return Ok(());
             }
@@ -184,12 +218,12 @@ pub async fn dispatch_import(
                     let source = "MOVIMENTACAO";
 
                     if !options.is_json() {
-                        println!(
+                        options.writer().writeln(&format!(
                             "\n{} Force reimport: deleting {} data from {} onwards...",
                             "⚠".yellow().bold(),
                             source,
                             from_date.format("%Y-%m-%d").to_string().yellow()
-                        );
+                        ))?;
                     }
 
                     let deleted_txs =
@@ -207,22 +241,22 @@ pub async fn dispatch_import(
                     )?;
 
                     if !options.is_json() {
-                        println!(
+                        options.writer().writeln(&format!(
                             "  {} Deleted: {} transactions, {} corporate actions, {} income events",
                             "✓".green(),
                             deleted_txs.to_string().red(),
                             deleted_actions.to_string().red(),
                             deleted_income.to_string().red()
-                        );
+                        ))?;
                     }
                 }
             }
 
             if !options.is_json() {
-                println!(
+                options.writer().writeln(&format!(
                     "{} Importing trades, corporate actions, and income events...",
                     "⏳".cyan().bold()
-                );
+                ))?;
             }
             // Always track state - when force_reimport deleted metadata, get_last_import_date returns None
             // This allows importing old dates, then properly updates cutoff dates for future imports
@@ -231,36 +265,42 @@ pub async fn dispatch_import(
                 reports::invalidate_snapshots_after(&conn, date)?;
             }
 
-            println!(
-                "{}",
-                formatters::imports::format_import_stats(&stats, options)
-            );
+            let output = formatters::imports::format_import_stats(&stats, options.clone())?;
+            options.writer().writeln(&output)?;
 
             Ok(())
         }
 
         ImportResult::OfertasPublicas(entries) => {
             if !options.is_json() {
-                println!(
+                options.writer().writeln(&format!(
                     "\n{} Found {} ofertas públicas entries\n",
                     "✓".green().bold(),
                     entries.len()
-                );
+                ))?;
             }
 
             if !options.is_json() {
                 if let Some(table) =
-                    formatters::imports::format_ofertas_preview_table(&entries, options)
+                    formatters::imports::format_ofertas_preview_table(&entries, options.clone())?
                 {
-                    println!("{}", table);
+                    options.writer().writeln(&table)?;
                 }
             }
 
             if dry_run {
                 if !options.is_json() {
-                    println!("\n{} Dry run - no changes saved", "ℹ".blue().bold());
-                    println!("\n{} What would be imported:", "📝".cyan().bold());
-                    println!("  • {} offer allocation transactions", entries.len());
+                    options.writer().writeln(&format!(
+                        "\n{} Dry run - no changes saved",
+                        "ℹ".blue().bold()
+                    ))?;
+                    options
+                        .writer()
+                        .writeln(&format!("\n{} What would be imported:", "📝".cyan().bold()))?;
+                    options.writer().writeln(&format!(
+                        "  • {} offer allocation transactions",
+                        entries.len()
+                    ))?;
                 }
                 return Ok(());
             }
@@ -269,22 +309,33 @@ pub async fn dispatch_import(
             let conn = db::open_db(None)?;
 
             if !options.is_json() {
-                println!("{} Importing offer allocations...", "⏳".cyan().bold());
+                options.writer().writeln(&format!(
+                    "{} Importing offer allocations...",
+                    "⏳".cyan().bold()
+                ))?;
             }
 
-            let stats = crate::dispatcher::imports_helpers::import_ofertas(&conn, &entries)?;
+            let stats =
+                crate::dispatcher::imports_helpers::import_ofertas(&conn, &entries, &options)?;
 
             if !options.is_json() {
-                println!("\n{} Import complete!", "✓".green().bold());
-                println!("  Imported: {}", stats.imported.to_string().green());
+                options
+                    .writer()
+                    .writeln(&format!("\n{} Import complete!", "✓".green().bold()))?;
+                options.writer().writeln(&format!(
+                    "  Imported: {}",
+                    stats.imported.to_string().green()
+                ))?;
                 if stats.skipped_old > 0 {
-                    println!(
+                    options.writer().writeln(&format!(
                         "  Skipped (before last import date): {}",
                         stats.skipped_old.to_string().yellow()
-                    );
+                    ))?;
                 }
                 if stats.errors > 0 {
-                    println!("  Errors: {}", stats.errors.to_string().red());
+                    options
+                        .writer()
+                        .writeln(&format!("  Errors: {}", stats.errors.to_string().red()))?;
                 }
             }
 

@@ -5,7 +5,7 @@ pub mod models;
 use anyhow::{Context, Result};
 use chrono::Datelike;
 use chrono::NaiveDate;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -43,6 +43,19 @@ pub fn open_db(db_path: Option<PathBuf>) -> Result<Connection> {
     let schema_sql = include_str!("schema.sql");
     conn.execute_batch(schema_sql)
         .context("Failed to apply database schema")?;
+
+    Ok(conn)
+}
+
+/// Open database connection in read-only mode
+pub fn open_db_read_only(db_path: Option<PathBuf>) -> Result<Connection> {
+    let path = db_path.unwrap_or(get_default_db_path()?);
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .context(format!("Failed to open database at {:?}", path))?;
+
+    // Enable foreign keys (safe in read-only)
+    conn.execute("PRAGMA foreign_keys = ON", [])
+        .context("Failed to enable foreign keys")?;
 
     Ok(conn)
 }

@@ -1,15 +1,16 @@
-/// Formatters for price commands
 use crate::formatters::OutputOptions;
 use crate::output::{
     ColumnDef, OutputBlock, OutputDocument, Row, TableOptions, TableStyle, Value, ValueKind,
 };
 use crate::pricing::yahoo::HistoricalPrice;
+/// Formatters for price commands
+use anyhow::Result;
 
 //
 // PRICE DATA TABLE
 //
 
-pub fn format_prices_table(prices: &[HistoricalPrice], options: OutputOptions) -> String {
+pub fn format_prices_table(prices: &[HistoricalPrice], options: OutputOptions) -> Result<String> {
     let document = build_prices_document(prices);
     crate::formatters::render_document(&document, options)
 }
@@ -71,7 +72,7 @@ mod tests {
     #[test]
     fn test_prices_table_empty() {
         let prices: Vec<HistoricalPrice> = vec![];
-        let output = format_prices_table(&prices, OutputOptions::from_flags(false, false));
+        let output = format_prices_table(&prices, OutputOptions::from_flags(false, false)).unwrap();
         assert!(output.contains("No price data found"));
         assert!(output.contains("ℹ"));
     }

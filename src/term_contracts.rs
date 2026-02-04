@@ -227,7 +227,7 @@ pub fn process_term_liquidations(conn: &Connection) -> Result<usize> {
             base_ticker,
             quantity,
             matches.len(),
-            format_currency(avg_cost, OutputOptions::from_flags(false, false))
+            format_currency(avg_cost, &OutputOptions::from_flags(false, false))
         );
 
         processed += 1;

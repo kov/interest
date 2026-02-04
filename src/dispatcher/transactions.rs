@@ -121,21 +121,19 @@ async fn dispatch_transaction_add(
     let tx_id = crate::db::insert_transaction(&conn, &transaction)?;
 
     // Display confirmation
-    print!(
-        "{}",
-        formatters::transactions::format_transaction_add_table(
-            tx_id,
-            ticker,
-            tx_type.as_str(),
-            trade_date,
-            quantity,
-            price,
-            fees,
-            total_cost,
-            notes,
-            options,
-        )
-    );
+    let output = formatters::transactions::format_transaction_add_table(
+        tx_id,
+        ticker,
+        tx_type.as_str(),
+        trade_date,
+        quantity,
+        price,
+        fees,
+        total_cost,
+        notes,
+        options.clone(),
+    )?;
+    options.writer().write(&output)?;
 
     Ok(())
 }
@@ -204,10 +202,8 @@ async fn dispatch_transactions_list(
         }
     }
 
-    println!(
-        "{}",
-        formatters::transactions::format_transactions_list(&rows, options)
-    );
+    let output = formatters::transactions::format_transactions_list(&rows, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }

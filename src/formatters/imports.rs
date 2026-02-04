@@ -1,8 +1,9 @@
-/// Formatters for import commands (CEI, Movimentação, Ofertas Públicas)
 use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, TableStyle, Value,
     ValueKind,
 };
+/// Formatters for import commands (CEI, Movimentação, Ofertas Públicas)
+use anyhow::Result;
 
 use crate::formatters::OutputOptions;
 use crate::importers::ImportStats;
@@ -12,7 +13,7 @@ use crate::importers::ImportStats;
 //
 
 /// Format import stats
-pub fn format_import_stats(stats: &ImportStats, options: OutputOptions) -> String {
+pub fn format_import_stats(stats: &ImportStats, options: OutputOptions) -> Result<String> {
     let document = build_import_stats_document(stats);
     crate::formatters::render_document(&document, options)
 }
@@ -108,7 +109,7 @@ fn build_import_stats_document(stats: &ImportStats) -> OutputDocument {
 pub fn format_cei_preview_table(
     txs: &[crate::importers::RawTransaction],
     options: OutputOptions,
-) -> Option<String> {
+) -> Result<Option<String>> {
     let rows = txs
         .iter()
         .take(10)
@@ -125,7 +126,7 @@ pub fn format_cei_preview_table(
         .collect::<Vec<_>>();
 
     if rows.is_empty() {
-        None
+        Ok(None)
     } else {
         let document = OutputDocument {
             title: None,
@@ -147,7 +148,9 @@ pub fn format_cei_preview_table(
             }],
             meta: Default::default(),
         };
-        Some(crate::formatters::render_document(&document, options))
+        Ok(Some(crate::formatters::render_document(
+            &document, options,
+        )?))
     }
 }
 
@@ -158,7 +161,7 @@ pub fn format_cei_preview_table(
 pub fn format_movimentacao_preview_table(
     trades: &[crate::importers::MovimentacaoEntry],
     options: OutputOptions,
-) -> Option<String> {
+) -> Result<Option<String>> {
     let rows = trades
         .iter()
         .take(5)
@@ -174,7 +177,7 @@ pub fn format_movimentacao_preview_table(
         .collect::<Vec<_>>();
 
     if rows.is_empty() {
-        None
+        Ok(None)
     } else {
         let document = OutputDocument {
             title: None,
@@ -195,7 +198,9 @@ pub fn format_movimentacao_preview_table(
             }],
             meta: Default::default(),
         };
-        Some(crate::formatters::render_document(&document, options))
+        Ok(Some(crate::formatters::render_document(
+            &document, options,
+        )?))
     }
 }
 
@@ -206,7 +211,7 @@ pub fn format_movimentacao_preview_table(
 pub fn format_ofertas_preview_table(
     entries: &[crate::importers::OfertaPublicaEntry],
     options: OutputOptions,
-) -> Option<String> {
+) -> Result<Option<String>> {
     let rows = entries
         .iter()
         .take(5)
@@ -222,7 +227,7 @@ pub fn format_ofertas_preview_table(
         .collect::<Vec<_>>();
 
     if rows.is_empty() {
-        None
+        Ok(None)
     } else {
         let document = OutputDocument {
             title: None,
@@ -243,7 +248,9 @@ pub fn format_ofertas_preview_table(
             }],
             meta: Default::default(),
         };
-        Some(crate::formatters::render_document(&document, options))
+        Ok(Some(crate::formatters::render_document(
+            &document, options,
+        )?))
     }
 }
 
@@ -271,7 +278,7 @@ mod tests {
             skipped_income_old: 0,
         };
 
-        let json_str = format_import_stats(&stats, OutputOptions::from_flags(true, false));
+        let json_str = format_import_stats(&stats, OutputOptions::from_flags(true, false)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = value["blocks"].as_array().expect("blocks array missing");
@@ -298,7 +305,11 @@ mod tests {
     #[test]
     fn test_cei_preview_empty() {
         let txs: Vec<crate::importers::RawTransaction> = vec![];
-        assert!(format_cei_preview_table(&txs, OutputOptions::from_flags(false, false)).is_none());
+        assert!(
+            format_cei_preview_table(&txs, OutputOptions::from_flags(false, false))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -308,6 +319,7 @@ mod tests {
             &trades,
             OutputOptions::from_flags(false, false)
         )
+        .unwrap()
         .is_none());
     }
 }

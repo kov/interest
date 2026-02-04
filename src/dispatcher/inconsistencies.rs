@@ -42,10 +42,9 @@ pub async fn dispatch_inconsistencies(
             };
             let issues = db::list_inconsistencies(&conn, status, issue_type, asset.as_deref())?;
 
-            println!(
-                "{}",
-                formatters::inconsistencies::format_inconsistencies_list(&issues, options)
-            );
+            let output =
+                formatters::inconsistencies::format_inconsistencies_list(&issues, options.clone())?;
+            println!("{}", output);
             Ok(())
         }
         crate::cli::InconsistenciesCommands::Show { id } => {
@@ -76,7 +75,7 @@ pub async fn dispatch_inconsistencies(
                 "Quantity: {}",
                 issue
                     .quantity
-                    .map(|q| format_quantity(q, options))
+                    .map(|q| format_quantity(q, &options))
                     .unwrap_or_else(|| "-".to_string())
             );
             println!(
@@ -150,10 +149,10 @@ pub async fn dispatch_inconsistencies(
                     // Interactive mode: prompt based on issue type
                     let result = match &issue.issue_type {
                         crate::db::InconsistencyType::MissingCostBasis => {
-                            prompt_missing_cost_basis(issue, options)
+                            prompt_missing_cost_basis(issue, &options)
                         }
                         crate::db::InconsistencyType::MissingPurchaseHistory => {
-                            prompt_missing_purchase_history(issue, options)
+                            prompt_missing_purchase_history(issue, &options)
                         }
                         crate::db::InconsistencyType::InvalidTicker
                         | crate::db::InconsistencyType::InvalidDate => {
@@ -207,7 +206,7 @@ pub async fn dispatch_inconsistencies(
 
                 println!(
                     "{}",
-                    formatters::inconsistencies::format_resolve(issue_id, options)
+                    formatters::inconsistencies::format_resolve(issue_id, options.clone())?
                 );
             }
 
@@ -347,7 +346,7 @@ fn prompt_confirm(msg: &str) -> Result<bool> {
 
 fn prompt_missing_cost_basis(
     issue: &db::Inconsistency,
-    options: options::OutputOptions,
+    options: &options::OutputOptions,
 ) -> Result<Map<String, Value>> {
     println!(
         "\nResolving inconsistency #{}: MissingCostBasis",
@@ -413,7 +412,7 @@ fn prompt_missing_cost_basis(
 
 fn prompt_missing_purchase_history(
     issue: &db::Inconsistency,
-    options: options::OutputOptions,
+    options: &options::OutputOptions,
 ) -> Result<Map<String, Value>> {
     println!(
         "\nResolving inconsistency #{}: MissingPurchaseHistory",

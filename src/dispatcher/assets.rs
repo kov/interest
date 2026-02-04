@@ -49,10 +49,8 @@ fn list_assets(asset_type: Option<&str>, options: options::OutputOptions) -> Res
         db::get_all_assets(&conn)?
     };
 
-    println!(
-        "{}",
-        formatters::assets::format_assets_list(&assets, options)
-    );
+    let output = formatters::assets::format_assets_list(&assets, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -62,10 +60,8 @@ fn show_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Ticker not found in assets")?;
     let tx_count = db::count_transactions_for_asset(&conn, &asset.ticker)?;
 
-    println!(
-        "{}",
-        formatters::assets::format_asset_show(&asset, tx_count, options)
-    );
+    let output = formatters::assets::format_asset_show(&asset, tx_count, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -89,10 +85,8 @@ fn add_asset(
     };
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Asset not found after insert")?;
 
-    println!(
-        "{}",
-        formatters::assets::format_asset_add(asset_id, &asset, options)
-    );
+    let output = formatters::assets::format_asset_add(asset_id, &asset, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -102,10 +96,8 @@ fn set_asset_type(ticker: &str, asset_type: &str, options: options::OutputOption
     let parsed = parse_asset_type(asset_type)?;
     db::update_asset_type(&conn, ticker, &parsed)?;
 
-    println!(
-        "{}",
-        formatters::assets::format_asset_set_type(ticker, &parsed, options)
-    );
+    let output = formatters::assets::format_asset_set_type(ticker, &parsed, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -114,32 +106,30 @@ fn set_asset_name(ticker: &str, name: &str, options: options::OutputOptions) -> 
     let conn = open_conn()?;
     db::update_asset_name(&conn, ticker, name)?;
 
-    println!(
-        "{}",
-        formatters::assets::format_asset_set_name(ticker, name, options)
-    );
+    let output = formatters::assets::format_asset_set_name(ticker, name, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
 
 fn rename_asset(old_ticker: &str, new_ticker: &str, options: options::OutputOptions) -> Result<()> {
-    println!(
+    options.writer().writeln(&format!(
         "Are you sure you want to rename {} to {}?",
         old_ticker, new_ticker
-    );
-    println!("This is a rare, correction-only change. Type 'yes' to confirm:");
+    ))?;
+    options
+        .writer()
+        .writeln("This is a rare, correction-only change. Type 'yes' to confirm:")?;
     if !prompt_exact(&["yes"])? {
-        println!("Aborted.");
+        options.writer().writeln("Aborted.")?;
         return Ok(());
     }
 
     let conn = open_conn()?;
     db::update_asset_ticker(&conn, old_ticker, new_ticker)?;
 
-    println!(
-        "{}",
-        formatters::assets::format_asset_rename(old_ticker, new_ticker, options)
-    );
+    let output = formatters::assets::format_asset_rename(old_ticker, new_ticker, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -149,13 +139,15 @@ fn remove_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
     let asset = db::get_asset_by_ticker(&conn, ticker)?.context("Ticker not found in assets")?;
     let tx_count = db::count_transactions_for_asset(&conn, &asset.ticker)?;
 
-    println!(
+    options.writer().writeln(&format!(
         "WARNING: This will permanently delete asset {} and ALL {} related transactions.",
         asset.ticker, tx_count
-    );
-    println!("Type 'yes' or 'DELETE' to confirm:");
+    ))?;
+    options
+        .writer()
+        .writeln("Type 'yes' or 'DELETE' to confirm:")?;
     if !prompt_exact(&["yes", "DELETE"])? {
-        println!("Aborted.");
+        options.writer().writeln("Aborted.")?;
         return Ok(());
     }
 
@@ -168,10 +160,8 @@ fn remove_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
         reports::invalidate_snapshots_after(&conn, date)?;
     }
 
-    println!(
-        "{}",
-        formatters::assets::format_asset_remove(&asset.ticker, options)
-    );
+    let output = formatters::assets::format_asset_remove(&asset.ticker, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
@@ -188,7 +178,7 @@ async fn sync_maisretorno(
         anyhow::bail!("No Mais Retorno sources available for this asset type");
     }
 
-    let printer = crate::ui::progress::ProgressPrinter::new(options);
+    let printer = crate::ui::progress::ProgressPrinter::new(&options);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ui::progress::ProgressEvent>();
     let progress_handle = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -202,10 +192,8 @@ async fn sync_maisretorno(
         crate::ui::progress::clear_progress_line();
     }
 
-    println!(
-        "{}",
-        formatters::assets::format_sync_maisretorno(&sources, &stats, options)
-    );
+    let output = formatters::assets::format_sync_maisretorno(&sources, &stats, options.clone())?;
+    options.writer().writeln(&output)?;
 
     Ok(())
 }
