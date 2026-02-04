@@ -1,6 +1,6 @@
 use anyhow::Result;
 use blake3::Hasher;
-use chrono::NaiveDate;
+use chrono::{Months, NaiveDate};
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -20,6 +20,9 @@ pub struct PositionSummary {
     pub current_value: Option<Decimal>,
     pub unrealized_pl: Option<Decimal>,
     pub unrealized_pl_pct: Option<Decimal>,
+    pub ltm_income: Decimal,
+    pub ltm_yield_pct: Option<Decimal>,
+    pub ltm_yield_on_cost_pct: Option<Decimal>,
 }
 
 /// Complete portfolio report
@@ -346,6 +349,9 @@ fn calculate_portfolio_with_cutoff(
             current_value,
             unrealized_pl,
             unrealized_pl_pct,
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         });
     }
 
@@ -356,8 +362,9 @@ fn calculate_portfolio_with_cutoff(
         b_val.cmp(&a_val)
     });
 
-    let (positions, total_cost, total_value) =
+    let (mut positions, total_cost, total_value) =
         normalize_positions_with_prices(conn, as_of, positions)?;
+    apply_ltm_income(conn, as_of, &mut positions)?;
     let total_pl = total_value - total_cost;
     let total_pl_pct = if total_cost > Decimal::ZERO {
         (total_pl / total_cost) * Decimal::from(100)
@@ -772,8 +779,13 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
             current_value: Some(market_value),
             unrealized_pl: Some(unrealized_pl),
             unrealized_pl_pct: Some(unrealized_pl_pct),
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         });
     }
+
+    apply_ltm_income(conn, date, &mut positions)?;
 
     let total_pl = total_value - total_cost;
     let total_pl_pct = if total_cost > Decimal::ZERO {
@@ -789,6 +801,44 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
         total_pl,
         total_pl_pct,
     }))
+}
+
+fn apply_ltm_income(
+    conn: &Connection,
+    as_of: NaiveDate,
+    positions: &mut [PositionSummary],
+) -> Result<()> {
+    let from_date = as_of.checked_sub_months(Months::new(12)).unwrap_or(as_of);
+    let income_map = crate::db::get_income_totals_by_asset(conn, from_date, as_of)?;
+
+    for position in positions.iter_mut() {
+        let asset_id = match position.asset.id {
+            Some(id) => id,
+            None => {
+                position.ltm_income = Decimal::ZERO;
+                position.ltm_yield_pct = None;
+                position.ltm_yield_on_cost_pct = None;
+                continue;
+            }
+        };
+
+        let ltm_income = income_map.get(&asset_id).cloned().unwrap_or(Decimal::ZERO);
+        let ltm_yield_pct = position
+            .current_value
+            .filter(|v| *v > Decimal::ZERO)
+            .map(|v| (ltm_income / v) * Decimal::from(100));
+        let ltm_yield_on_cost_pct = if position.total_cost > Decimal::ZERO {
+            Some((ltm_income / position.total_cost) * Decimal::from(100))
+        } else {
+            None
+        };
+
+        position.ltm_income = ltm_income;
+        position.ltm_yield_pct = ltm_yield_pct;
+        position.ltm_yield_on_cost_pct = ltm_yield_on_cost_pct;
+    }
+
+    Ok(())
 }
 
 /// Delete snapshots on or after a given date to force recomputation.

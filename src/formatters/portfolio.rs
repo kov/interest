@@ -8,6 +8,7 @@ use crate::output::{
 use crate::reports::aggregation::aggregate_positions_by_asset_type;
 use crate::reports::PortfolioReport;
 use anyhow::Result;
+use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 
 /// Format portfolio report (testable, no I/O)
@@ -33,13 +34,14 @@ pub fn format(
     asset_type_filter: Option<AssetType>,
     options: OutputOptions,
 ) -> Result<String> {
-    let document = build_portfolio_document(report, asset_type_filter);
+    let document = build_portfolio_document(report, asset_type_filter, options.is_json());
     crate::formatters::render_document(&document, options)
 }
 
 fn build_portfolio_document(
     report: &PortfolioReport,
     asset_type_filter: Option<AssetType>,
+    include_ltm_income: bool,
 ) -> OutputDocument {
     let header_text = match asset_type_filter {
         Some(filter) => format!("Portfolio - {} only", filter.as_str().to_uppercase()),
@@ -79,11 +81,20 @@ fn build_portfolio_document(
 
     for (asset_type, positions) in &grouped {
         let totals = totals_by_type.get(asset_type).cloned().unwrap_or_default();
+        let mut subtotal_income = Decimal::ZERO;
+        let mut subtotal_value = Decimal::ZERO;
+        let mut subtotal_cost = Decimal::ZERO;
 
         let rows = positions
             .iter()
-            .map(|position| Row {
-                cells: vec![
+            .map(|position| {
+                subtotal_income += position.ltm_income;
+                subtotal_cost += position.total_cost;
+                if let Some(value) = position.current_value {
+                    subtotal_value += value;
+                }
+
+                let mut cells = vec![
                     Value::Text(position.asset.ticker.clone()),
                     Value::Quantity(position.quantity),
                     Value::Currency(position.average_cost),
@@ -104,11 +115,30 @@ fn build_portfolio_document(
                         .unrealized_pl_pct
                         .map(Value::Percent)
                         .unwrap_or(Value::Null),
-                ],
+                ];
+
+                if include_ltm_income {
+                    cells.push(Value::Currency(position.ltm_income));
+                }
+
+                cells.push(
+                    position
+                        .ltm_yield_pct
+                        .map(Value::Percent)
+                        .unwrap_or(Value::Null),
+                );
+                cells.push(
+                    position
+                        .ltm_yield_on_cost_pct
+                        .map(Value::Percent)
+                        .unwrap_or(Value::Null),
+                );
+
+                Row { cells }
             })
             .collect::<Vec<_>>();
 
-        let columns = vec![
+        let mut columns = vec![
             ColumnDef::new("ticker", "Ticker", ValueKind::Text),
             ColumnDef::new("quantity", "Quantity", ValueKind::Quantity),
             ColumnDef::new("avg_cost", "Avg Cost", ValueKind::Currency),
@@ -118,6 +148,31 @@ fn build_portfolio_document(
             ColumnDef::new("pl", "P&L", ValueKind::CurrencyDelta),
             ColumnDef::new("return_pct", "Return", ValueKind::Percent),
         ];
+
+        if include_ltm_income {
+            columns.push(ColumnDef::new(
+                "ltm_income",
+                "LTM Income",
+                ValueKind::Currency,
+            ));
+        }
+        columns.push(ColumnDef::new("ltm_yield", "Yield", ValueKind::Percent));
+        columns.push(ColumnDef::new(
+            "yield_on_cost",
+            "On Cost",
+            ValueKind::Percent,
+        ));
+
+        let subtotal_ltm_yield = if subtotal_value > Decimal::ZERO {
+            Some((subtotal_income / subtotal_value) * Decimal::from(100))
+        } else {
+            None
+        };
+        let subtotal_yield_on_cost = if subtotal_cost > Decimal::ZERO {
+            Some((subtotal_income / subtotal_cost) * Decimal::from(100))
+        } else {
+            None
+        };
 
         let section_blocks = vec![
             OutputBlock::Table {
@@ -146,6 +201,18 @@ fn build_portfolio_document(
                         label: "Return".to_string(),
                         value: Value::Percent(totals.return_pct),
                     },
+                    KeyValueRow {
+                        label: "Yield".to_string(),
+                        value: subtotal_ltm_yield
+                            .map(Value::Percent)
+                            .unwrap_or(Value::Null),
+                    },
+                    KeyValueRow {
+                        label: "On Cost".to_string(),
+                        value: subtotal_yield_on_cost
+                            .map(Value::Percent)
+                            .unwrap_or(Value::Null),
+                    },
                 ],
             },
         ];
@@ -159,6 +226,18 @@ fn build_portfolio_document(
             blocks: section_blocks,
         });
     }
+
+    let total_income: Decimal = report.positions.iter().map(|p| p.ltm_income).sum();
+    let total_ltm_yield = if report.total_value > Decimal::ZERO {
+        Some((total_income / report.total_value) * Decimal::from(100))
+    } else {
+        None
+    };
+    let total_yield_on_cost = if report.total_cost > Decimal::ZERO {
+        Some((total_income / report.total_cost) * Decimal::from(100))
+    } else {
+        None
+    };
 
     document.blocks.push(OutputBlock::KeyValue {
         title: Some("Portfolio Summary".to_string()),
@@ -178,6 +257,16 @@ fn build_portfolio_document(
             KeyValueRow {
                 label: "Total Return".to_string(),
                 value: Value::Percent(report.total_pl_pct),
+            },
+            KeyValueRow {
+                label: "Yield".to_string(),
+                value: total_ltm_yield.map(Value::Percent).unwrap_or(Value::Null),
+            },
+            KeyValueRow {
+                label: "On Cost".to_string(),
+                value: total_yield_on_cost
+                    .map(Value::Percent)
+                    .unwrap_or(Value::Null),
             },
         ],
     });
@@ -269,6 +358,9 @@ mod tests {
             current_value: Some(current_value),
             unrealized_pl: Some(unrealized_pl),
             unrealized_pl_pct,
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         }
     }
 
@@ -506,6 +598,11 @@ mod tests {
         assert!(
             output.contains("Subtotal"),
             "Should contain subtotal sections"
+        );
+        assert!(output.contains("Yield"), "Subtotal should include Yield");
+        assert!(
+            output.contains("On Cost"),
+            "Subtotal should include On Cost"
         );
         // Each asset type group should have a subtotal
         let subtotal_count = output.matches("Subtotal").count();

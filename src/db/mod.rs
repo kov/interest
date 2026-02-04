@@ -7,6 +7,7 @@ use chrono::Datelike;
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::info;
@@ -1521,6 +1522,30 @@ pub fn get_income_events_with_assets(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(results)
+}
+
+/// Get total net income per asset for a date range (inclusive).
+pub fn get_income_totals_by_asset(
+    conn: &Connection,
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> Result<HashMap<i64, Decimal>> {
+    let mut stmt = conn.prepare(
+        "SELECT asset_id, SUM(total_amount - withholding_tax) as total
+         FROM income_events
+         WHERE event_date >= ?1 AND event_date <= ?2
+         GROUP BY asset_id",
+    )?;
+
+    let rows = stmt
+        .query_map([from_date, to_date], |row| {
+            let asset_id: i64 = row.get(0)?;
+            let total = get_optional_decimal_value(row, 1)?.unwrap_or(Decimal::ZERO);
+            Ok((asset_id, total))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(rows.into_iter().collect())
 }
 
 /// Get amortization (capital return) events for a specific asset, ordered ASC by event_date.

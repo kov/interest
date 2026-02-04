@@ -30,6 +30,9 @@ pub fn format_portfolio_json(report: &PortfolioReport) -> String {
         current_value: Option<String>,
         unrealized_pl: Option<String>,
         unrealized_pl_pct: Option<String>,
+        ltm_income: String,
+        ltm_yield_pct: Option<String>,
+        ltm_yield_on_cost_pct: Option<String>,
     }
 
     #[derive(Serialize)]
@@ -54,6 +57,9 @@ pub fn format_portfolio_json(report: &PortfolioReport) -> String {
             current_value: p.current_value.map(|v: Decimal| v.to_string()),
             unrealized_pl: p.unrealized_pl.map(|pl: Decimal| pl.to_string()),
             unrealized_pl_pct: p.unrealized_pl_pct.map(|pl: Decimal| pl.to_string()),
+            ltm_income: p.ltm_income.to_string(),
+            ltm_yield_pct: p.ltm_yield_pct.map(|pct| pct.to_string()),
+            ltm_yield_on_cost_pct: p.ltm_yield_on_cost_pct.map(|pct| pct.to_string()),
         })
         .collect();
 
@@ -121,6 +127,10 @@ pub fn format_portfolio_table(
         pl: String,
         #[tabled(rename = "Return %")]
         return_pct: String,
+        #[tabled(rename = "Yield")]
+        ltm_yield: String,
+        #[tabled(rename = "On Cost")]
+        yield_on_cost: String,
     }
 
     // Render each asset type group
@@ -128,9 +138,11 @@ pub fn format_portfolio_table(
         // Calculate subtotals for this asset type
         let mut subtotal_cost = Decimal::ZERO;
         let mut subtotal_value = Decimal::ZERO;
+        let mut subtotal_income = Decimal::ZERO;
 
         for p in positions.iter() {
             subtotal_cost += p.total_cost;
+            subtotal_income += p.ltm_income;
             if let Some(v) = p.current_value {
                 subtotal_value += v;
             }
@@ -191,6 +203,30 @@ pub fn format_portfolio_table(
                     })
                     .unwrap_or_else(|| "N/A".to_string());
 
+                let ltm_yield_str = p
+                    .ltm_yield_pct
+                    .map(|pct: Decimal| {
+                        let colored = if pct >= Decimal::ZERO {
+                            format!("{:.2}%", pct).green().to_string()
+                        } else {
+                            format!("{:.2}%", pct).red().to_string()
+                        };
+                        colored
+                    })
+                    .unwrap_or_else(|| "N/A".to_string());
+
+                let yield_on_cost_str = p
+                    .ltm_yield_on_cost_pct
+                    .map(|pct: Decimal| {
+                        let colored = if pct >= Decimal::ZERO {
+                            format!("{:.2}%", pct).green().to_string()
+                        } else {
+                            format!("{:.2}%", pct).red().to_string()
+                        };
+                        colored
+                    })
+                    .unwrap_or_else(|| "N/A".to_string());
+
                 PositionRow {
                     ticker: p.asset.ticker.clone(),
                     quantity: format_quantity(p.quantity, &options),
@@ -200,6 +236,8 @@ pub fn format_portfolio_table(
                     value: value_str,
                     pl: pl_str,
                     return_pct: return_str,
+                    ltm_yield: ltm_yield_str,
+                    yield_on_cost: yield_on_cost_str,
                 }
             })
             .collect();
@@ -232,6 +270,29 @@ pub fn format_portfolio_table(
             format!(" ({:.2}%)", subtotal_pl_pct).red()
         };
         output.push_str(&return_colored);
+
+        let subtotal_ltm_yield = if subtotal_value > Decimal::ZERO {
+            Some((subtotal_income / subtotal_value) * Decimal::from(100))
+        } else {
+            None
+        };
+        let subtotal_yield_on_cost = if subtotal_cost > Decimal::ZERO {
+            Some((subtotal_income / subtotal_cost) * Decimal::from(100))
+        } else {
+            None
+        };
+
+        let ltm_yield_str = subtotal_ltm_yield
+            .map(|pct| format!("{:.2}%", pct))
+            .unwrap_or_else(|| "N/A".to_string());
+        let yield_on_cost_str = subtotal_yield_on_cost
+            .map(|pct| format!("{:.2}%", pct))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        output.push_str(&format!(
+            "\n  Yield: {}  |  On Cost: {}",
+            ltm_yield_str, yield_on_cost_str
+        ));
         output.push('\n');
     }
 
@@ -264,9 +325,39 @@ pub fn format_portfolio_table(
         format!("{:.2}%", report.total_pl_pct).red()
     };
     output.push_str(&format!(
-        "\n{:<20} {}\n",
+        "\n{:<20} {}",
         "Total Return:".bold(),
         return_colored
+    ));
+
+    let total_income: Decimal = report.positions.iter().map(|p| p.ltm_income).sum();
+    let total_ltm_yield = if report.total_value > Decimal::ZERO {
+        Some((total_income / report.total_value) * Decimal::from(100))
+    } else {
+        None
+    };
+    let total_yield_on_cost = if report.total_cost > Decimal::ZERO {
+        Some((total_income / report.total_cost) * Decimal::from(100))
+    } else {
+        None
+    };
+
+    let ltm_yield_str = total_ltm_yield
+        .map(|pct| format!("{:.2}%", pct))
+        .unwrap_or_else(|| "N/A".to_string());
+    let yield_on_cost_str = total_yield_on_cost
+        .map(|pct| format!("{:.2}%", pct))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    output.push_str(&format!(
+        "\n{:<20} {}",
+        "Yield:".bold(),
+        ltm_yield_str
+    ));
+    output.push_str(&format!(
+        "\n{:<20} {}\n",
+        "On Cost:".bold(),
+        yield_on_cost_str
     ));
 
     output
@@ -351,6 +442,9 @@ mod tests {
             current_value: Some(current_value),
             unrealized_pl: Some(unrealized_pl),
             unrealized_pl_pct,
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         }
     }
 
@@ -513,12 +607,53 @@ mod tests {
             output.contains("Subtotal"),
             "Should contain subtotal sections"
         );
+        assert!(
+            output.contains("Yield:"),
+            "Subtotal should include Yield"
+        );
+        assert!(
+            output.contains("On Cost:"),
+            "Subtotal should include On Cost"
+        );
         // Each asset type group should have a subtotal
         let subtotal_count = output.matches("Subtotal").count();
         assert_eq!(
             subtotal_count, 2,
             "Should have 2 subtotals (one per asset type group)"
         );
+    }
+
+    #[test]
+    fn test_portfolio_ltm_yield_handles_missing_price() {
+        control::set_override(false); // Disable colors for testing
+
+        let mut position = create_test_position(
+            "HGLG11",
+            AssetType::Fii,
+            Decimal::from(10),
+            Decimal::from(100),
+        );
+        position.current_price = None;
+        position.current_value = None;
+        position.unrealized_pl = None;
+        position.unrealized_pl_pct = None;
+        position.ltm_income = Decimal::from(50);
+        position.ltm_yield_pct = None;
+        position.ltm_yield_on_cost_pct = Some(Decimal::from(5));
+
+        let report = PortfolioReport {
+            positions: vec![position],
+            total_cost: Decimal::from(1000),
+            total_value: Decimal::from(0),
+            total_pl: Decimal::from(0),
+            total_pl_pct: Decimal::ZERO,
+        };
+
+        let output = format_portfolio_table(&report, None, OutputOptions::default());
+        assert!(output.contains("Yield"));
+        assert!(output.contains("On Cost"));
+        assert!(output.contains("N/A"));
+        assert!(output.contains("5.00%"));
     }
 
     #[test]
