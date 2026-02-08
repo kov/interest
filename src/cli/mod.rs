@@ -320,6 +320,75 @@ pub enum IncomeCommands {
     Summary {
         /// Year (optional - omit for yearly totals)
         year: Option<i32>,
+
+        /// Separate baseline (recurring) income from exceptional (one-time) events
+        #[arg(long)]
+        categorize: bool,
+
+        /// Show pre-tax vs post-tax breakdown
+        #[arg(long)]
+        tax_aware: bool,
+    },
+
+    /// Calculate and show LTM (Last Twelve Months) yield
+    Yield {
+        /// Filter by specific ticker
+        #[arg(short, long)]
+        ticker: Option<String>,
+
+        /// Filter by asset type (e.g., Stock, FII, FIAGRO)
+        #[arg(short, long)]
+        asset_type: Option<String>,
+
+        /// Time period: LTM (default), YTD, 6M, 3M
+        #[arg(long, default_value = "LTM")]
+        period: String,
+    },
+
+    /// Analyze income trends over time (growth/decline)
+    Trends {
+        /// Filter by specific ticker
+        #[arg(short, long)]
+        ticker: Option<String>,
+
+        /// Number of months to analyze (default 36)
+        #[arg(long, default_value = "36")]
+        months: i32,
+    },
+
+    /// Forecast income for the coming year
+    Forecast {
+        /// Target year for forecast
+        #[arg(default_value = "2027")]
+        year: i32,
+
+        /// Use conservative estimates (lower bound)
+        #[arg(long)]
+        conservative: bool,
+    },
+
+    /// Show predicted payment dates and amounts
+    Calendar {
+        /// Month to show (MM, defaults to next month)
+        #[arg(short, long)]
+        month: Option<String>,
+    },
+
+    /// Detect anomalies and alerts in income data
+    Alerts,
+
+    /// Export income data to Excel or CSV
+    Export {
+        /// Year to export
+        year: i32,
+
+        /// Output format (xlsx or csv)
+        #[arg(long, default_value = "xlsx")]
+        format: String,
+
+        /// Output file path (optional, defaults to income_<year>.<format>)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 

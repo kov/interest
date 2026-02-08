@@ -79,3 +79,276 @@ fn test_income_import_duplicate_detection() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_income_yield_command() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset and transactions to have a position
+    add_asset(&home, "XPLG11", "FII")?;
+    cli_helpers::run_cmd(
+        &home,
+        &[
+            "transactions",
+            "add",
+            "XPLG11",
+            "buy",
+            "100",
+            "120.00",
+            "2023-01-15",
+        ],
+    )?;
+
+    // Add income events for LTM
+    add_income(&home, "XPLG11", "DIVIDEND", "850", "2024-01-15")?;
+    add_income(&home, "XPLG11", "DIVIDEND", "850", "2024-06-15")?;
+
+    // Run yield command with JSON output
+    let output = cli_helpers::run_cmd_json(&home, &["--json", "income", "yield"])?;
+
+    // Verify structure
+    assert!(output.get("blocks").is_some());
+    let blocks = output["blocks"].as_array().unwrap();
+    assert!(!blocks.is_empty());
+
+    // Should have a header
+    assert_eq!(blocks[0]["type"], "header");
+    assert!(blocks[0]["text"].as_str().unwrap().contains("Yield"));
+
+    Ok(())
+}
+
+#[test]
+fn test_income_trends_command() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with income history
+    add_asset(&home, "MXRF11", "FII")?;
+    add_income(&home, "MXRF11", "DIVIDEND", "100", "2023-01-15")?;
+    add_income(&home, "MXRF11", "DIVIDEND", "110", "2023-07-15")?;
+    add_income(&home, "MXRF11", "DIVIDEND", "120", "2024-01-15")?;
+
+    // Run trends command
+    let output = cli_helpers::run_cmd_json(&home, &["--json", "income", "trends"])?;
+
+    // Verify structure
+    assert!(output.get("blocks").is_some());
+    let blocks = output["blocks"].as_array().unwrap();
+
+    // Should have header and key-value section
+    assert!(blocks.iter().any(|b| b["type"] == "header"));
+    assert!(blocks.iter().any(|b| b["type"] == "key_value"));
+
+    Ok(())
+}
+
+#[test]
+fn test_income_forecast_command() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add multiple assets with income history for meaningful forecast
+    add_asset(&home, "XPLG11", "FII")?;
+    add_asset(&home, "HGLG11", "FII")?;
+
+    // Add 2024 and 2025 data (within 2-year window from current date)
+    for month in 1..=12 {
+        let date_2024 = format!("2024-{:02}-15", month);
+        let date_2025 = format!("2025-{:02}-15", month);
+        add_income(&home, "XPLG11", "DIVIDEND", "850", &date_2024)?;
+        add_income(&home, "HGLG11", "DIVIDEND", "500", &date_2024)?;
+        add_income(&home, "XPLG11", "DIVIDEND", "850", &date_2025)?;
+        add_income(&home, "HGLG11", "DIVIDEND", "500", &date_2025)?;
+    }
+
+    // Run forecast command for 2026
+    let output = cli_helpers::run_cmd_json(&home, &["--json", "income", "forecast", "2026"])?;
+
+    // Verify structure
+    assert!(output.get("blocks").is_some());
+    let blocks = output["blocks"].as_array().unwrap();
+
+    // Should have header and table with forecasts
+    assert!(blocks.iter().any(|b| b["type"] == "header"));
+    assert!(blocks.iter().any(|b| b["type"] == "table"));
+
+    Ok(())
+}
+
+#[test]
+fn test_income_calendar_command() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with regular income pattern
+    add_asset(&home, "HGLG11", "FII")?;
+    add_income(&home, "HGLG11", "DIVIDEND", "100", "2024-01-15")?;
+    add_income(&home, "HGLG11", "DIVIDEND", "100", "2024-02-15")?;
+    add_income(&home, "HGLG11", "DIVIDEND", "100", "2024-03-15")?;
+
+    // Run calendar command
+    let output = cli_helpers::run_cmd_json(&home, &["--json", "income", "calendar"])?;
+
+    // Verify structure
+    assert!(output.get("blocks").is_some());
+    let blocks = output["blocks"].as_array().unwrap();
+
+    // Should have header
+    assert!(blocks.iter().any(|b| b["type"] == "header"));
+
+    Ok(())
+}
+
+#[test]
+fn test_income_alerts_command() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with income (might not have anomalies, that's ok)
+    add_asset(&home, "KNSC11", "FII")?;
+    add_income(&home, "KNSC11", "DIVIDEND", "100", "2024-01-15")?;
+
+    // Run alerts command (should not error even with no anomalies)
+    // Note: alerts command outputs plain text when no anomalies, not JSON
+    let output = cli_helpers::run_cmd(&home, &["income", "alerts"])?;
+
+    // Verify it ran successfully (non-empty output)
+    assert!(output.status.success());
+    assert!(!output.stdout.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_income_summary_with_categorize() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with mixed income types
+    add_asset(&home, "VGHF11", "FII")?;
+    add_income(&home, "VGHF11", "DIVIDEND", "100", "2024-01-15")?;
+    add_income(&home, "VGHF11", "DIVIDEND", "100", "2024-02-15")?;
+    add_income(&home, "VGHF11", "AMORTIZATION", "500", "2024-03-15")?; // Exceptional
+
+    // Run summary with categorize flag
+    let output = cli_helpers::run_cmd_json(
+        &home,
+        &["--json", "income", "summary", "2024", "--categorize"],
+    )?;
+
+    // Verify structure
+    assert!(output.get("blocks").is_some());
+    let blocks = output["blocks"].as_array().unwrap();
+
+    // Should have "Income Categorization" key-value block
+    let has_categorization = blocks.iter().any(|b| {
+        b["type"] == "key_value"
+            && b.get("title").and_then(|t| t.as_str()) == Some("Income Categorization")
+    });
+    assert!(
+        has_categorization,
+        "Should have Income Categorization section"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_income_summary_with_tax_aware() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with income
+    add_asset(&home, "BRCR11", "FII")?;
+    add_income(&home, "BRCR11", "DIVIDEND", "100", "2024-01-15")?;
+
+    // Run summary with tax-aware flag
+    let output = cli_helpers::run_cmd_json(
+        &home,
+        &["--json", "income", "summary", "2024", "--tax-aware"],
+    )?;
+
+    // Verify structure
+    assert!(output.get("blocks").is_some());
+    let blocks = output["blocks"].as_array().unwrap();
+
+    // Should have header - when tax-aware flag is used, title changes
+    // Just verify structure is valid (tax-aware affects displayed amounts)
+    let has_header = blocks.iter().any(|b| b["type"] == "header");
+    assert!(has_header, "Should have header in output");
+
+    Ok(())
+}
+
+#[test]
+fn test_income_export_csv() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with income
+    add_asset(&home, "ALZC11", "FII")?;
+    add_income(&home, "ALZC11", "DIVIDEND", "100", "2024-01-15")?;
+    add_income(&home, "ALZC11", "DIVIDEND", "105", "2024-06-15")?;
+
+    // Export to CSV in temp location
+    let output_path = home.path().join("test_export.csv");
+    cli_helpers::run_cmd(
+        &home,
+        &[
+            "income",
+            "export",
+            "2024",
+            "--format",
+            "csv",
+            "-o",
+            output_path.to_str().unwrap(),
+        ],
+    )?;
+
+    // Verify file was created
+    assert!(output_path.exists(), "CSV file should be created");
+
+    // Read and verify CSV content
+    let content = std::fs::read_to_string(&output_path)?;
+    assert!(
+        content.contains("Date,Ticker,Asset Type"),
+        "Should have CSV header"
+    );
+    assert!(content.contains("ALZC11"), "Should contain asset ticker");
+    assert!(content.contains("DIVIDEND"), "Should contain event type");
+
+    Ok(())
+}
+
+#[test]
+fn test_income_export_xlsx() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Setup: Add asset with income
+    add_asset(&home, "JURO11", "FII")?;
+    add_income(&home, "JURO11", "DIVIDEND", "150", "2024-01-15")?;
+
+    // Export to Excel in temp location
+    let output_path = home.path().join("test_export.xlsx");
+    cli_helpers::run_cmd(
+        &home,
+        &[
+            "income",
+            "export",
+            "2024",
+            "--format",
+            "xlsx",
+            "-o",
+            output_path.to_str().unwrap(),
+        ],
+    )?;
+
+    // Verify file was created
+    assert!(output_path.exists(), "Excel file should be created");
+
+    // Verify it's a valid Excel file (basic check: has ZIP signature)
+    let file_content = std::fs::read(&output_path)?;
+    assert!(file_content.len() > 100, "Excel file should have content");
+    // XLSX files are ZIP archives starting with PK
+    assert_eq!(
+        &file_content[0..2],
+        b"PK",
+        "Excel file should be a ZIP archive"
+    );
+
+    Ok(())
+}

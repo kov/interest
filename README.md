@@ -8,7 +8,7 @@ A command-line tool for tracking investments on the Brazilian B3 stock exchange.
 
 - 📊 Real-time portfolio tracking with automatic price updates
 - 📈 Performance analytics (MTD, QTD, YTD, custom periods)
-- 💰 Income tracking (dividends, JCP, amortization)
+- 💰 Income analytics (yield tracking, trends, forecasting, export to Excel/CSV)
 - 🧾 Brazilian tax calculations (swing trade, day trade, IRPF reports)
 - 🔄 Corporate action management (splits, renames, mergers, spin-offs)
 - 📥 Import from B3/CEI Excel exports (Negociação, Movimentação, IRPF PDFs)
@@ -316,6 +316,51 @@ interest income summary 2024
 
 # All years
 interest income summary
+```
+
+**Advanced income analytics:**
+
+```bash
+# Calculate portfolio yield (LTM income / portfolio value)
+interest income yield
+
+# Analyze income trends (growth/decline over time)
+interest income trends
+
+# Forecast next year's income
+interest income forecast 2027
+
+# Predict upcoming payment dates
+interest income calendar
+
+# Detect anomalies (missed payments, unusual amounts)
+interest income alerts
+```
+
+**Categorize income (baseline vs exceptional):**
+
+```bash
+# Separate recurring income from one-time events
+interest income summary 2025 --categorize
+
+# Show net amounts after withholding tax
+interest income summary 2025 --tax-aware
+
+# Both together
+interest income summary 2025 --categorize --tax-aware
+```
+
+**Export income data:**
+
+```bash
+# Export to Excel (includes two sheets: detailed events + monthly summary)
+interest income export 2025 --format xlsx
+
+# Export to CSV
+interest income export 2025 --format csv
+
+# Custom output path
+interest income export 2025 --format xlsx -o my_income.xlsx
 ```
 
 ### Generate Tax Reports

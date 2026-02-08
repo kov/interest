@@ -101,9 +101,11 @@ async fn dispatch_income(
         crate::cli::IncomeCommands::Detail { year, asset } => {
             dispatch_income_detail(*year, asset.as_deref(), options).await
         }
-        crate::cli::IncomeCommands::Summary { year } => {
-            dispatch_income_summary(*year, options).await
-        }
+        crate::cli::IncomeCommands::Summary {
+            year,
+            categorize,
+            tax_aware,
+        } => dispatch_income_summary(*year, *categorize, *tax_aware, options).await,
         crate::cli::IncomeCommands::Add {
             ticker,
             event_type,
@@ -127,6 +129,26 @@ async fn dispatch_income(
             )
             .await
         }
+        crate::cli::IncomeCommands::Yield {
+            ticker,
+            asset_type,
+            period,
+        } => dispatch_income_yield(ticker.as_deref(), asset_type.as_deref(), period, options).await,
+        crate::cli::IncomeCommands::Trends { ticker, months } => {
+            dispatch_income_trends(ticker.as_deref(), *months, options).await
+        }
+        crate::cli::IncomeCommands::Forecast { year, conservative } => {
+            dispatch_income_forecast(*year, *conservative, options).await
+        }
+        crate::cli::IncomeCommands::Calendar { month } => {
+            dispatch_income_calendar(month.as_deref(), options).await
+        }
+        crate::cli::IncomeCommands::Alerts => dispatch_income_alerts(options).await,
+        crate::cli::IncomeCommands::Export {
+            year,
+            format,
+            output,
+        } => dispatch_income_export(*year, format, output.as_deref(), options).await,
     }
 }
 
@@ -359,6 +381,8 @@ async fn dispatch_income_detail(
 /// Show income summary - monthly breakdown if year given, yearly totals otherwise
 pub async fn dispatch_income_summary(
     year: Option<i32>,
+    categorize: bool,
+    tax_aware: bool,
     options: options::OutputOptions,
 ) -> Result<()> {
     use chrono::Datelike;
@@ -400,16 +424,34 @@ pub async fn dispatch_income_summary(
                 })
                 .collect();
 
-            for (event, _asset) in &events {
+            let mut baseline_total = Decimal::ZERO;
+            let mut exceptional_total = Decimal::ZERO;
+
+            for (event, asset) in &events {
+                let amount = if tax_aware {
+                    event.total_amount - event.withholding_tax
+                } else {
+                    event.total_amount
+                };
+
+                if categorize {
+                    let category = crate::reports::income_analytics::categorize_income_event(
+                        event,
+                        &events,
+                        &asset.ticker,
+                    );
+                    if category.is_baseline {
+                        baseline_total += amount;
+                    } else {
+                        exceptional_total += amount;
+                    }
+                }
+
                 let month_idx = (event.event_date.month() - 1) as usize;
                 match event.event_type {
-                    db::IncomeEventType::Dividend => {
-                        monthly[month_idx].dividends += event.total_amount
-                    }
-                    db::IncomeEventType::Jcp => monthly[month_idx].jcp += event.total_amount,
-                    db::IncomeEventType::Amortization => {
-                        monthly[month_idx].amortization += event.total_amount
-                    }
+                    db::IncomeEventType::Dividend => monthly[month_idx].dividends += amount,
+                    db::IncomeEventType::Jcp => monthly[month_idx].jcp += amount,
+                    db::IncomeEventType::Amortization => monthly[month_idx].amortization += amount,
                 }
             }
 
@@ -453,14 +495,28 @@ pub async fn dispatch_income_summary(
                 avg_per_period: avg_per_month,
             };
 
-            let output = formatters::income::format_income_summary_monthly(
-                y,
-                &monthly,
-                &totals_by_type,
-                stats,
-                totals,
-                options.clone(),
-            )?;
+            let output = if categorize {
+                formatters::income::format_income_summary_monthly_with_categories(
+                    y,
+                    &monthly,
+                    &totals_by_type,
+                    stats,
+                    totals,
+                    baseline_total,
+                    exceptional_total,
+                    tax_aware,
+                    options.clone(),
+                )?
+            } else {
+                formatters::income::format_income_summary_monthly(
+                    y,
+                    &monthly,
+                    &totals_by_type,
+                    stats,
+                    totals,
+                    options.clone(),
+                )?
+            };
             options.writer().writeln(&output)?;
         }
         None => {
@@ -477,7 +533,29 @@ pub async fn dispatch_income_summary(
             }
 
             let mut yearly: BTreeMap<i32, formatters::income::IncomeTotals> = BTreeMap::new();
-            for (event, _asset) in &events {
+            let mut baseline_total = Decimal::ZERO;
+            let mut exceptional_total = Decimal::ZERO;
+
+            for (event, asset) in &events {
+                let amount = if tax_aware {
+                    event.total_amount - event.withholding_tax
+                } else {
+                    event.total_amount
+                };
+
+                if categorize {
+                    let category = crate::reports::income_analytics::categorize_income_event(
+                        event,
+                        &events,
+                        &asset.ticker,
+                    );
+                    if category.is_baseline {
+                        baseline_total += amount;
+                    } else {
+                        exceptional_total += amount;
+                    }
+                }
+
                 let year = event.event_date.year();
                 let entry = yearly
                     .entry(year)
@@ -488,9 +566,9 @@ pub async fn dispatch_income_summary(
                         amortization: Decimal::ZERO,
                     });
                 match event.event_type {
-                    db::IncomeEventType::Dividend => entry.dividends += event.total_amount,
-                    db::IncomeEventType::Jcp => entry.jcp += event.total_amount,
-                    db::IncomeEventType::Amortization => entry.amortization += event.total_amount,
+                    db::IncomeEventType::Dividend => entry.dividends += amount,
+                    db::IncomeEventType::Jcp => entry.jcp += amount,
+                    db::IncomeEventType::Amortization => entry.amortization += amount,
                 }
             }
 
@@ -532,13 +610,26 @@ pub async fn dispatch_income_summary(
             };
 
             let yearly_rows: Vec<formatters::income::IncomeTotals> = yearly.into_values().collect();
-            let output = formatters::income::format_income_summary_yearly(
-                &yearly_rows,
-                &totals_by_type,
-                stats,
-                totals,
-                options.clone(),
-            )?;
+            let output = if categorize {
+                formatters::income::format_income_summary_yearly_with_categories(
+                    &yearly_rows,
+                    &totals_by_type,
+                    stats,
+                    totals,
+                    baseline_total,
+                    exceptional_total,
+                    tax_aware,
+                    options.clone(),
+                )?
+            } else {
+                formatters::income::format_income_summary_yearly(
+                    &yearly_rows,
+                    &totals_by_type,
+                    stats,
+                    totals,
+                    options.clone(),
+                )?
+            };
             options.writer().writeln(&output)?;
         }
     }
@@ -877,4 +968,412 @@ impl TaxProgressPrinter {
 }
 
 // Tests removed - dispatcher now works with clap Commands
+
+// ============================================================================
+// New Income Analytics Handlers (Phase 1-3)
+// ============================================================================
+
+async fn dispatch_income_yield(
+    ticker: Option<&str>,
+    _asset_type: Option<&str>,
+    _period: &str,
+    options: options::OutputOptions,
+) -> Result<()> {
+    use rust_decimal::Decimal;
+
+    info!("Calculating LTM yield");
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // For now, calculate portfolio-wide yield
+    // TODO: Filter by ticker and asset_type, handle different periods
+    if ticker.is_some() {
+        options
+            .writer()
+            .writeln("ℹ  Ticker filtering for yield coming in Phase 2\n")?;
+    }
+
+    // Get current portfolio value
+    let portfolio = crate::reports::calculate_portfolio(&conn, None)?;
+    let portfolio_value: Decimal = portfolio
+        .positions
+        .iter()
+        .filter_map(|p| p.current_value)
+        .sum();
+
+    // Calculate LTM yield
+    let ltm_yield = crate::reports::income_analytics::calculate_ltm_yield(&conn, portfolio_value)?;
+
+    let output = formatters::income::format_yield_report(&ltm_yield, options.clone())?;
+    options.writer().writeln(&output)?;
+
+    Ok(())
+}
+
+async fn dispatch_income_trends(
+    ticker: Option<&str>,
+    months: i32,
+    options: options::OutputOptions,
+) -> Result<()> {
+    info!("Analyzing income trends ({} months)", months);
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get monthly income series
+    let series =
+        crate::reports::income_analytics::get_monthly_income_series(&conn, months, ticker)?;
+
+    if series.amounts.is_empty() {
+        options.writer().writeln(&format!(
+            "{} No income data found for trend analysis.\n",
+            "ℹ".blue().bold()
+        ))?;
+        return Ok(());
+    }
+
+    // Analyze trends
+    let trend = crate::reports::income_analytics::analyze_income_trends(&conn, months, ticker)?;
+
+    let output =
+        formatters::income::format_trends_report(&series, &trend, months, options.clone())?;
+    options.writer().writeln(&output)?;
+
+    Ok(())
+}
+
+async fn dispatch_income_forecast(
+    year: i32,
+    conservative: bool,
+    options: options::OutputOptions,
+) -> Result<()> {
+    info!("Forecasting income for {}", year);
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Collect all assets with income history
+    let all_assets = db::get_all_assets(&conn)?;
+    let mut forecasts = Vec::new();
+
+    for asset in all_assets {
+        if let Ok(forecast) = crate::reports::income_analytics::forecast_income_for_asset(
+            &conn,
+            asset.id.unwrap(),
+            &asset.ticker,
+            conservative,
+        ) {
+            if forecast.months_of_history > 0 {
+                forecasts.push(forecast);
+            }
+        }
+    }
+
+    if forecasts.is_empty() {
+        options.writer().writeln(&format!(
+            "{} No income history found for forecasting.\n",
+            "ℹ".blue().bold()
+        ))?;
+        return Ok(());
+    }
+
+    // Sort by expected income descending
+    forecasts.sort_by(|a, b| b.expected_annual_income.cmp(&a.expected_annual_income));
+
+    let output = formatters::income::format_forecast_report(
+        &forecasts,
+        year,
+        conservative,
+        options.clone(),
+    )?;
+    options.writer().writeln(&output)?;
+
+    Ok(())
+}
+
+async fn dispatch_income_calendar(
+    _month: Option<&str>,
+    options: options::OutputOptions,
+) -> Result<()> {
+    info!("Showing predicted payment calendar");
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    // Get all unique tickers with past income
+    let all_assets = db::get_all_assets(&conn)?;
+    let mut predictions = Vec::new();
+
+    for asset in all_assets {
+        if let Ok(dates) = crate::reports::income_analytics::predict_payment_dates(
+            &conn,
+            &asset.ticker,
+            3, // Next 3 months
+        ) {
+            for (date, amount, confidence) in dates {
+                predictions.push((asset.ticker.clone(), date, amount, confidence));
+            }
+        }
+    }
+
+    if predictions.is_empty() {
+        options.writer().writeln(&format!(
+            "{} No predicted payment dates (insufficient history).\n",
+            "ℹ".blue().bold()
+        ))?;
+        return Ok(());
+    }
+
+    // Sort by date
+    predictions.sort_by_key(|(_, date, _, _)| *date);
+
+    let output = formatters::income::format_calendar_report(&predictions, options.clone())?;
+    options.writer().writeln(&output)?;
+
+    Ok(())
+}
+
+async fn dispatch_income_alerts(options: options::OutputOptions) -> Result<()> {
+    info!("Detecting income anomalies and alerts");
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    let anomalies = crate::reports::income_analytics::detect_anomalies(&conn)?;
+
+    if anomalies.is_empty() {
+        options.writer().writeln(&format!(
+            "{} No anomalies detected in income data.\n",
+            "✓".green().bold()
+        ))?;
+        return Ok(());
+    }
+
+    let output = formatters::income::format_alerts_report(&anomalies, options.clone())?;
+    options.writer().writeln(&output)?;
+
+    Ok(())
+}
+
+async fn dispatch_income_export(
+    year: i32,
+    format: &str,
+    output_path: Option<&str>,
+    options: options::OutputOptions,
+) -> Result<()> {
+    use chrono::Datelike;
+
+    info!("Exporting income data for year {}", year);
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    let from_date = chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+    let to_date = chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap();
+
+    let events = db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
+
+    if events.is_empty() {
+        options.writer().writeln(&format!(
+            "\n{} No income events found for {}.\n",
+            "ℹ".blue().bold(),
+            year
+        ))?;
+        return Ok(());
+    }
+
+    let default_filename = match format.to_lowercase().as_str() {
+        "csv" => format!("income_{}.csv", year),
+        "xlsx" | "excel" => format!("income_{}.xlsx", year),
+        _ => return Err(anyhow::anyhow!("Invalid format. Use 'xlsx' or 'csv'")),
+    };
+
+    let output_file = output_path.unwrap_or(&default_filename);
+
+    match format.to_lowercase().as_str() {
+        "csv" => {
+            let mut writer = csv::Writer::from_path(output_file)?;
+
+            // Write header
+            writer.write_record([
+                "Date",
+                "Ticker",
+                "Asset Type",
+                "Event Type",
+                "Amount Per Quota",
+                "Total Amount",
+                "Withholding Tax",
+                "Net Amount",
+                "Source",
+                "Notes",
+            ])?;
+
+            // Write records
+            for (event, asset) in &events {
+                let net_amount = event.total_amount - event.withholding_tax;
+                writer.write_record(&[
+                    event.event_date.to_string(),
+                    asset.ticker.clone(),
+                    asset.asset_type.as_str().to_string(),
+                    event.event_type.as_str().to_string(),
+                    event.amount_per_quota.to_string(),
+                    event.total_amount.to_string(),
+                    event.withholding_tax.to_string(),
+                    net_amount.to_string(),
+                    event.source.clone(),
+                    event.notes.clone().unwrap_or_default(),
+                ])?;
+            }
+            writer.flush()?;
+        }
+        "xlsx" | "excel" => {
+            use rust_xlsxwriter::*;
+
+            let mut workbook = Workbook::new();
+
+            // Sheet 1: Detailed events
+            let detail_sheet = workbook.add_worksheet();
+            detail_sheet.set_name("Income Events")?;
+
+            // Header row
+            let header_format = Format::new()
+                .set_bold()
+                .set_background_color(Color::RGB(0xD3D3D3));
+
+            let headers = vec![
+                "Date",
+                "Ticker",
+                "Asset Type",
+                "Event Type",
+                "Amount Per Quota",
+                "Total Amount",
+                "Withholding Tax",
+                "Net Amount",
+                "Source",
+                "Notes",
+            ];
+
+            for (col, header) in headers.iter().enumerate() {
+                detail_sheet.write_with_format(0, col as u16, *header, &header_format)?;
+            }
+
+            // Data rows
+            for (row, (event, asset)) in events.iter().enumerate() {
+                let row = row as u32 + 1;
+                let net_amount = event.total_amount - event.withholding_tax;
+
+                detail_sheet.write(row, 0, event.event_date.to_string())?;
+                detail_sheet.write(row, 1, &asset.ticker)?;
+                detail_sheet.write(row, 2, asset.asset_type.as_str())?;
+                detail_sheet.write(row, 3, event.event_type.as_str())?;
+                detail_sheet.write_number(
+                    row,
+                    4,
+                    event
+                        .amount_per_quota
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                )?;
+                detail_sheet.write_number(
+                    row,
+                    5,
+                    event.total_amount.to_string().parse::<f64>().unwrap_or(0.0),
+                )?;
+                detail_sheet.write_number(
+                    row,
+                    6,
+                    event
+                        .withholding_tax
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                )?;
+                detail_sheet.write_number(
+                    row,
+                    7,
+                    net_amount.to_string().parse::<f64>().unwrap_or(0.0),
+                )?;
+                detail_sheet.write(row, 8, &event.source)?;
+                detail_sheet.write(row, 9, event.notes.as_deref().unwrap_or(""))?;
+            }
+
+            // Sheet 2: Monthly summary
+            let summary_sheet = workbook.add_worksheet();
+            summary_sheet.set_name("Monthly Summary")?;
+
+            // Build monthly summary
+            use rust_decimal::Decimal;
+            use std::collections::BTreeMap;
+
+            let mut monthly: BTreeMap<u32, (Decimal, Decimal, Decimal)> = BTreeMap::new();
+            for (event, _) in &events {
+                let month = event.event_date.month();
+                let entry =
+                    monthly
+                        .entry(month)
+                        .or_insert((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+
+                match event.event_type {
+                    db::IncomeEventType::Dividend => entry.0 += event.total_amount,
+                    db::IncomeEventType::Jcp => entry.1 += event.total_amount,
+                    db::IncomeEventType::Amortization => entry.2 += event.total_amount,
+                }
+            }
+
+            let summary_headers = ["Month", "Dividends", "JCP", "Amortization", "Total"];
+            for (col, header) in summary_headers.iter().enumerate() {
+                summary_sheet.write_with_format(0, col as u16, *header, &header_format)?;
+            }
+
+            let month_names = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+
+            for month in 1..=12 {
+                let row = month;
+                let (div, jcp, amort) =
+                    monthly
+                        .get(&month)
+                        .unwrap_or(&(Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+                let total = *div + *jcp + *amort;
+
+                summary_sheet.write(row, 0, month_names[month as usize - 1])?;
+                summary_sheet.write_number(
+                    row,
+                    1,
+                    div.to_string().parse::<f64>().unwrap_or(0.0),
+                )?;
+                summary_sheet.write_number(
+                    row,
+                    2,
+                    jcp.to_string().parse::<f64>().unwrap_or(0.0),
+                )?;
+                summary_sheet.write_number(
+                    row,
+                    3,
+                    amort.to_string().parse::<f64>().unwrap_or(0.0),
+                )?;
+                summary_sheet.write_number(
+                    row,
+                    4,
+                    total.to_string().parse::<f64>().unwrap_or(0.0),
+                )?;
+            }
+
+            workbook.save(output_file)?;
+        }
+        _ => return Err(anyhow::anyhow!("Invalid format")),
+    }
+
+    options.writer().writeln(&format!(
+        "{} Exported income data to {}\n",
+        "✓".green().bold(),
+        output_file
+    ))?;
+
+    Ok(())
+}
+
 // Integration tests in tests/ directory provide coverage

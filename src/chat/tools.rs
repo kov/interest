@@ -565,7 +565,11 @@ pub async fn execute_tool(
                 .map(|y| y as i32);
 
             let command = Commands::Income {
-                action: crate::cli::IncomeCommands::Summary { year },
+                action: crate::cli::IncomeCommands::Summary {
+                    year,
+                    categorize: false,
+                    tax_aware: false,
+                },
             };
 
             execute_command(command, output_mode, policy_group).await
