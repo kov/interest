@@ -486,6 +486,7 @@ pub fn forecast_income_for_asset(
 
     // Apply trend adjustment if enough history
     let mut expected = ltm_total;
+    // Need 24 months to ensure we have enough data points for trend analysis (checked at line 490)
     let series = get_monthly_income_series(conn, 24, Some(ticker))?;
     if series.amounts.len() >= 24 {
         let trend = analyze_income_trends(conn, 24, Some(ticker))?;

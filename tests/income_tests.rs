@@ -197,8 +197,8 @@ fn test_income_calendar_command() -> Result<()> {
     add_asset(&home, "HGLG11", "FII")?;
     
     // Add income events for the last 3 months
-    for i in 0..3 {
-        let months_back = 2 - i;
+    for month_offset in 0..3 {
+        let months_back = 2 - month_offset;
         let (year, month) = if current_month > months_back {
             (current_year, current_month - months_back)
         } else {
