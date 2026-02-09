@@ -1,6 +1,7 @@
 //! Integration tests for income event functionality (CLI-driven)
 
 use anyhow::{Context, Result};
+use chrono::Datelike;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -150,18 +151,27 @@ fn test_income_forecast_command() -> Result<()> {
     add_asset(&home, "XPLG11", "FII")?;
     add_asset(&home, "HGLG11", "FII")?;
 
-    // Add 2024 and 2025 data (within 2-year window from current date)
+    // Generate data relative to current date to avoid time-dependent test failures
+    let today = chrono::Local::now().date_naive();
+    let current_year = today.year();
+    let previous_year = current_year - 1;
+    
+    // Add previous year and current year data (within 2-year window from current date)
     for month in 1..=12 {
-        let date_2024 = format!("2024-{:02}-15", month);
-        let date_2025 = format!("2025-{:02}-15", month);
-        add_income(&home, "XPLG11", "DIVIDEND", "850", &date_2024)?;
-        add_income(&home, "HGLG11", "DIVIDEND", "500", &date_2024)?;
-        add_income(&home, "XPLG11", "DIVIDEND", "850", &date_2025)?;
-        add_income(&home, "HGLG11", "DIVIDEND", "500", &date_2025)?;
+        let date_prev = format!("{}-{:02}-15", previous_year, month);
+        let date_curr = format!("{}-{:02}-15", current_year, month);
+        add_income(&home, "XPLG11", "DIVIDEND", "850", &date_prev)?;
+        add_income(&home, "HGLG11", "DIVIDEND", "500", &date_prev)?;
+        add_income(&home, "XPLG11", "DIVIDEND", "850", &date_curr)?;
+        add_income(&home, "HGLG11", "DIVIDEND", "500", &date_curr)?;
     }
 
-    // Run forecast command for 2026
-    let output = cli_helpers::run_cmd_json(&home, &["--json", "income", "forecast", "2026"])?;
+    // Run forecast command for next year
+    let next_year = current_year + 1;
+    let output = cli_helpers::run_cmd_json(
+        &home,
+        &["--json", "income", "forecast", &next_year.to_string()],
+    )?;
 
     // Verify structure
     assert!(output.get("blocks").is_some());
@@ -179,10 +189,24 @@ fn test_income_calendar_command() -> Result<()> {
     let home = TempDir::new()?;
 
     // Setup: Add asset with regular income pattern
+    // Generate data relative to current date to avoid time-dependent test failures
+    let today = chrono::Local::now().date_naive();
+    let current_year = today.year();
+    let current_month = today.month();
+    
     add_asset(&home, "HGLG11", "FII")?;
-    add_income(&home, "HGLG11", "DIVIDEND", "100", "2024-01-15")?;
-    add_income(&home, "HGLG11", "DIVIDEND", "100", "2024-02-15")?;
-    add_income(&home, "HGLG11", "DIVIDEND", "100", "2024-03-15")?;
+    
+    // Add income events for the last 3 months
+    for i in 0..3 {
+        let months_back = 2 - i;
+        let (year, month) = if current_month > months_back {
+            (current_year, current_month - months_back)
+        } else {
+            (current_year - 1, 12 + current_month - months_back)
+        };
+        let date = format!("{}-{:02}-15", year, month);
+        add_income(&home, "HGLG11", "DIVIDEND", "100", &date)?;
+    }
 
     // Run calendar command
     let output = cli_helpers::run_cmd_json(&home, &["--json", "income", "calendar"])?;
@@ -202,8 +226,13 @@ fn test_income_alerts_command() -> Result<()> {
     let home = TempDir::new()?;
 
     // Setup: Add asset with income (might not have anomalies, that's ok)
+    // Generate data relative to current date to avoid time-dependent test failures
+    let today = chrono::Local::now().date_naive();
+    let current_year = today.year();
+    let date = format!("{}-01-15", current_year);
+    
     add_asset(&home, "KNSC11", "FII")?;
-    add_income(&home, "KNSC11", "DIVIDEND", "100", "2024-01-15")?;
+    add_income(&home, "KNSC11", "DIVIDEND", "100", &date)?;
 
     // Run alerts command (should not error even with no anomalies)
     // Note: alerts command outputs plain text when no anomalies, not JSON

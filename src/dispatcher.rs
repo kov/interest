@@ -241,11 +241,17 @@ async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions
 
     let events = db::get_income_events_with_assets(&conn, from_date, to_date, None)?;
     if events.is_empty() {
-        options.writer().writeln(&format!(
-            "\n{} No income events found for {}.\n",
-            "ℹ".blue().bold(),
-            year_val
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(&format!(r#"{{"status":"empty","message":"No income events found for {}."}}"#, year_val))?;
+        } else {
+            options.writer().writeln(&format!(
+                "\n{} No income events found for {}.\n",
+                "ℹ".blue().bold(),
+                year_val
+            ))?;
+        }
         return Ok(());
     }
 
@@ -358,12 +364,18 @@ async fn dispatch_income_detail(
             .map(|y| y.to_string())
             .unwrap_or_else(|| today.year().to_string());
         let asset_str = asset.map(|a| format!(" for {}", a)).unwrap_or_default();
-        options.writer().writeln(&format!(
-            "\n{} No income events found for {}{}.\n",
-            "ℹ".blue().bold(),
-            year_str,
-            asset_str
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(&format!(r#"{{"status":"empty","message":"No income events found for {}{}."}}"#, year_str, asset_str))?;
+        } else {
+            options.writer().writeln(&format!(
+                "\n{} No income events found for {}{}.\n",
+                "ℹ".blue().bold(),
+                year_str,
+                asset_str
+            ))?;
+        }
         return Ok(());
     }
 
@@ -403,11 +415,17 @@ pub async fn dispatch_income_summary(
                 db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
 
             if events.is_empty() {
-                options.writer().writeln(&format!(
-                    "\n{} No income events found for {}.\n",
-                    "ℹ".blue().bold(),
-                    y
-                ))?;
+                if options.is_json() {
+                    options
+                        .writer()
+                        .writeln(&format!(r#"{{"status":"empty","message":"No income events found for {}."}}"#, y))?;
+                } else {
+                    options.writer().writeln(&format!(
+                        "\n{} No income events found for {}.\n",
+                        "ℹ".blue().bold(),
+                        y
+                    ))?;
+                }
                 return Ok(());
             }
 
@@ -473,9 +491,14 @@ pub async fn dispatch_income_summary(
             let mut asset_type_totals: std::collections::HashMap<db::AssetType, Decimal> =
                 std::collections::HashMap::new();
             for (event, asset) in &events {
+                let amount = if tax_aware {
+                    event.total_amount - event.withholding_tax
+                } else {
+                    event.total_amount
+                };
                 *asset_type_totals
                     .entry(asset.asset_type)
-                    .or_insert(Decimal::ZERO) += event.total_amount;
+                    .or_insert(Decimal::ZERO) += amount;
             }
             let mut asset_type_vec: Vec<_> = asset_type_totals.iter().collect();
             asset_type_vec.sort_by(|a, b| b.1.cmp(a.1));
@@ -525,10 +548,16 @@ pub async fn dispatch_income_summary(
             let events = db::get_income_events_with_assets(&conn, None, None, None)?;
 
             if events.is_empty() {
-                options.writer().writeln(&format!(
-                    "\n{} No income events found.\n",
-                    "ℹ".blue().bold()
-                ))?;
+                if options.is_json() {
+                    options
+                        .writer()
+                        .writeln(r#"{"status":"empty","message":"No income events found."}"#)?;
+                } else {
+                    options.writer().writeln(&format!(
+                        "\n{} No income events found.\n",
+                        "ℹ".blue().bold()
+                    ))?;
+                }
                 return Ok(());
             }
 
@@ -587,9 +616,14 @@ pub async fn dispatch_income_summary(
             let mut asset_type_totals: std::collections::HashMap<db::AssetType, Decimal> =
                 std::collections::HashMap::new();
             for (event, asset) in &events {
+                let amount = if tax_aware {
+                    event.total_amount - event.withholding_tax
+                } else {
+                    event.total_amount
+                };
                 *asset_type_totals
                     .entry(asset.asset_type)
-                    .or_insert(Decimal::ZERO) += event.total_amount;
+                    .or_insert(Decimal::ZERO) += amount;
             }
             let mut asset_type_vec: Vec<_> = asset_type_totals.iter().collect();
             asset_type_vec.sort_by(|a, b| b.1.cmp(a.1));
@@ -975,20 +1009,51 @@ impl TaxProgressPrinter {
 
 async fn dispatch_income_yield(
     ticker: Option<&str>,
-    _asset_type: Option<&str>,
-    _period: &str,
+    asset_type: Option<&str>,
+    period: &str,
     options: options::OutputOptions,
 ) -> Result<()> {
+    use anyhow::anyhow;
     use rust_decimal::Decimal;
 
     info!("Calculating LTM yield");
+
+    // Currently we only support LTM (last twelve months) without asset-type filters.
+    // Fail fast if the user requests unsupported filters/periods so CLI behavior
+    // matches the documented API surface.
+    let period_lower = period.to_lowercase();
+    if asset_type.is_some() || period_lower != "ltm" {
+        let mut unsupported_flags: Vec<&str> = Vec::new();
+        if asset_type.is_some() {
+            unsupported_flags.push("--asset-type");
+        }
+        if period_lower != "ltm" {
+            unsupported_flags.push("--period");
+        }
+
+        let msg = if unsupported_flags.len() == 1 {
+            format!(
+                "The option {} is not yet supported for the `yield` command. \
+                 Currently only the default LTM period without asset-type filters is available.",
+                unsupported_flags[0]
+            )
+        } else {
+            format!(
+                "The options {} are not yet supported for the `yield` command. \
+                 Currently only the default LTM period without asset-type filters is available.",
+                unsupported_flags.join(", ")
+            )
+        };
+
+        return Err(anyhow!(msg));
+    }
 
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
     // For now, calculate portfolio-wide yield
     // TODO: Filter by ticker and asset_type, handle different periods
-    if ticker.is_some() {
+    if ticker.is_some() && !options.is_json() {
         options
             .writer()
             .writeln("ℹ  Ticker filtering for yield coming in Phase 2\n")?;
@@ -1026,10 +1091,16 @@ async fn dispatch_income_trends(
         crate::reports::income_analytics::get_monthly_income_series(&conn, months, ticker)?;
 
     if series.amounts.is_empty() {
-        options.writer().writeln(&format!(
-            "{} No income data found for trend analysis.\n",
-            "ℹ".blue().bold()
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(r#"{"status":"empty","message":"No income data found for trend analysis."}"#)?;
+        } else {
+            options.writer().writeln(&format!(
+                "{} No income data found for trend analysis.\n",
+                "ℹ".blue().bold()
+            ))?;
+        }
         return Ok(());
     }
 
@@ -1053,6 +1124,11 @@ async fn dispatch_income_forecast(
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
+    // NOTE: The year parameter is currently used only for display/labeling purposes.
+    // The forecast is always based on trailing 12-month data from the current date
+    // (Local::now()), not data up to Dec 31 of year-1. This makes forecasts time-dependent.
+    // TODO: Add an as_of_date parameter to make forecasts deterministic and properly scoped.
+
     // Collect all assets with income history
     let all_assets = db::get_all_assets(&conn)?;
     let mut forecasts = Vec::new();
@@ -1071,10 +1147,16 @@ async fn dispatch_income_forecast(
     }
 
     if forecasts.is_empty() {
-        options.writer().writeln(&format!(
-            "{} No income history found for forecasting.\n",
-            "ℹ".blue().bold()
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(r#"{"status":"empty","message":"No income history found for forecasting."}"#)?;
+        } else {
+            options.writer().writeln(&format!(
+                "{} No income history found for forecasting.\n",
+                "ℹ".blue().bold()
+            ))?;
+        }
         return Ok(());
     }
 
@@ -1118,10 +1200,16 @@ async fn dispatch_income_calendar(
     }
 
     if predictions.is_empty() {
-        options.writer().writeln(&format!(
-            "{} No predicted payment dates (insufficient history).\n",
-            "ℹ".blue().bold()
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(r#"{"status":"empty","message":"No predicted payment dates (insufficient history)."}"#)?;
+        } else {
+            options.writer().writeln(&format!(
+                "{} No predicted payment dates (insufficient history).\n",
+                "ℹ".blue().bold()
+            ))?;
+        }
         return Ok(());
     }
 
@@ -1143,10 +1231,16 @@ async fn dispatch_income_alerts(options: options::OutputOptions) -> Result<()> {
     let anomalies = crate::reports::income_analytics::detect_anomalies(&conn)?;
 
     if anomalies.is_empty() {
-        options.writer().writeln(&format!(
-            "{} No anomalies detected in income data.\n",
-            "✓".green().bold()
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(r#"{"status":"ok","message":"No anomalies detected in income data."}"#)?;
+        } else {
+            options.writer().writeln(&format!(
+                "{} No anomalies detected in income data.\n",
+                "✓".green().bold()
+            ))?;
+        }
         return Ok(());
     }
 
@@ -1175,11 +1269,17 @@ async fn dispatch_income_export(
     let events = db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
 
     if events.is_empty() {
-        options.writer().writeln(&format!(
-            "\n{} No income events found for {}.\n",
-            "ℹ".blue().bold(),
-            year
-        ))?;
+        if options.is_json() {
+            options
+                .writer()
+                .writeln(&format!(r#"{{"status":"empty","message":"No income events found for {}."}}"#, year))?;
+        } else {
+            options.writer().writeln(&format!(
+                "\n{} No income events found for {}.\n",
+                "ℹ".blue().bold(),
+                year
+            ))?;
+        }
         return Ok(());
     }
 

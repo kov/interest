@@ -1531,7 +1531,7 @@ pub fn get_income_totals_by_asset(
     to_date: NaiveDate,
 ) -> Result<HashMap<i64, Decimal>> {
     let mut stmt = conn.prepare(
-        "SELECT asset_id, SUM(total_amount - withholding_tax) as total
+        "SELECT asset_id, SUM(total_amount) as total
          FROM income_events
          WHERE event_date >= ?1 AND event_date <= ?2
          GROUP BY asset_id",

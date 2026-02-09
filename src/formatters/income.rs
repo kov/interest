@@ -546,14 +546,19 @@ fn build_income_summary_document_with_categories(
                 rows: vec![
                     KeyValueRow {
                         label: "Baseline Income (Recurring)".to_string(),
-                        value: Value::Text(format!("R$ {:.2} ({}%)", baseline_total, baseline_pct)),
+                        value: Value::Currency(baseline_total),
+                    },
+                    KeyValueRow {
+                        label: "Baseline Income (%)".to_string(),
+                        value: Value::Percent(baseline_pct),
                     },
                     KeyValueRow {
                         label: "Exceptional Income".to_string(),
-                        value: Value::Text(format!(
-                            "R$ {:.2} ({}%)",
-                            exceptional_total, exceptional_pct
-                        )),
+                        value: Value::Currency(exceptional_total),
+                    },
+                    KeyValueRow {
+                        label: "Exceptional Income (%)".to_string(),
+                        value: Value::Percent(exceptional_pct),
                     },
                     KeyValueRow {
                         label: "Monthly Baseline Avg".to_string(),
@@ -725,11 +730,11 @@ pub fn format_trends_report(
                     },
                     KeyValueRow {
                         label: "YoY Growth".to_string(),
-                        value: Value::Text(format!("{:.2}%", trend.yoy_growth_percentage)),
+                        value: Value::Percent(trend.yoy_growth_percentage),
                     },
                     KeyValueRow {
                         label: "Volatility (CV)".to_string(),
-                        value: Value::Text(format!("{:.2}%", volatility_pct)),
+                        value: Value::Percent(volatility_pct),
                     },
                     KeyValueRow {
                         label: "Average Monthly Income".to_string(),
