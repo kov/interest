@@ -372,7 +372,7 @@ pub fn categorize_income_event(
         .filter(|(e, a)| {
             a.ticker == ticker
                 && e.event_type == event.event_type
-                && e.event_date <= event.event_date
+                && e.event_date < event.event_date
                 && e.event_date >= twelve_months_ago
         })
         .collect();
@@ -486,7 +486,8 @@ pub fn forecast_income_for_asset(
 
     // Apply trend adjustment if enough history
     let mut expected = ltm_total;
-    let series = get_monthly_income_series(conn, 12, Some(ticker))?;
+    // Need 24 months to ensure we have enough data points for trend analysis (checked at line 490)
+    let series = get_monthly_income_series(conn, 24, Some(ticker))?;
     if series.amounts.len() >= 24 {
         let trend = analyze_income_trends(conn, 24, Some(ticker))?;
         if trend.trend_direction == TrendDirection::Growing
@@ -540,27 +541,20 @@ pub fn predict_payment_dates(
         return Ok(Vec::new());
     }
 
+    // Get all events for this ticker in the historical window (24 months back)
+    let today = Local::now().date_naive();
+    let two_years_ago = today - Duration::days(730);
+    let all_events = db::get_income_events_with_assets(
+        conn,
+        Some(two_years_ago),
+        Some(today),
+        Some(ticker),
+    )?;
+
     // Determine typical day-of-month from historical data
     let mut day_of_months = Vec::new();
-    for month in &series.months {
-        // Get actual events for that month
-        let month_start = NaiveDate::from_ymd_opt(month.year(), month.month(), 1).unwrap();
-        let month_end = if month.month() == 12 {
-            NaiveDate::from_ymd_opt(month.year() + 1, 1, 1).unwrap() - Duration::days(1)
-        } else {
-            NaiveDate::from_ymd_opt(month.year(), month.month() + 1, 1).unwrap() - Duration::days(1)
-        };
-
-        let events = db::get_income_events_with_assets(
-            conn,
-            Some(month_start),
-            Some(month_end),
-            Some(ticker),
-        )?;
-
-        for (event, _) in events {
-            day_of_months.push(event.event_date.day());
-        }
+    for (event, _) in all_events {
+        day_of_months.push(event.event_date.day());
     }
 
     if day_of_months.is_empty() {
