@@ -152,6 +152,32 @@ pub enum Commands {
         #[arg(value_enum)]
         mode: PrivacyToggle,
     },
+
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell type (bash, fish, zsh). Auto-detects from $SHELL if not specified.
+        #[arg(value_enum)]
+        shell: Option<Shell>,
+
+        /// Skip interactive installation and print to stdout
+        #[arg(long)]
+        no_install: bool,
+    },
+
+    /// Hidden command for dynamic completion (used by shell completion scripts)
+    #[command(hide = true)]
+    Complete {
+        /// Current command line being completed (allows hyphenated args like --asset-type)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Fish,
+    Zsh,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

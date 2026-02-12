@@ -104,6 +104,11 @@ pub fn render_help<W: Write>(mut out: W, _opts: &RenderOpts) -> io::Result<()> {
     writeln!(out)?;
     writeln!(out, "{}", "Utilities & session:".bold())?;
     writeln!(out, "  {:24} - Launch the TUI (default)", "interactive")?;
+    writeln!(
+        out,
+        "  {:24} - Install shell completions (bash/fish/zsh)",
+        "completions <shell>"
+    )?;
     writeln!(out, "  {:24} - Show this help", "help")?;
     writeln!(out, "  {:24} - Exit the application", "exit")?;
 
@@ -114,6 +119,7 @@ pub fn render_help<W: Write>(mut out: W, _opts: &RenderOpts) -> io::Result<()> {
         writeln!(out, "  interest import movimentacao.xlsx")?;
         writeln!(out, "  interest portfolio show --at 2024-12-31")?;
         writeln!(out, "  interest tax report 2024 --export")?;
+        writeln!(out, "  interest completions fish  # Interactive install")?;
         writeln!(out)?;
     }
 

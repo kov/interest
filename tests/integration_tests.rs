@@ -2465,3 +2465,320 @@ fn test_portfolio_show_fetches_cached_cotahist_and_shows_prices() -> Result<()> 
 
     Ok(())
 }
+
+// =============================================================================
+// Shell Completion Tests
+// =============================================================================
+
+#[test]
+fn test_completions_bash_generates_valid_script() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home).arg("completions").arg("bash").output()?;
+
+    assert!(
+        output.status.success(),
+        "completions bash command failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify it contains essential bash completion elements
+    assert!(
+        stdout.contains("_interest()"),
+        "Missing bash completion function"
+    );
+    assert!(
+        stdout.contains("COMPREPLY"),
+        "Missing bash COMPREPLY variable"
+    );
+    assert!(
+        stdout.contains("portfolio"),
+        "Missing portfolio command in completions"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_fish_generates_valid_script() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home).arg("completions").arg("fish").output()?;
+
+    assert!(
+        output.status.success(),
+        "completions fish command failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify it contains essential fish completion elements
+    assert!(
+        stdout.contains("complete -c interest"),
+        "Missing fish complete command"
+    );
+    assert!(
+        stdout.contains("portfolio"),
+        "Missing portfolio command in completions"
+    );
+    assert!(
+        stdout.contains("__fish_interest"),
+        "Missing fish helper functions"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_zsh_generates_valid_script() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home).arg("completions").arg("zsh").output()?;
+
+    assert!(
+        output.status.success(),
+        "completions zsh command failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify it contains essential zsh completion elements
+    assert!(
+        stdout.contains("#compdef interest"),
+        "Missing zsh compdef directive"
+    );
+    assert!(
+        stdout.contains("_interest()"),
+        "Missing zsh completion function"
+    );
+    assert!(
+        stdout.contains("portfolio"),
+        "Missing portfolio command in completions"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_rejects_json_flag() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home)
+        .arg("--json")
+        .arg("completions")
+        .arg("bash")
+        .output()?;
+
+    assert!(
+        !output.status.success(),
+        "completions with --json should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("JSON output is not supported for shell completions"),
+        "Expected error message about JSON not supported, got: {}",
+        stderr
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_no_install_flag() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home)
+        .arg("completions")
+        .arg("fish")
+        .arg("--no-install")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "completions with --no-install should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should output completion script to stdout
+    assert!(
+        stdout.contains("complete -c interest"),
+        "Missing fish completion output"
+    );
+
+    // Should not have interactive prompts in stderr
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Install"),
+        "Should not show installation prompts with --no-install"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_bash_includes_dynamic_completions() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home).arg("completions").arg("bash").output()?;
+
+    assert!(
+        output.status.success(),
+        "completions bash command failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify dynamic completion helper functions are included
+    assert!(
+        stdout.contains("__interest_dynamic_complete()"),
+        "Missing bash dynamic completion helper function"
+    );
+    assert!(
+        stdout.contains("__interest_asset_type_complete()"),
+        "Missing bash asset-type completion function"
+    );
+    assert!(
+        stdout.contains("__interest_at_complete()"),
+        "Missing bash --at completion function"
+    );
+
+    // Verify it calls the interest complete command
+    assert!(
+        stdout.contains("interest complete"),
+        "Missing call to 'interest complete' command"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_fish_includes_dynamic_completions() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home).arg("completions").arg("fish").output()?;
+
+    assert!(
+        output.status.success(),
+        "completions fish command failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify dynamic completions are included
+    assert!(
+        stdout.contains("Dynamic completions for --asset-type"),
+        "Missing fish dynamic asset-type completion"
+    );
+    assert!(
+        stdout.contains("Dynamic completions for --at"),
+        "Missing fish dynamic --at completion"
+    );
+
+    // Verify it calls the interest complete command
+    assert!(
+        stdout.contains("interest complete"),
+        "Missing call to 'interest complete' command in fish completions"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_completions_zsh_includes_dynamic_completions() -> Result<()> {
+    let home = TempDir::new()?;
+    let output = base_cmd(&home).arg("completions").arg("zsh").output()?;
+
+    assert!(
+        output.status.success(),
+        "completions zsh command failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify dynamic completion helper functions are included
+    assert!(
+        stdout.contains("__interest_complete()"),
+        "Missing zsh dynamic completion helper function"
+    );
+    assert!(
+        stdout.contains("__interest_asset_types()"),
+        "Missing zsh asset-types completion function"
+    );
+    assert!(
+        stdout.contains("__interest_years()"),
+        "Missing zsh years completion function"
+    );
+
+    // Verify it calls the interest complete command
+    assert!(
+        stdout.contains("interest complete"),
+        "Missing call to 'interest complete' command in zsh completions"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_complete_command_accepts_hyphenated_trailing_args() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Test that the complete command can accept hyphenated args like --asset-type
+    // This tests the fix for clap treating hyphens as flags
+    let output = base_cmd(&home)
+        .arg("complete")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--asset-type")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "complete command with hyphenated arg failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should provide asset type completions
+    assert!(
+        stdout.contains("STOCK") || stdout.contains("FII"),
+        "Missing asset type completion suggestions"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_complete_command_with_multiple_hyphenated_args() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Test with multiple hyphenated args
+    let output = base_cmd(&home)
+        .arg("complete")
+        .arg("portfolio")
+        .arg("show")
+        .arg("--asset-type")
+        .arg("STOCK")
+        .arg("--at")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "complete command with multiple hyphenated args failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should not error on hyphenated args - the fix is to allow them through clap
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "Complete command should not treat --at as unexpected argument"
+    );
+
+    Ok(())
+}

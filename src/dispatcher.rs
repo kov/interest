@@ -22,6 +22,7 @@ use crate::utils::format_currency;
 use crate::{db, formatters, options, tax};
 use anyhow::Result;
 use colored::Colorize;
+use std::io::IsTerminal;
 use tracing::info;
 
 /// Route a parsed command to its handler
@@ -71,6 +72,10 @@ pub async fn dispatch_command(
             // This should never be reached since main.rs handles Chat separately
             Err(anyhow::anyhow!("Chat mode should be handled by main.rs"))
         }
+        Commands::Completions { shell, no_install } => {
+            dispatch_completions(*shell, *no_install, options)
+        }
+        Commands::Complete { args } => dispatch_dynamic_complete(args),
         Commands::Privacy { .. } => Err(anyhow::anyhow!(
             "Privacy mode is only supported in interactive mode. Use --privacy for CLI commands."
         )),
@@ -874,6 +879,416 @@ impl TaxProgressPrinter {
             _ => {}
         }
     }
+}
+
+/// Generate shell completion scripts
+fn dispatch_completions(
+    shell: Option<crate::cli::Shell>,
+    no_install: bool,
+    options: options::OutputOptions,
+) -> Result<()> {
+    use clap::CommandFactory;
+    use clap_complete::{generate, shells};
+
+    // Reject --json flag for completions since the output is a shell script
+    if options.output_mode == options::OutputMode::Json {
+        return Err(anyhow::anyhow!(
+            "JSON output is not supported for shell completions. \
+             The completions command generates shell scripts that must be written to stdout directly."
+        ));
+    }
+
+    // Auto-detect shell if not specified
+    let shell = match shell {
+        Some(s) => s,
+        None => detect_shell()?,
+    };
+
+    let mut cmd = crate::cli::Cli::command();
+    let bin_name = cmd
+        .get_bin_name()
+        .unwrap_or_else(|| cmd.get_name())
+        .to_string();
+
+    // Determine if we should use interactive installation
+    let is_tty = std::io::stdout().is_terminal();
+    let should_install = is_tty && !no_install;
+
+    if should_install {
+        // Interactive installation mode
+        install_completion_interactively(shell, &mut cmd, &bin_name)
+    } else {
+        // Print to stdout (for piping or when --no-install is specified)
+        match shell {
+            crate::cli::Shell::Bash => {
+                // Generate base Bash completions
+                let mut buffer = Vec::new();
+                generate(shells::Bash, &mut cmd, &bin_name, &mut buffer);
+
+                // Add dynamic completion support
+                let completion_script = String::from_utf8(buffer)?;
+                let enhanced_script = add_bash_dynamic_completions(&completion_script, &bin_name);
+                print!("{}", enhanced_script);
+            }
+            crate::cli::Shell::Fish => {
+                // Generate base Fish completions
+                let mut buffer = Vec::new();
+                generate(shells::Fish, &mut cmd, &bin_name, &mut buffer);
+
+                // Add dynamic completion support
+                let completion_script = String::from_utf8(buffer)?;
+                let enhanced_script = add_fish_dynamic_completions(&completion_script, &bin_name);
+                print!("{}", enhanced_script);
+            }
+            crate::cli::Shell::Zsh => {
+                // Generate base Zsh completions
+                let mut buffer = Vec::new();
+                generate(shells::Zsh, &mut cmd, &bin_name, &mut buffer);
+
+                // Add dynamic completion support
+                let completion_script = String::from_utf8(buffer)?;
+                let enhanced_script = add_zsh_dynamic_completions(&completion_script, &bin_name);
+                print!("{}", enhanced_script);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Detect the current shell from the environment
+fn detect_shell() -> Result<crate::cli::Shell> {
+    use std::env;
+
+    let shell = env::var("SHELL")
+        .map_err(|_| anyhow::anyhow!("Could not detect shell from $SHELL environment variable. Please specify the shell explicitly."))?;
+
+    // Extract the shell name from the path (e.g., /bin/bash -> bash)
+    let shell_name = shell.rsplit('/').next().unwrap_or(&shell);
+
+    match shell_name {
+        "bash" => Ok(crate::cli::Shell::Bash),
+        "fish" => Ok(crate::cli::Shell::Fish),
+        "zsh" => Ok(crate::cli::Shell::Zsh),
+        _ => Err(anyhow::anyhow!(
+            "Unsupported shell '{}'. Supported shells: bash, fish, zsh. Please specify the shell explicitly.",
+            shell_name
+        )),
+    }
+}
+
+/// Install completion script interactively
+fn install_completion_interactively(
+    shell: crate::cli::Shell,
+    cmd: &mut clap::Command,
+    bin_name: &str,
+) -> Result<()> {
+    use clap_complete::{generate, shells};
+    use std::fs;
+    use std::io::{self, Write};
+
+    // Determine the installation path based on shell
+    let install_path = get_completion_install_path(shell)?;
+
+    // Ask user for confirmation
+    eprint!(
+        "Install {} completion to {}? [Y/n] ",
+        shell_name(shell),
+        install_path.display()
+    );
+    io::stderr().flush()?;
+
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    let response = response.trim().to_lowercase();
+
+    if !response.is_empty() && response != "y" && response != "yes" {
+        eprintln!("Installation cancelled.");
+        return Ok(());
+    }
+
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = install_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Generate completion script to a buffer
+    let mut buffer = Vec::new();
+    match shell {
+        crate::cli::Shell::Bash => {
+            // Generate base Bash completions
+            generate(shells::Bash, cmd, bin_name, &mut buffer);
+
+            // Add dynamic completion support
+            let completion_script = String::from_utf8(buffer)?;
+            let enhanced_script = add_bash_dynamic_completions(&completion_script, bin_name);
+            buffer = enhanced_script.into_bytes();
+        }
+        crate::cli::Shell::Fish => {
+            // Generate base Fish completions
+            generate(shells::Fish, cmd, bin_name, &mut buffer);
+
+            // Add dynamic completion support
+            let completion_script = String::from_utf8(buffer)?;
+            let enhanced_script = add_fish_dynamic_completions(&completion_script, bin_name);
+            buffer = enhanced_script.into_bytes();
+        }
+        crate::cli::Shell::Zsh => {
+            // Generate base Zsh completions
+            generate(shells::Zsh, cmd, bin_name, &mut buffer);
+
+            // Add dynamic completion support
+            let completion_script = String::from_utf8(buffer)?;
+            let enhanced_script = add_zsh_dynamic_completions(&completion_script, bin_name);
+            buffer = enhanced_script.into_bytes();
+        }
+    }
+
+    // Write to file
+    fs::write(&install_path, buffer)?;
+
+    eprintln!("✓ Completion installed to {}", install_path.display());
+    eprintln!("\nTo activate completions:");
+    match shell {
+        crate::cli::Shell::Bash => {
+            eprintln!("  source {}", install_path.display());
+            eprintln!("Or restart your shell.");
+        }
+        crate::cli::Shell::Fish => {
+            eprintln!("  Restart your shell or run: source ~/.config/fish/config.fish");
+        }
+        crate::cli::Shell::Zsh => {
+            eprintln!("  Restart your shell or run: source ~/.zshrc");
+        }
+    }
+
+    Ok(())
+}
+
+/// Add dynamic completion support to Fish completion script
+fn add_fish_dynamic_completions(script: &str, bin_name: &str) -> String {
+    let mut result = script.to_string();
+
+    // Add dynamic completions for specific options
+    let dynamic_completions = format!(
+        r#"
+# Dynamic completions for --asset-type
+complete -c {bin} -n "__fish_interest_using_subcommand portfolio; and __fish_seen_subcommand_from show" -l asset-type -a "({bin} complete (commandline -opc))" -d 'Asset type'
+
+# Dynamic completions for --at
+complete -c {bin} -n "__fish_interest_using_subcommand portfolio; and __fish_seen_subcommand_from show" -l at -a "({bin} complete (commandline -opc))" -d 'Date or year'
+"#,
+        bin = bin_name
+    );
+
+    result.push_str(&dynamic_completions);
+    result
+}
+
+/// Add dynamic completion support to Bash completion script
+fn add_bash_dynamic_completions(script: &str, bin_name: &str) -> String {
+    let mut result = script.to_string();
+
+    // Add helper function for dynamic completions
+    let dynamic_completions = format!(
+        r#"
+
+# Dynamic completion helper function
+__{bin}_dynamic_complete() {{
+    local cur prev_word cmd_line
+    cur="${{COMP_WORDS[$COMP_CWORD]}}"
+    
+    # Get the full command line building from COMP_WORDS
+    cmd_line=("${{COMP_WORDS[@]}}")
+    
+    # Call interest complete with the command line
+    COMPREPLY=($(compgen -W "$({bin} complete "${{cmd_line[@]}}")" -- "$cur"))
+}}
+
+# Dynamic completions for portfolio show --asset-type
+__{bin}_asset_type_complete() {{
+    local cur="${{COMP_WORDS[$COMP_CWORD]}}"
+    if [[ "${{#COMP_WORDS[@]}}" -gt 2 ]] && [[ "${{COMP_WORDS[1]}}" == "portfolio" ]] && [[ "${{COMP_WORDS[2]}}" == "show" ]]; then
+        COMPREPLY=($(compgen -W "$({bin} complete "${{COMP_WORDS[@]}}")" -- "$cur"))
+    fi
+}}
+
+# Dynamic completions for portfolio show --at
+__{bin}_at_complete() {{
+    local cur="${{COMP_WORDS[$COMP_CWORD]}}"
+    if [[ "${{#COMP_WORDS[@]}}" -gt 2 ]] && [[ "${{COMP_WORDS[1]}}" == "portfolio" ]] && [[ "${{COMP_WORDS[2]}}" == "show" ]]; then
+        COMPREPLY=($(compgen -W "$({bin} complete "${{COMP_WORDS[@]}}")" -- "$cur"))
+    fi
+}}
+"#,
+        bin = bin_name
+    );
+
+    result.push_str(&dynamic_completions);
+    result
+}
+
+/// Add dynamic completion support to Zsh completion script
+fn add_zsh_dynamic_completions(script: &str, bin_name: &str) -> String {
+    let mut result = script.to_string();
+
+    // Add helper functions for dynamic completions
+    let dynamic_completions = format!(
+        r#"
+
+# Dynamic completion helper function for zsh
+(( $+functions[__{bin}_complete] )) || __{bin}_complete() {{
+    local -a values
+    values=($({bin} complete "${{words[@]}}"))
+    compadd -a values
+}}
+
+# Dynamic completions for asset types
+(( $+functions[__{bin}_asset_types] )) || __{bin}_asset_types() {{
+    __{bin}_complete
+}}
+
+# Dynamic completions for years
+(( $+functions[__{bin}_years] )) || __{bin}_years() {{
+    __{bin}_complete
+}}
+"#,
+        bin = bin_name
+    );
+
+    result.push_str(&dynamic_completions);
+    result
+}
+
+/// Get the standard installation path for completion scripts
+fn get_completion_install_path(shell: crate::cli::Shell) -> Result<std::path::PathBuf> {
+    use std::env;
+    use std::path::PathBuf;
+
+    match shell {
+        crate::cli::Shell::Bash => {
+            // Try XDG_DATA_HOME first, then fall back to ~/.local/share
+            let data_home = env::var("XDG_DATA_HOME")
+                .ok()
+                .map(PathBuf::from)
+                .or_else(|| {
+                    env::var("HOME")
+                        .ok()
+                        .map(|h| PathBuf::from(h).join(".local/share"))
+                });
+
+            if let Some(base) = data_home {
+                Ok(base.join("bash-completion/completions/interest"))
+            } else {
+                Err(anyhow::anyhow!(
+                    "Could not determine home directory for bash completion installation"
+                ))
+            }
+        }
+        crate::cli::Shell::Fish => {
+            // Respect XDG_CONFIG_HOME if set, otherwise use ~/.config
+            let config_home = env::var("XDG_CONFIG_HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| env::var("HOME").ok().map(|h| format!("{}/.config", h)))
+                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+            Ok(PathBuf::from(config_home).join("fish/completions/interest.fish"))
+        }
+        crate::cli::Shell::Zsh => {
+            // Use ~/.zsh/completions as recommended in README
+            let home = env::var("HOME")
+                .map_err(|_| anyhow::anyhow!("Could not determine home directory"))?;
+            Ok(PathBuf::from(home).join(".zsh/completions/_interest"))
+        }
+    }
+}
+
+/// Get human-readable shell name
+fn shell_name(shell: crate::cli::Shell) -> &'static str {
+    match shell {
+        crate::cli::Shell::Bash => "bash",
+        crate::cli::Shell::Fish => "fish",
+        crate::cli::Shell::Zsh => "zsh",
+    }
+}
+
+/// Handle dynamic completion requests
+fn dispatch_dynamic_complete(args: &[String]) -> Result<()> {
+    // Parse the command line to understand what we're completing
+    // args contains the partial command line being completed
+
+    if args.is_empty() {
+        return Ok(());
+    }
+
+    // Try to find what option we're completing for
+    let completing_for = args.iter().rev().find(|arg| arg.starts_with("--"));
+
+    match completing_for.map(|s| s.as_str()) {
+        Some("--asset-type") | Some("-a") => {
+            // Provide asset type completions
+            println!("STOCK");
+            println!("FII");
+            println!("FIAGRO");
+            println!("FI_INFRA");
+        }
+        Some("--at") => {
+            // Provide year completions from database
+            if let Ok(years) = get_available_years() {
+                for year in years {
+                    println!("{}", year);
+                }
+            }
+        }
+        Some("--ticker") | Some("ticker") if args.contains(&"assets".to_string()) => {
+            // Provide ticker completions from database
+            if let Ok(tickers) = get_available_tickers() {
+                for ticker in tickers {
+                    println!("{}", ticker);
+                }
+            }
+        }
+        _ => {
+            // No specific completions for this context
+        }
+    }
+
+    Ok(())
+}
+
+/// Get available years from transactions in the database
+fn get_available_years() -> Result<Vec<i32>> {
+    let conn = db::open_db_read_only(None)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT strftime('%Y', trade_date) as year 
+         FROM transactions 
+         WHERE trade_date IS NOT NULL 
+         ORDER BY year DESC",
+    )?;
+
+    let years = stmt
+        .query_map([], |row| {
+            let year_str: String = row.get(0)?;
+            year_str
+                .parse::<i32>()
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?
+        .collect::<Result<Vec<i32>, _>>()?;
+
+    Ok(years)
+}
+
+/// Get available tickers from the database
+fn get_available_tickers() -> Result<Vec<String>> {
+    let conn = db::open_db_read_only(None)?;
+
+    let mut stmt = conn.prepare("SELECT DISTINCT ticker FROM assets ORDER BY ticker")?;
+
+    let tickers = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+
+    Ok(tickers)
 }
 
 // Tests removed - dispatcher now works with clap Commands

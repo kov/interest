@@ -46,6 +46,73 @@ The compiled binary will be at `./target/release/interest`.
 ./target/release/interest help
 ```
 
+### Shell Completion
+
+The `interest` CLI supports shell completions for bash, fish, and zsh.
+
+#### Interactive Installation (Recommended)
+
+When running in a terminal, `interest completions` will offer to install the completion file automatically:
+
+```bash
+# Interactive installation - will prompt for confirmation
+interest completions bash
+interest completions fish
+interest completions zsh
+```
+
+The tool will detect your terminal and ask where to install the completion file. Just confirm with `y` or `Enter`.
+
+#### Manual Installation
+
+If you prefer to install manually or need to pipe the output:
+
+**Bash:**
+
+```bash
+# Create completion directory if it doesn't exist
+mkdir -p ~/.local/share/bash-completion/completions
+
+# Generate and install completion
+interest completions bash --no-install > ~/.local/share/bash-completion/completions/interest
+
+# Reload your shell or source the completion
+source ~/.local/share/bash-completion/completions/interest
+```
+
+Alternatively, for system-wide installation (requires sudo):
+
+```bash
+sudo sh -c 'interest completions bash --no-install > /usr/share/bash-completion/completions/interest'
+```
+
+**Fish:**
+
+```bash
+# Create completion directory if it doesn't exist
+mkdir -p ~/.config/fish/completions
+
+# Generate and install completion
+interest completions fish --no-install > ~/.config/fish/completions/interest.fish
+```
+
+**Zsh:**
+
+```bash
+# Create completion directory if it doesn't exist
+mkdir -p ~/.zsh/completions
+
+# Generate and install completion
+interest completions zsh --no-install > ~/.zsh/completions/_interest
+
+# Add to your ~/.zshrc if not already present
+echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+
+# Reload your shell
+exec zsh
+```
+
 ---
 
 ## Getting Started: Complete Setup Workflow
