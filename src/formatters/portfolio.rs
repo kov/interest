@@ -8,38 +8,43 @@ use crate::output::{
 use crate::reports::aggregation::aggregate_positions_by_asset_type;
 use crate::reports::PortfolioReport;
 use anyhow::Result;
-use std::collections::BTreeMap;
+use rust_decimal::Decimal;
+use std::collections::{BTreeMap, HashMap};
 
-/// Format portfolio report (testable, no I/O)
-///
-/// This is the main formatting entry point that dispatches to the appropriate
-/// formatter based on output mode.
-///
-/// # Arguments
-///
-/// * `report` - The portfolio report to format
-/// * `asset_type_filter` - Optional asset type filter
-/// * `mode` - Output format (Table or Json)
-///
-/// # Example
-///
-/// ```ignore
-/// let mode = OutputMode::from_json_flag(json_output);
-/// let output = formatters::portfolio::format(&report, Some(AssetType::Stock), mode)?;
-/// println!("{}", output);
-/// ```
+/// Income data keyed by ticker for portfolio enrichment
+pub struct PortfolioEnrichment {
+    /// Income YTD per ticker
+    pub income_by_ticker: HashMap<String, Decimal>,
+    /// Income YTD per asset type
+    pub income_by_type: HashMap<AssetType, Decimal>,
+    /// Total income YTD
+    pub total_income: Decimal,
+}
+
+#[cfg(test)]
 pub fn format(
     report: &PortfolioReport,
     asset_type_filter: Option<AssetType>,
     options: OutputOptions,
 ) -> Result<String> {
-    let document = build_portfolio_document(report, asset_type_filter);
+    format_enriched(report, asset_type_filter, None, options)
+}
+
+/// Format portfolio report with optional enrichment data (income, allocation)
+pub fn format_enriched(
+    report: &PortfolioReport,
+    asset_type_filter: Option<AssetType>,
+    enrichment: Option<&PortfolioEnrichment>,
+    options: OutputOptions,
+) -> Result<String> {
+    let document = build_portfolio_document(report, asset_type_filter, enrichment);
     crate::formatters::render_document(&document, options)
 }
 
 fn build_portfolio_document(
     report: &PortfolioReport,
     asset_type_filter: Option<AssetType>,
+    enrichment: Option<&PortfolioEnrichment>,
 ) -> OutputDocument {
     let header_text = match asset_type_filter {
         Some(filter) => format!("Portfolio - {} only", filter.as_str().to_uppercase()),
@@ -82,8 +87,27 @@ fn build_portfolio_document(
 
         let rows = positions
             .iter()
-            .map(|position| Row {
-                cells: vec![
+            .map(|position| {
+                let alloc_pct = if report.total_value > Decimal::ZERO {
+                    let value = position.current_value.unwrap_or(position.total_cost);
+                    Some((value / report.total_value) * Decimal::from(100))
+                } else {
+                    None
+                };
+
+                let income = enrichment
+                    .and_then(|e| e.income_by_ticker.get(&position.asset.ticker))
+                    .copied();
+
+                let yield_pct = income.and_then(|inc| {
+                    if position.total_cost > Decimal::ZERO {
+                        Some((inc / position.total_cost) * Decimal::from(100))
+                    } else {
+                        None
+                    }
+                });
+
+                let mut cells = vec![
                     Value::Text(position.asset.ticker.clone()),
                     Value::Quantity(position.quantity),
                     Value::Currency(position.average_cost),
@@ -104,11 +128,19 @@ fn build_portfolio_document(
                         .unrealized_pl_pct
                         .map(Value::Percent)
                         .unwrap_or(Value::Null),
-                ],
+                    alloc_pct.map(Value::Percent).unwrap_or(Value::Null),
+                ];
+
+                if enrichment.is_some() {
+                    cells.push(income.map(Value::Currency).unwrap_or(Value::Null));
+                    cells.push(yield_pct.map(Value::Percent).unwrap_or(Value::Null));
+                }
+
+                Row { cells }
             })
             .collect::<Vec<_>>();
 
-        let columns = vec![
+        let mut columns = vec![
             ColumnDef::new("ticker", "Ticker", ValueKind::Text),
             ColumnDef::new("quantity", "Quantity", ValueKind::Quantity),
             ColumnDef::new("avg_cost", "Avg Cost", ValueKind::Currency),
@@ -117,7 +149,54 @@ fn build_portfolio_document(
             ColumnDef::new("value", "Value", ValueKind::Currency),
             ColumnDef::new("pl", "P&L", ValueKind::CurrencyDelta),
             ColumnDef::new("return_pct", "Return", ValueKind::Percent),
+            ColumnDef::new("alloc_pct", "Alloc%", ValueKind::Percent),
         ];
+
+        if enrichment.is_some() {
+            columns.push(ColumnDef::new("income", "Income", ValueKind::Currency));
+            columns.push(ColumnDef::new("yield_pct", "Yield%", ValueKind::Percent));
+        }
+
+        let type_income = enrichment.and_then(|e| e.income_by_type.get(asset_type).copied());
+        let type_yield = type_income.and_then(|inc| {
+            if totals.cost_basis > Decimal::ZERO {
+                Some((inc / totals.cost_basis) * Decimal::from(100))
+            } else {
+                None
+            }
+        });
+
+        let mut subtotal_rows = vec![
+            KeyValueRow {
+                label: "Cost".to_string(),
+                value: Value::Currency(totals.cost_basis),
+            },
+            KeyValueRow {
+                label: "Value".to_string(),
+                value: Value::Currency(totals.market_value),
+            },
+            KeyValueRow {
+                label: "P&L".to_string(),
+                value: Value::CurrencyDelta(totals.unrealized_pl),
+            },
+            KeyValueRow {
+                label: "Return".to_string(),
+                value: Value::Percent(totals.return_pct),
+            },
+        ];
+
+        if let Some(inc) = type_income {
+            subtotal_rows.push(KeyValueRow {
+                label: "Income YTD".to_string(),
+                value: Value::Currency(inc),
+            });
+            if let Some(yld) = type_yield {
+                subtotal_rows.push(KeyValueRow {
+                    label: "Yield%".to_string(),
+                    value: Value::Percent(yld),
+                });
+            }
+        }
 
         let section_blocks = vec![
             OutputBlock::Table {
@@ -129,24 +208,7 @@ fn build_portfolio_document(
             },
             OutputBlock::KeyValue {
                 title: Some("Subtotal".to_string()),
-                rows: vec![
-                    KeyValueRow {
-                        label: "Cost".to_string(),
-                        value: Value::Currency(totals.cost_basis),
-                    },
-                    KeyValueRow {
-                        label: "Value".to_string(),
-                        value: Value::Currency(totals.market_value),
-                    },
-                    KeyValueRow {
-                        label: "P&L".to_string(),
-                        value: Value::CurrencyDelta(totals.unrealized_pl),
-                    },
-                    KeyValueRow {
-                        label: "Return".to_string(),
-                        value: Value::Percent(totals.return_pct),
-                    },
-                ],
+                rows: subtotal_rows,
             },
         ];
 
@@ -160,26 +222,44 @@ fn build_portfolio_document(
         });
     }
 
+    let mut summary_rows = vec![
+        KeyValueRow {
+            label: "Total Cost".to_string(),
+            value: Value::Currency(report.total_cost),
+        },
+        KeyValueRow {
+            label: "Total Value".to_string(),
+            value: Value::Currency(report.total_value),
+        },
+        KeyValueRow {
+            label: "Total P&L".to_string(),
+            value: Value::CurrencyDelta(report.total_pl),
+        },
+        KeyValueRow {
+            label: "Total Return".to_string(),
+            value: Value::Percent(report.total_pl_pct),
+        },
+    ];
+
+    if let Some(enrich) = enrichment {
+        if enrich.total_income > Decimal::ZERO {
+            summary_rows.push(KeyValueRow {
+                label: "Income YTD".to_string(),
+                value: Value::Currency(enrich.total_income),
+            });
+            if report.total_cost > Decimal::ZERO {
+                let yield_pct = (enrich.total_income / report.total_cost) * Decimal::from(100);
+                summary_rows.push(KeyValueRow {
+                    label: "Yield%".to_string(),
+                    value: Value::Percent(yield_pct),
+                });
+            }
+        }
+    }
+
     document.blocks.push(OutputBlock::KeyValue {
         title: Some("Portfolio Summary".to_string()),
-        rows: vec![
-            KeyValueRow {
-                label: "Total Cost".to_string(),
-                value: Value::Currency(report.total_cost),
-            },
-            KeyValueRow {
-                label: "Total Value".to_string(),
-                value: Value::Currency(report.total_value),
-            },
-            KeyValueRow {
-                label: "Total P&L".to_string(),
-                value: Value::CurrencyDelta(report.total_pl),
-            },
-            KeyValueRow {
-                label: "Total Return".to_string(),
-                value: Value::Percent(report.total_pl_pct),
-            },
-        ],
+        rows: summary_rows,
     });
 
     document

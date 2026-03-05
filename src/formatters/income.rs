@@ -19,38 +19,48 @@ pub struct AssetIncome {
     pub dividends: Decimal,
     pub jcp: Decimal,
     pub amortization: Decimal,
+    pub cost_basis: Option<Decimal>,
 }
 
 pub fn format_income_show_json(assets: &[AssetIncome], options: OutputOptions) -> Result<String> {
+    let has_yield = assets.iter().any(|a| a.cost_basis.is_some());
+
     let rows = assets
         .iter()
         .map(|asset| {
             let total = asset.dividends + asset.jcp + asset.amortization;
-            Row {
-                cells: vec![
-                    Value::Text(asset.ticker.clone()),
-                    Value::Text(asset.asset_type.as_str().to_string()),
-                    Value::Currency(asset.dividends),
-                    Value::Currency(asset.jcp),
-                    Value::Currency(asset.amortization),
-                    Value::Currency(total),
-                ],
+            let mut cells = vec![
+                Value::Text(asset.ticker.clone()),
+                Value::Text(asset.asset_type.as_str().to_string()),
+                Value::Currency(asset.dividends),
+                Value::Currency(asset.jcp),
+                Value::Currency(asset.amortization),
+                Value::Currency(total),
+            ];
+            if has_yield {
+                cells.push(yield_value(total, asset.cost_basis));
             }
+            Row { cells }
         })
         .collect::<Vec<_>>();
+
+    let mut columns = vec![
+        ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+        ColumnDef::new("asset_type", "Asset Type", ValueKind::Text),
+        ColumnDef::new("dividends", "Dividends", ValueKind::Currency),
+        ColumnDef::new("jcp", "JCP", ValueKind::Currency),
+        ColumnDef::new("amortization", "Amort", ValueKind::Currency),
+        ColumnDef::new("total", "Total", ValueKind::Currency),
+    ];
+    if has_yield {
+        columns.push(ColumnDef::new("yield_pct", "Yield%", ValueKind::Percent));
+    }
 
     let document = OutputDocument {
         title: None,
         blocks: vec![OutputBlock::Table {
             title: Some("Income Summary".to_string()),
-            columns: vec![
-                ColumnDef::new("ticker", "Ticker", ValueKind::Text),
-                ColumnDef::new("asset_type", "Asset Type", ValueKind::Text),
-                ColumnDef::new("dividends", "Dividends", ValueKind::Currency),
-                ColumnDef::new("jcp", "JCP", ValueKind::Currency),
-                ColumnDef::new("amortization", "Amort", ValueKind::Currency),
-                ColumnDef::new("total", "Total", ValueKind::Currency),
-            ],
+            columns,
             rows,
             footer: None,
             options: TableOptions {
@@ -68,6 +78,11 @@ pub fn format_income_show_table(
     year: i32,
     options: OutputOptions,
 ) -> Result<String> {
+    let has_yield = assets_by_type
+        .iter()
+        .flat_map(|(_, assets)| assets)
+        .any(|a| a.cost_basis.is_some());
+
     let mut blocks = Vec::new();
     blocks.push(OutputBlock::Header {
         level: 1,
@@ -75,6 +90,7 @@ pub fn format_income_show_table(
     });
 
     let mut grand_total = Decimal::ZERO;
+    let mut grand_cost_basis = Decimal::ZERO;
     for (asset_type, assets) in assets_by_type {
         if assets.is_empty() {
             continue;
@@ -84,15 +100,17 @@ pub fn format_income_show_table(
             .iter()
             .map(|asset| {
                 let total = asset.dividends + asset.jcp + asset.amortization;
-                Row {
-                    cells: vec![
-                        Value::Text(asset.ticker.clone()),
-                        Value::Currency(asset.dividends),
-                        Value::Currency(asset.jcp),
-                        Value::Currency(asset.amortization),
-                        Value::Currency(total),
-                    ],
+                let mut cells = vec![
+                    Value::Text(asset.ticker.clone()),
+                    Value::Currency(asset.dividends),
+                    Value::Currency(asset.jcp),
+                    Value::Currency(asset.amortization),
+                    Value::Currency(total),
+                ];
+                if has_yield {
+                    cells.push(yield_value(total, asset.cost_basis));
                 }
+                Row { cells }
             })
             .collect::<Vec<_>>();
 
@@ -100,7 +118,20 @@ pub fn format_income_show_table(
             .iter()
             .map(|a| a.dividends + a.jcp + a.amortization)
             .sum();
+        let type_cost: Decimal = assets.iter().filter_map(|a| a.cost_basis).sum();
         grand_total += type_total;
+        grand_cost_basis += type_cost;
+
+        let mut columns = vec![
+            ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+            ColumnDef::new("dividends", "Dividends", ValueKind::Currency),
+            ColumnDef::new("jcp", "JCP", ValueKind::Currency),
+            ColumnDef::new("amortization", "Amort", ValueKind::Currency),
+            ColumnDef::new("total", "Total", ValueKind::Currency),
+        ];
+        if has_yield {
+            columns.push(ColumnDef::new("yield_pct", "Yield%", ValueKind::Percent));
+        }
 
         blocks.push(OutputBlock::Section {
             title: Some(format!(
@@ -110,13 +141,7 @@ pub fn format_income_show_table(
             )),
             blocks: vec![OutputBlock::Table {
                 title: None,
-                columns: vec![
-                    ColumnDef::new("ticker", "Ticker", ValueKind::Text),
-                    ColumnDef::new("dividends", "Dividends", ValueKind::Currency),
-                    ColumnDef::new("jcp", "JCP", ValueKind::Currency),
-                    ColumnDef::new("amortization", "Amort", ValueKind::Currency),
-                    ColumnDef::new("total", "Total", ValueKind::Currency),
-                ],
+                columns,
                 rows,
                 footer: None,
                 options: TableOptions {
@@ -126,12 +151,21 @@ pub fn format_income_show_table(
         });
     }
 
+    let mut total_rows = vec![KeyValueRow {
+        label: "Total".to_string(),
+        value: Value::Currency(grand_total),
+    }];
+    if has_yield && grand_cost_basis > Decimal::ZERO {
+        let yield_pct = (grand_total / grand_cost_basis) * Decimal::from(100);
+        total_rows.push(KeyValueRow {
+            label: "Yield on Cost".to_string(),
+            value: Value::Percent(yield_pct),
+        });
+    }
+
     blocks.push(OutputBlock::KeyValue {
         title: Some("Grand Total".to_string()),
-        rows: vec![KeyValueRow {
-            label: "Total".to_string(),
-            value: Value::Currency(grand_total),
-        }],
+        rows: total_rows,
     });
 
     let document = OutputDocument {
@@ -141,6 +175,13 @@ pub fn format_income_show_table(
     };
 
     crate::formatters::render_document(&document, options)
+}
+
+fn yield_value(income: Decimal, cost_basis: Option<Decimal>) -> Value {
+    match cost_basis {
+        Some(cost) if cost > Decimal::ZERO => Value::Percent((income / cost) * Decimal::from(100)),
+        _ => Value::Null,
+    }
 }
 
 //
@@ -528,6 +569,7 @@ mod tests {
             dividends: Decimal::from_str("50.25").unwrap(),
             jcp: Decimal::from_str("25.50").unwrap(),
             amortization: Decimal::ZERO,
+            cost_basis: None,
         }];
 
         let json_str =

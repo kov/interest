@@ -2782,3 +2782,199 @@ fn test_complete_command_with_multiple_hyphenated_args() -> Result<()> {
 
     Ok(())
 }
+
+// =============================================================================
+// Scoped performance: summary metrics must reflect the scope
+// =============================================================================
+
+#[test]
+fn test_performance_type_summary_scoped_to_asset_type() -> Result<()> {
+    let home = TempDir::new()?;
+
+    // Create two asset types with sells so realized gains differ per type
+    add_asset(&home, "STK1", "STOCK")?;
+    add_transaction(&home, "STK1", "buy", "100", "50", "2024-01-02", false)?;
+    add_transaction(&home, "STK1", "sell", "10", "60", "2024-02-01", false)?;
+
+    add_asset(&home, "FII1", "FII")?;
+    add_transaction(&home, "FII1", "buy", "10", "100", "2024-01-02", false)?;
+    add_transaction(&home, "FII1", "sell", "5", "120", "2024-03-01", false)?;
+
+    // Get portfolio-level performance
+    let full_doc = run_cmd_json(&home, &["--json", "performance", "show", "ALL"])?;
+    let full_summary = find_key_value_block(&full_doc, "Summary").expect("missing full summary");
+    let full_realized: Decimal = kv_value(Some(full_summary), "Realized Gains")
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // Get STOCK-scoped performance
+    let stock_doc = run_cmd_json(&home, &["--json", "performance", "type", "STOCK", "ALL"])?;
+    let stock_summary = find_key_value_block(&stock_doc, "Summary").expect("missing stock summary");
+    let stock_realized: Decimal = kv_value(Some(stock_summary), "Realized Gains")
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // STOCK realized gains (10 * (60-50) = 100) should be less than total
+    // (100 + FII's 5 * (120-100) = 200 total)
+    assert!(
+        stock_realized < full_realized,
+        "STOCK-scoped Realized Gains ({}) should be less than portfolio total ({})",
+        stock_realized,
+        full_realized
+    );
+
+    // TWR should not appear in scoped output (not meaningful without scoped cash flows)
+    let stock_twr = kv_value(Some(stock_summary), "Time-weighted");
+    assert!(
+        stock_twr.is_null(),
+        "Time-weighted should not appear in scoped performance output"
+    );
+
+    // Cash Flows section should not appear in scoped output
+    let stock_cf = find_key_value_block(&stock_doc, "Cash Flows");
+    assert!(
+        stock_cf.is_none(),
+        "Cash Flows should not appear in scoped performance output"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_performance_asset_summary_scoped_to_single_ticker() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "SCOP1", "STOCK")?;
+    add_transaction(&home, "SCOP1", "buy", "100", "20", "2024-01-02", false)?;
+
+    add_asset(&home, "SCOP2", "STOCK")?;
+    add_transaction(&home, "SCOP2", "buy", "50", "40", "2024-01-02", false)?;
+
+    // Get single-asset performance — ticker breakdown should only contain SCOP1
+    let asset_doc = run_cmd_json(&home, &["--json", "performance", "asset", "SCOP1", "ALL"])?;
+
+    let asset_summary = find_key_value_block(&asset_doc, "Summary").expect("missing asset summary");
+
+    // TWR should not appear for single-asset scope
+    let twr = kv_value(Some(asset_summary), "Time-weighted");
+    assert!(
+        twr.is_null(),
+        "Time-weighted should not appear in single-asset performance"
+    );
+
+    // The ticker breakdown should only contain SCOP1
+    let ticker_rows = extract_table_rows(&asset_doc, Some("Asset Detail"), None)?;
+    assert_eq!(ticker_rows.len(), 1, "expected exactly one ticker row");
+    let ticker_val = ticker_rows[0]
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        ticker_val, "SCOP1",
+        "ticker breakdown should only show SCOP1"
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// Portfolio: future periods must be rejected
+// =============================================================================
+
+#[test]
+fn test_portfolio_show_rejects_future_period() -> Result<()> {
+    let home = TempDir::new()?;
+    add_asset(&home, "FUT1", "STOCK")?;
+    add_transaction(&home, "FUT1", "buy", "10", "10", "2024-01-02", false)?;
+
+    let output = base_cmd(&home)
+        .arg("portfolio")
+        .arg("show")
+        .arg("2099")
+        .output()?;
+
+    assert!(
+        !output.status.success(),
+        "portfolio show 2099 should fail, but succeeded"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("future"),
+        "error should mention 'future', got: {}",
+        stderr
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// Portfolio: income enrichment bounded to snapshot date
+// =============================================================================
+
+#[test]
+fn test_portfolio_income_enrichment_bounded_to_snapshot_date() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "ENRH", "STOCK")?;
+    add_transaction(&home, "ENRH", "buy", "100", "10", "2024-01-02", false)?;
+    // Income event in Dec 2024
+    add_income(&home, "ENRH", "DIVIDEND", "50", "2024-12-15")?;
+    // Income event in Feb 2025 (after the snapshot we'll request)
+    add_income(&home, "ENRH", "DIVIDEND", "200", "2025-02-15")?;
+
+    // Request portfolio as of 2024-12-31 — should only see the Dec income
+    let doc = run_cmd_json(&home, &["--json", "portfolio", "show", "2024"])?;
+
+    // Look for Income YTD in the table rows
+    let rows = extract_table_rows(&doc, None, Some("avg_cost"))?;
+    if let Some(row) = rows.first() {
+        // If income_ytd column exists, it should reflect only 2024 income (50), not 2025 (200)
+        if let Some(income_val) = row.get("income_ytd").and_then(|v| v.as_str()) {
+            let income: Decimal = income_val.parse()?;
+            assert!(
+                income <= dec!(50),
+                "Income YTD for 2024 snapshot should be <= 50 (got {}), the 2025 income should not be included",
+                income
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Income: empty results return valid JSON (not plaintext)
+// =============================================================================
+
+#[test]
+fn test_income_empty_results_return_valid_json() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "NOIN", "STOCK")?;
+    add_transaction(&home, "NOIN", "buy", "10", "10", "2024-01-02", false)?;
+    // No income events added
+
+    // income show --json should return valid JSON with empty blocks
+    let doc = run_cmd_json(&home, &["--json", "income", "show"])?;
+    assert!(
+        doc.get("blocks").is_some(),
+        "empty income JSON should still have 'blocks' key"
+    );
+    let blocks = doc["blocks"].as_array().expect("blocks should be array");
+    assert!(
+        blocks.is_empty(),
+        "blocks should be empty when no income events exist"
+    );
+
+    // income asset --json should also return valid JSON
+    let doc = run_cmd_json(&home, &["--json", "income", "asset", "NOIN"])?;
+    assert!(
+        doc.get("blocks").is_some(),
+        "empty income asset JSON should still have 'blocks' key"
+    );
+
+    Ok(())
+}

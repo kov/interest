@@ -98,26 +98,30 @@ pub fn get_all_tools() -> Vec<Tool> {
         // Portfolio tools
         Tool {
             name: "portfolio_show".to_string(),
-            description: "Show current portfolio positions with profit/loss. Can filter by asset type (STOCK, FII, FIAGRO, etc.) and show historical snapshots.".to_string(),
+            description: "Show current portfolio positions with profit/loss. Can filter by asset type, single asset, or show historical snapshots.".to_string(),
             policy_group: PolicyGroup::Read,
             parameters_schema: with_output_mode(json!({
                 "type": "object",
                 "properties": {
                     "asset_type": {
                         "type": "string",
-                        "description": "Filter by asset type (STOCK, FII, FIAGRO, FI_INFRA)",
+                        "description": "Filter by asset type (STOCK, FII, FIAGRO, FI_INFRA, BDR, ETF)",
                         "enum": ["STOCK", "FII", "FIAGRO", "FI_INFRA", "BDR", "ETF"]
                     },
-                    "at_date": {
+                    "ticker": {
                         "type": "string",
-                        "description": "Show portfolio as of this date (YYYY-MM-DD, YYYY-MM, or YYYY)"
+                        "description": "Show a single asset by ticker (e.g., PETR4)"
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Period or date: YTD, 2025, 2024-06, 2024-06-15, etc."
                     }
                 }
             })),
         },
         Tool {
             name: "performance_show".to_string(),
-            description: "Show performance report for a period with time-weighted return (TWR) calculation.".to_string(),
+            description: "Show performance report for a period with time-weighted return (TWR) calculation. Can scope to asset type or single asset.".to_string(),
             policy_group: PolicyGroup::Read,
             parameters_schema: with_output_mode(json!({
                 "type": "object",
@@ -126,9 +130,17 @@ pub fn get_all_tools() -> Vec<Tool> {
                         "type": "string",
                         "description": "Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)",
                         "default": "YTD"
+                    },
+                    "asset_type": {
+                        "type": "string",
+                        "description": "Filter by asset type (STOCK, FII, etc.)",
+                        "enum": ["STOCK", "FII", "FIAGRO", "FI_INFRA", "BDR", "ETF"]
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Show performance for a single asset (e.g., PETR4)"
                     }
-                },
-                "required": ["period"]
+                }
             })),
         },
         // Tax tools
@@ -180,14 +192,23 @@ pub fn get_all_tools() -> Vec<Tool> {
         // Income tools
         Tool {
             name: "income_show".to_string(),
-            description: "Show income summary by asset, grouped by asset type (dividends, JCP, amortization).".to_string(),
+            description: "Show income summary by asset, grouped by asset type (dividends, JCP, amortization). Can scope to asset type or single asset.".to_string(),
             policy_group: PolicyGroup::Read,
             parameters_schema: with_output_mode(json!({
                 "type": "object",
                 "properties": {
-                    "year": {
-                        "type": "integer",
-                        "description": "Year to filter (optional, defaults to current year)"
+                    "period": {
+                        "type": "string",
+                        "description": "Period: YTD, 2025, MTD, from:to, etc. (default: YTD)"
+                    },
+                    "asset_type": {
+                        "type": "string",
+                        "description": "Filter by asset type (STOCK, FII, etc.)",
+                        "enum": ["STOCK", "FII", "FIAGRO", "FI_INFRA", "BDR", "ETF"]
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Show income detail for a single asset (e.g., PETR4)"
                     }
                 }
             })),
@@ -220,6 +241,30 @@ pub fn get_all_tools() -> Vec<Tool> {
                     "year": {
                         "type": "integer",
                         "description": "Year for monthly breakdown (optional - omit for yearly totals)"
+                    }
+                }
+            })),
+        },
+        // Cash flow tools
+        Tool {
+            name: "cashflow_show".to_string(),
+            description: "Show cash flow summary (money in/out). Can scope to asset type or single asset.".to_string(),
+            policy_group: PolicyGroup::Read,
+            parameters_schema: with_output_mode(json!({
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Period: ALL, YTD, 2025, MTD, from:to (default: ALL)"
+                    },
+                    "asset_type": {
+                        "type": "string",
+                        "description": "Filter by asset type",
+                        "enum": ["STOCK", "FII", "FIAGRO", "FI_INFRA", "BDR", "ETF"]
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Show cash flow for a single asset (e.g., PETR4)"
                     }
                 }
             })),
@@ -459,33 +504,57 @@ pub async fn execute_tool(
                 .get("asset_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let at_date = arguments
-                .get("at_date")
+            let ticker = arguments
+                .get("ticker")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let period = arguments
+                .get("period")
                 .and_then(|v| v.as_str())
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
                 .map(String::from);
 
-            let command = Commands::Portfolio {
-                action: crate::cli::PortfolioCommands::Show {
-                    asset_type,
-                    at: at_date,
-                },
+            let action = if let Some(ticker) = ticker {
+                crate::cli::PortfolioCommands::Asset { ticker, period }
+            } else if let Some(asset_type) = asset_type {
+                crate::cli::PortfolioCommands::Type { asset_type, period }
+            } else {
+                crate::cli::PortfolioCommands::Show {
+                    period: period.clone(),
+                    asset_type: None,
+                    at: None,
+                }
             };
 
+            let command = Commands::Portfolio { action };
             execute_command(command, output_mode, policy_group).await
         }
         "performance_show" => {
             let period = arguments
                 .get("period")
                 .and_then(|v| v.as_str())
-                .unwrap_or("YTD")
-                .to_string();
+                .map(String::from);
+            let asset_type = arguments
+                .get("asset_type")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let ticker = arguments
+                .get("ticker")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
-            let command = Commands::Performance {
-                action: crate::cli::PerformanceCommands::Show { period },
+            let action = if let Some(ticker) = ticker {
+                crate::cli::PerformanceCommands::Asset { ticker, period }
+            } else if let Some(asset_type) = asset_type {
+                crate::cli::PerformanceCommands::Type { asset_type, period }
+            } else {
+                crate::cli::PerformanceCommands::Show {
+                    period: period.or(Some("YTD".to_string())),
+                }
             };
 
+            let command = Commands::Performance { action };
             execute_command(command, output_mode, policy_group).await
         }
         "tax_report" => {
@@ -531,15 +600,28 @@ pub async fn execute_tool(
             execute_command(command, output_mode, policy_group).await
         }
         "income_show" => {
-            let year = arguments
-                .get("year")
-                .and_then(|v| v.as_i64())
-                .map(|y| y as i32);
+            let period = arguments
+                .get("period")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let asset_type = arguments
+                .get("asset_type")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let ticker = arguments
+                .get("ticker")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
-            let command = Commands::Income {
-                action: crate::cli::IncomeCommands::Show { year },
+            let action = if let Some(ticker) = ticker {
+                crate::cli::IncomeCommands::Asset { ticker, period }
+            } else if let Some(asset_type) = asset_type {
+                crate::cli::IncomeCommands::Type { asset_type, period }
+            } else {
+                crate::cli::IncomeCommands::Show { period }
             };
 
+            let command = Commands::Income { action };
             execute_command(command, output_mode, policy_group).await
         }
         "income_detail" => {
@@ -568,6 +650,31 @@ pub async fn execute_tool(
                 action: crate::cli::IncomeCommands::Summary { year },
             };
 
+            execute_command(command, output_mode, policy_group).await
+        }
+        "cashflow_show" => {
+            let period = arguments
+                .get("period")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let asset_type = arguments
+                .get("asset_type")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let ticker = arguments
+                .get("ticker")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let action = if let Some(ticker) = ticker {
+                crate::cli::CashFlowCommands::Asset { ticker, period }
+            } else if let Some(asset_type) = asset_type {
+                crate::cli::CashFlowCommands::Type { asset_type, period }
+            } else {
+                crate::cli::CashFlowCommands::Show { period }
+            };
+
+            let command = Commands::CashFlow { action };
             execute_command(command, output_mode, policy_group).await
         }
         "assets_list" => {
@@ -983,6 +1090,7 @@ mod tests {
     async fn capture_and_present_executes_once() {
         let command = crate::cli::Commands::Portfolio {
             action: crate::cli::PortfolioCommands::Show {
+                period: None,
                 asset_type: None,
                 at: None,
             },

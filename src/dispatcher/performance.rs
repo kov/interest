@@ -1,52 +1,13 @@
 //! Performance command dispatcher implementation
 
+use crate::reports::scope::Scope;
 use crate::ui::progress::{ProgressEvent, ProgressPrinter};
 use crate::{db, formatters, options, reports};
-use anyhow::{anyhow, Result};
-use chrono::NaiveDate;
-use tracing;
+use anyhow::Result;
 
-/// Parse a period string (MTD, QTD, YTD, 1Y, ALL, YYYY, or from:to)
-fn parse_period_string(period: &str) -> Result<reports::Period> {
-    let upper = period.to_uppercase();
-    match upper.as_str() {
-        "MTD" => Ok(reports::Period::Mtd),
-        "QTD" => Ok(reports::Period::Qtd),
-        "YTD" => Ok(reports::Period::Ytd),
-        "1Y" | "ONEYEAR" => Ok(reports::Period::OneYear),
-        "ALL" | "ALLTIME" => Ok(reports::Period::AllTime),
-        _ => {
-            // Try parsing as year shorthand: YYYY -> YYYY-01-01:YYYY-12-31
-            if let Ok(year) = period.parse::<i32>() {
-                if (1900..=2100).contains(&year) {
-                    let from = NaiveDate::from_ymd_opt(year, 1, 1)
-                        .ok_or_else(|| anyhow!("Invalid year: {}", year))?;
-                    let to = NaiveDate::from_ymd_opt(year, 12, 31)
-                        .ok_or_else(|| anyhow!("Invalid year: {}", year))?;
-                    return Ok(reports::Period::Custom { from, to });
-                }
-            }
-
-            // Try parsing as custom range: YYYY-MM-DD:YYYY-MM-DD
-            if let Some((from_str, to_str)) = period.split_once(':') {
-                let from = NaiveDate::parse_from_str(from_str, "%Y-%m-%d").map_err(|_| {
-                    anyhow!("Invalid from date: {}. Use YYYY-MM-DD format.", from_str)
-                })?;
-                let to = NaiveDate::parse_from_str(to_str, "%Y-%m-%d")
-                    .map_err(|_| anyhow!("Invalid to date: {}. Use YYYY-MM-DD format.", to_str))?;
-                Ok(reports::Period::Custom { from, to })
-            } else {
-                Err(anyhow!(
-                    "Invalid period '{}'. Use: MTD, QTD, YTD, 1Y, ALL, YYYY, or from:to (YYYY-MM-DD:YYYY-MM-DD)",
-                    period
-                ))
-            }
-        }
-    }
-}
-
-pub async fn dispatch_performance_show(
+async fn dispatch_performance_scoped(
     period_str: &str,
+    scope: Scope,
     options: options::OutputOptions,
 ) -> Result<()> {
     db::init_database(None)?;
@@ -63,7 +24,7 @@ pub async fn dispatch_performance_show(
         );
     }
 
-    let period = parse_period_string(period_str)?;
+    let period = reports::parse_period(period_str)?;
     // Determine period boundaries (used for price range limiting)
     let (period_start, period_end) =
         crate::reports::performance::get_period_dates(period.clone(), Some(&conn))?;
@@ -160,11 +121,79 @@ pub async fn dispatch_performance_show(
 
     let report = reports::calculate_performance(&mut conn, period)?;
 
+    // Scope the summary metrics to match the requested scope
+    let report = scope_performance_report(report, &scope);
+
     // Print performance output (JSON or table)
-    let output = formatters::performance::format(&report, options.clone())?;
+    let output = formatters::performance::format(&report, &scope, options.clone())?;
     options.writer().writeln(&output)?;
 
     Ok(())
+}
+
+/// Recompute summary-level metrics to reflect only the requested scope.
+///
+/// TWR is omitted (set to zero) for scoped views because proper time-weighted
+/// return requires scoped cash flows and sub-period snapshots.
+fn scope_performance_report(
+    mut report: crate::reports::performance::PerformanceReport,
+    scope: &Scope,
+) -> crate::reports::performance::PerformanceReport {
+    use rust_decimal::Decimal;
+
+    match scope {
+        Scope::Portfolio => report,
+        Scope::AssetType(at) => {
+            // Derive summary from the asset-type breakdown entry
+            if let Some(perf) = report.asset_breakdown.get(at) {
+                report.end_value = perf.market_value;
+                report.unrealized_gains = perf.unrealized_pl;
+                report.realized_gains = perf.realized_gains;
+                report.total_return = perf.unrealized_pl + perf.realized_gains;
+                report.start_value = perf.market_value - report.total_return;
+            } else {
+                report.start_value = Decimal::ZERO;
+                report.end_value = Decimal::ZERO;
+                report.total_return = Decimal::ZERO;
+                report.unrealized_gains = Decimal::ZERO;
+                report.realized_gains = Decimal::ZERO;
+            }
+            // TWR not meaningful without scoped cash flows
+            report.time_weighted_return = Decimal::ZERO;
+            report.cash_flows = None;
+            report
+        }
+        Scope::SingleAsset(ticker) => {
+            let upper = ticker.to_uppercase();
+            let matching: Vec<_> = report
+                .ticker_breakdown
+                .iter()
+                .filter(|t| t.ticker == upper)
+                .collect();
+
+            if let Some(tp) = matching.first() {
+                report.end_value = tp.market_value;
+                report.unrealized_gains = tp.unrealized_pl;
+                // Find realized gains from the asset's type breakdown
+                report.realized_gains = report
+                    .asset_breakdown
+                    .get(&tp.asset_type)
+                    .map(|_| Decimal::ZERO) // Per-ticker realized gains not tracked yet
+                    .unwrap_or(Decimal::ZERO);
+                report.total_return = tp.unrealized_pl + report.realized_gains;
+                report.start_value = tp.market_value - report.total_return;
+            } else {
+                report.start_value = Decimal::ZERO;
+                report.end_value = Decimal::ZERO;
+                report.total_return = Decimal::ZERO;
+                report.unrealized_gains = Decimal::ZERO;
+                report.realized_gains = Decimal::ZERO;
+            }
+            report.time_weighted_return = Decimal::ZERO;
+            report.cash_flows = None;
+            report
+        }
+    }
 }
 
 pub async fn dispatch_performance(
@@ -173,41 +202,20 @@ pub async fn dispatch_performance(
 ) -> Result<()> {
     match action {
         crate::cli::PerformanceCommands::Show { period } => {
-            dispatch_performance_show(period, options).await
+            let period_str = period.as_deref().unwrap_or("YTD");
+            dispatch_performance_scoped(period_str, Scope::Portfolio, options).await
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_period_mtd() {
-        let period = parse_period_string("MTD").unwrap();
-        assert!(matches!(period, reports::Period::Mtd));
-    }
-
-    #[test]
-    fn test_parse_period_ytd() {
-        let period = parse_period_string("ytd").unwrap();
-        assert!(matches!(period, reports::Period::Ytd));
-    }
-
-    #[test]
-    fn test_parse_period_custom() {
-        let period = parse_period_string("2024-01-01:2024-12-31").unwrap();
-        if let reports::Period::Custom { from, to } = period {
-            assert_eq!(from, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
-            assert_eq!(to, NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
-        } else {
-            panic!("Expected Custom period");
+        crate::cli::PerformanceCommands::Type { asset_type, period } => {
+            let at = asset_type
+                .parse::<db::AssetType>()
+                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
+            let period_str = period.as_deref().unwrap_or("YTD");
+            dispatch_performance_scoped(period_str, Scope::AssetType(at), options).await
         }
-    }
-
-    #[test]
-    fn test_parse_period_invalid() {
-        let result = parse_period_string("INVALID");
-        assert!(result.is_err());
+        crate::cli::PerformanceCommands::Asset { ticker, period } => {
+            let period_str = period.as_deref().unwrap_or("YTD");
+            dispatch_performance_scoped(period_str, Scope::SingleAsset(ticker.clone()), options)
+                .await
+        }
     }
 }
