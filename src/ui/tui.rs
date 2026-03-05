@@ -49,6 +49,12 @@ const COMMAND_PATTERNS: &[&[&str]] = &[
     &["income", "detail"],
     &["income", "summary"],
     &["income", "add"],
+    &["income", "yield"],
+    &["income", "trends"],
+    &["income", "forecast"],
+    &["income", "calendar"],
+    &["income", "alerts"],
+    &["income", "export"],
     &["assets", "show"],
     &["inspect"],
     // Import & sync

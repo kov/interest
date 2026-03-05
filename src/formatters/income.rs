@@ -519,6 +519,438 @@ fn build_income_add_document(
     }
 }
 
+//
+// 5. INCOME SUMMARY WITH CATEGORIES (--categorize / --tax-aware)
+//
+
+#[allow(clippy::too_many_arguments)]
+pub fn format_income_summary_monthly_with_categories(
+    year: i32,
+    monthly: &[IncomeTotals],
+    totals_by_type: &[(db::AssetType, Decimal)],
+    stats: IncomeSummaryStats,
+    totals: IncomeTotals,
+    baseline_total: Decimal,
+    exceptional_total: Decimal,
+    jcp_total: Decimal,
+    tax_aware: bool,
+    options: OutputOptions,
+) -> Result<String> {
+    let mut document = build_income_summary_document(
+        format!("Income Summary - {} (Monthly Breakdown)", year),
+        "Month",
+        monthly,
+        totals_by_type,
+        stats,
+        totals,
+    );
+    append_categorization_block(
+        &mut document,
+        baseline_total,
+        exceptional_total,
+        jcp_total,
+        tax_aware,
+    );
+    crate::formatters::render_document(&document, options)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn format_income_summary_yearly_with_categories(
+    yearly: &[IncomeTotals],
+    totals_by_type: &[(db::AssetType, Decimal)],
+    stats: IncomeSummaryStats,
+    totals: IncomeTotals,
+    baseline_total: Decimal,
+    exceptional_total: Decimal,
+    jcp_total: Decimal,
+    tax_aware: bool,
+    options: OutputOptions,
+) -> Result<String> {
+    let mut document = build_income_summary_document(
+        "Income Summary (Yearly Breakdown)".to_string(),
+        "Year",
+        yearly,
+        totals_by_type,
+        stats,
+        totals,
+    );
+    append_categorization_block(
+        &mut document,
+        baseline_total,
+        exceptional_total,
+        jcp_total,
+        tax_aware,
+    );
+    crate::formatters::render_document(&document, options)
+}
+
+fn append_categorization_block(
+    document: &mut OutputDocument,
+    baseline_total: Decimal,
+    exceptional_total: Decimal,
+    jcp_total: Decimal,
+    tax_aware: bool,
+) {
+    let grand_total = baseline_total + exceptional_total;
+    let mut cat_rows = vec![
+        KeyValueRow {
+            label: "Baseline Income".to_string(),
+            value: Value::Currency(baseline_total),
+        },
+        KeyValueRow {
+            label: "Exceptional Income".to_string(),
+            value: Value::Currency(exceptional_total),
+        },
+        KeyValueRow {
+            label: "Baseline %".to_string(),
+            value: if grand_total > Decimal::ZERO {
+                Value::Percent((baseline_total / grand_total) * Decimal::from(100))
+            } else {
+                Value::Percent(Decimal::ZERO)
+            },
+        },
+    ];
+    if tax_aware {
+        let jcp_tax_rate = Decimal::new(15, 2); // 0.15
+        let estimated_tax = jcp_total * jcp_tax_rate;
+        cat_rows.push(KeyValueRow {
+            label: "Est. JCP Withholding (15%)".to_string(),
+            value: Value::Currency(estimated_tax),
+        });
+    }
+    document.blocks.push(OutputBlock::KeyValue {
+        title: Some("Income Categorization".to_string()),
+        rows: cat_rows,
+    });
+}
+
+//
+// 6. ANALYTICS FORMATTERS
+//
+
+pub fn format_yield_report(
+    ltm_yield: &crate::reports::income_analytics::LtmYieldResult,
+    asset_yields: &[crate::reports::income_analytics::AssetYield],
+    options: OutputOptions,
+) -> Result<String> {
+    let mut blocks = vec![
+        OutputBlock::Header {
+            level: 1,
+            text: "Income Yield Analysis".to_string(),
+        },
+        OutputBlock::KeyValue {
+            title: Some("Portfolio LTM Yield".to_string()),
+            rows: vec![
+                KeyValueRow {
+                    label: "LTM Income".to_string(),
+                    value: Value::Currency(ltm_yield.total_ltm_income),
+                },
+                KeyValueRow {
+                    label: "Portfolio Value".to_string(),
+                    value: Value::Currency(ltm_yield.portfolio_value),
+                },
+                KeyValueRow {
+                    label: "Yield %".to_string(),
+                    value: Value::Percent(ltm_yield.yield_percentage),
+                },
+            ],
+        },
+    ];
+
+    if !asset_yields.is_empty() {
+        let rows = asset_yields
+            .iter()
+            .map(|ay| Row {
+                cells: vec![
+                    Value::Text(ay.ticker.clone()),
+                    Value::Text(ay.asset_type.as_str().to_string()),
+                    Value::Currency(ay.ltm_income),
+                    Value::Currency(ay.current_position_value),
+                    Value::Percent(ay.yield_percentage),
+                ],
+            })
+            .collect();
+
+        blocks.push(OutputBlock::Table {
+            title: Some("Per-Asset Yields".to_string()),
+            columns: vec![
+                ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+                ColumnDef::new("asset_type", "Type", ValueKind::Text),
+                ColumnDef::new("ltm_income", "LTM Income", ValueKind::Currency),
+                ColumnDef::new("value", "Value", ValueKind::Currency),
+                ColumnDef::new("yield_pct", "Yield%", ValueKind::Percent),
+            ],
+            rows,
+            footer: None,
+            options: TableOptions {
+                style: TableStyle::Rounded,
+            },
+        });
+    }
+
+    let document = OutputDocument {
+        title: None,
+        blocks,
+        meta: Default::default(),
+    };
+    crate::formatters::render_document(&document, options)
+}
+
+pub fn format_trends_report(
+    series: &crate::reports::income_analytics::MonthlyIncomeSeries,
+    trend: &crate::reports::income_analytics::TrendAnalysis,
+    months: i32,
+    options: OutputOptions,
+) -> Result<String> {
+    let mut blocks = vec![
+        OutputBlock::Header {
+            level: 1,
+            text: format!("Income Trends ({} months)", months),
+        },
+        OutputBlock::KeyValue {
+            title: Some("Trend Summary".to_string()),
+            rows: vec![
+                KeyValueRow {
+                    label: "Direction".to_string(),
+                    value: Value::Text(trend.trend_direction.as_str().to_string()),
+                },
+                KeyValueRow {
+                    label: "YoY Growth".to_string(),
+                    value: Value::Percent(trend.yoy_growth_percentage),
+                },
+                KeyValueRow {
+                    label: "Volatility".to_string(),
+                    value: Value::Percent(trend.volatility),
+                },
+                KeyValueRow {
+                    label: "Monthly Average".to_string(),
+                    value: Value::Currency(series.mean()),
+                },
+            ],
+        },
+    ];
+
+    if !series.months.is_empty() {
+        let rows = series
+            .months
+            .iter()
+            .zip(series.amounts.iter())
+            .map(|(month, amount)| Row {
+                cells: vec![
+                    Value::Text(month.format("%Y-%m").to_string()),
+                    Value::Currency(*amount),
+                ],
+            })
+            .collect();
+
+        blocks.push(OutputBlock::Table {
+            title: Some("Monthly Series".to_string()),
+            columns: vec![
+                ColumnDef::new("month", "Month", ValueKind::Text),
+                ColumnDef::new("income", "Income", ValueKind::Currency),
+            ],
+            rows,
+            footer: None,
+            options: TableOptions {
+                style: TableStyle::Rounded,
+            },
+        });
+    }
+
+    let document = OutputDocument {
+        title: None,
+        blocks,
+        meta: Default::default(),
+    };
+    crate::formatters::render_document(&document, options)
+}
+
+pub fn format_forecast_report(
+    forecasts: &[crate::reports::income_analytics::IncomeForecast],
+    forecast_year: i32,
+    conservative: bool,
+    options: OutputOptions,
+) -> Result<String> {
+    let total_expected: Decimal = forecasts.iter().map(|f| f.expected_annual_income).sum();
+    let total_lower: Decimal = forecasts.iter().map(|f| f.lower_bound).sum();
+    let total_upper: Decimal = forecasts.iter().map(|f| f.upper_bound).sum();
+
+    let rows = forecasts
+        .iter()
+        .map(|f| Row {
+            cells: vec![
+                Value::Text(f.ticker.clone()),
+                Value::Currency(f.expected_annual_income),
+                Value::Currency(f.lower_bound),
+                Value::Currency(f.upper_bound),
+                Value::Text(f.confidence.as_str().to_string()),
+                Value::Text(format!("{} mo", f.months_of_history)),
+            ],
+        })
+        .collect();
+
+    let mode = if conservative {
+        "Conservative"
+    } else {
+        "Standard"
+    };
+
+    let document = OutputDocument {
+        title: None,
+        blocks: vec![
+            OutputBlock::Header {
+                level: 1,
+                text: format!("Income Forecast - {} ({})", forecast_year, mode),
+            },
+            OutputBlock::Table {
+                title: Some("Per-Asset Forecasts".to_string()),
+                columns: vec![
+                    ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+                    ColumnDef::new("expected", "Expected", ValueKind::Currency),
+                    ColumnDef::new("lower", "Lower", ValueKind::Currency),
+                    ColumnDef::new("upper", "Upper", ValueKind::Currency),
+                    ColumnDef::new("confidence", "Confidence", ValueKind::Text),
+                    ColumnDef::new("history", "History", ValueKind::Text),
+                ],
+                rows,
+                footer: None,
+                options: TableOptions {
+                    style: TableStyle::Rounded,
+                },
+            },
+            OutputBlock::KeyValue {
+                title: Some("Portfolio Forecast".to_string()),
+                rows: vec![
+                    KeyValueRow {
+                        label: "Expected Total".to_string(),
+                        value: Value::Currency(total_expected),
+                    },
+                    KeyValueRow {
+                        label: "Range".to_string(),
+                        value: Value::Text(format!("{} - {}", total_lower, total_upper)),
+                    },
+                ],
+            },
+        ],
+        meta: Default::default(),
+    };
+    crate::formatters::render_document(&document, options)
+}
+
+pub fn format_calendar_report(
+    predictions: &[(
+        String,
+        chrono::NaiveDate,
+        Decimal,
+        crate::reports::income_analytics::ConfidenceLevel,
+    )],
+    options: OutputOptions,
+) -> Result<String> {
+    let rows = predictions
+        .iter()
+        .map(|(ticker, date, amount, confidence)| Row {
+            cells: vec![
+                Value::Date(*date),
+                Value::Text(ticker.clone()),
+                Value::Currency(*amount),
+                Value::Text(confidence.as_str().to_string()),
+            ],
+        })
+        .collect();
+
+    let document = OutputDocument {
+        title: None,
+        blocks: vec![
+            OutputBlock::Header {
+                level: 1,
+                text: "Predicted Payment Calendar".to_string(),
+            },
+            OutputBlock::Table {
+                title: None,
+                columns: vec![
+                    ColumnDef::new("date", "Expected Date", ValueKind::Date),
+                    ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+                    ColumnDef::new("amount", "Est. Amount", ValueKind::Currency),
+                    ColumnDef::new("confidence", "Confidence", ValueKind::Text),
+                ],
+                rows,
+                footer: None,
+                options: TableOptions {
+                    style: TableStyle::Rounded,
+                },
+            },
+        ],
+        meta: Default::default(),
+    };
+    crate::formatters::render_document(&document, options)
+}
+
+pub fn format_alerts_report(
+    anomalies: &[crate::reports::income_analytics::IncomeAnomaly],
+    options: OutputOptions,
+) -> Result<String> {
+    if anomalies.is_empty() {
+        let document = OutputDocument {
+            title: None,
+            blocks: vec![
+                OutputBlock::Header {
+                    level: 1,
+                    text: "Income Alerts".to_string(),
+                },
+                OutputBlock::EmptyState {
+                    message: "No income anomalies detected.".to_string(),
+                    hint: None,
+                },
+            ],
+            meta: Default::default(),
+        };
+        return crate::formatters::render_document(&document, options);
+    }
+
+    let rows = anomalies
+        .iter()
+        .map(|a| {
+            let type_str = match a.anomaly_type {
+                crate::reports::income_analytics::AnomalyType::MissedPayment => "Missed Payment",
+                crate::reports::income_analytics::AnomalyType::UnusualAmount => "Unusual Amount",
+                crate::reports::income_analytics::AnomalyType::IncomeDrop => "Income Drop",
+            };
+            Row {
+                cells: vec![
+                    Value::Text(type_str.to_string()),
+                    Value::Text(a.ticker.clone()),
+                    Value::Text(a.description.clone()),
+                ],
+            }
+        })
+        .collect();
+
+    let document = OutputDocument {
+        title: None,
+        blocks: vec![
+            OutputBlock::Header {
+                level: 1,
+                text: "Income Alerts".to_string(),
+            },
+            OutputBlock::Table {
+                title: None,
+                columns: vec![
+                    ColumnDef::new("type", "Alert Type", ValueKind::Text),
+                    ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+                    ColumnDef::new("description", "Description", ValueKind::Text),
+                ],
+                rows,
+                footer: None,
+                options: TableOptions {
+                    style: TableStyle::Rounded,
+                },
+            },
+        ],
+        meta: Default::default(),
+    };
+    crate::formatters::render_document(&document, options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

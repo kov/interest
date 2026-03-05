@@ -102,8 +102,12 @@ pub enum IncomeAction {
         year: Option<i32>,
         asset: Option<String>,
     },
-    /// Show income summary: `income summary [year]`
-    Summary { year: Option<i32> },
+    /// Show income summary: `income summary [year] [--categorize] [--tax-aware]`
+    Summary {
+        year: Option<i32>,
+        categorize: bool,
+        tax_aware: bool,
+    },
     /// Add an income event
     Add {
         ticker: String,
@@ -114,6 +118,29 @@ pub enum IncomeAction {
         withholding: String,
         amount_per_quota: String,
         notes: Option<String>,
+    },
+    /// Yield analysis: `income yield [TICKER] [--asset-type Y]`
+    Yield {
+        ticker: Option<String>,
+        asset_type: Option<String>,
+        period: String,
+    },
+    /// Trend analysis: `income trends [TICKER] [--months N]`
+    Trends { ticker: Option<String>, months: i32 },
+    /// Forecast: `income forecast [year] [--conservative]`
+    Forecast {
+        year: Option<i32>,
+        conservative: bool,
+    },
+    /// Calendar: `income calendar [--month MM/YYYY]`
+    Calendar { month: Option<String> },
+    /// Alerts: `income alerts`
+    Alerts,
+    /// Export: `income export <year> [--format csv|xlsx] [--output path]`
+    Export {
+        year: i32,
+        format: String,
+        output: Option<String>,
     },
 }
 
@@ -658,7 +685,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
             let action = parts
                 .next()
                 .ok_or_else(|| CommandParseError {
-                    message: "income requires action (show, detail, summary). Usage: income show [year], income detail [year] [--asset <ticker>], or income summary <year>"
+                    message: "income requires action (show, detail, summary, yield, trends, forecast, calendar, alerts, export). Usage: income show [year], income summary <year>, income yield, etc."
                         .to_string(),
                 })?
                 .to_lowercase();
@@ -764,15 +791,159 @@ pub fn parse_command(input: &str) -> Result<Command, CommandParseError> {
                     })
                 }
                 "summary" => {
-                    // income summary [year] - monthly breakdown if year, yearly summary otherwise
-                    let year = parts.next().and_then(|y| y.parse::<i32>().ok());
+                    // income summary [year] [--categorize] [--tax-aware]
+                    let collected: Vec<_> = parts.collect();
+                    let mut year: Option<i32> = None;
+                    let mut categorize = false;
+                    let mut tax_aware = false;
+                    for token in &collected {
+                        match token.as_str() {
+                            "--categorize" => categorize = true,
+                            "--tax-aware" => tax_aware = true,
+                            _ => {
+                                if year.is_none() {
+                                    if let Ok(y) = token.parse::<i32>() {
+                                        year = Some(y);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Ok(Command::Income {
-                        action: IncomeAction::Summary { year },
+                        action: IncomeAction::Summary {
+                            year,
+                            categorize,
+                            tax_aware,
+                        },
+                    })
+                }
+                "yield" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut ticker: Option<String> = None;
+                    let mut asset_type: Option<String> = None;
+                    let mut period = "LTM".to_string();
+                    let mut i = 0;
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--asset-type" if i + 1 < collected.len() => {
+                                asset_type = Some(collected[i + 1].to_uppercase());
+                                i += 2;
+                            }
+                            "--period" if i + 1 < collected.len() => {
+                                period = collected[i + 1].to_string();
+                                i += 2;
+                            }
+                            s if !s.starts_with('-') && ticker.is_none() => {
+                                ticker = Some(s.to_uppercase());
+                                i += 1;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    Ok(Command::Income {
+                        action: IncomeAction::Yield {
+                            ticker,
+                            asset_type,
+                            period,
+                        },
+                    })
+                }
+                "trends" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut ticker: Option<String> = None;
+                    let mut months = 36;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--months" if i + 1 < collected.len() => {
+                                months = collected[i + 1].parse().unwrap_or(36);
+                                i += 2;
+                            }
+                            s if !s.starts_with('-') && ticker.is_none() => {
+                                ticker = Some(s.to_uppercase());
+                                i += 1;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    Ok(Command::Income {
+                        action: IncomeAction::Trends { ticker, months },
+                    })
+                }
+                "forecast" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut year: Option<i32> = None;
+                    let mut conservative = false;
+                    for token in &collected {
+                        match token.as_str() {
+                            "--conservative" => conservative = true,
+                            _ => {
+                                if year.is_none() {
+                                    if let Ok(y) = token.parse::<i32>() {
+                                        year = Some(y);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(Command::Income {
+                        action: IncomeAction::Forecast { year, conservative },
+                    })
+                }
+                "calendar" => {
+                    let collected: Vec<_> = parts.collect();
+                    let mut month: Option<String> = None;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        if collected[i] == "--month" && i + 1 < collected.len() {
+                            month = Some(collected[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    Ok(Command::Income {
+                        action: IncomeAction::Calendar { month },
+                    })
+                }
+                "alerts" => Ok(Command::Income {
+                    action: IncomeAction::Alerts,
+                }),
+                "export" => {
+                    let year_str = parts.next().ok_or_else(|| CommandParseError {
+                        message: "income export requires a year. Usage: income export <year> [--format csv|xlsx] [--output path]".to_string(),
+                    })?;
+                    let year: i32 = year_str.parse().map_err(|_| CommandParseError {
+                        message: format!("Invalid year: {}", year_str),
+                    })?;
+                    let collected: Vec<_> = parts.collect();
+                    let mut format = "xlsx".to_string();
+                    let mut output: Option<String> = None;
+                    let mut i = 0;
+                    while i < collected.len() {
+                        match collected[i].as_str() {
+                            "--format" if i + 1 < collected.len() => {
+                                format = collected[i + 1].to_lowercase();
+                                i += 2;
+                            }
+                            "--output" | "-o" if i + 1 < collected.len() => {
+                                output = Some(collected[i + 1].to_string());
+                                i += 2;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    Ok(Command::Income {
+                        action: IncomeAction::Export {
+                            year,
+                            format,
+                            output,
+                        },
                     })
                 }
                 _ => Err(CommandParseError {
                     message: format!(
-                        "Unknown income action: {}. Use: show, add, detail, or summary",
+                        "Unknown income action: {}. Use: show, add, detail, summary, yield, trends, forecast, calendar, alerts, or export",
                         action
                     ),
                 }),
@@ -2032,7 +2203,11 @@ mod tests {
         assert_eq!(
             cmd,
             Command::Income {
-                action: IncomeAction::Summary { year: Some(2025) }
+                action: IncomeAction::Summary {
+                    year: Some(2025),
+                    categorize: false,
+                    tax_aware: false,
+                }
             }
         );
     }
@@ -2043,7 +2218,11 @@ mod tests {
         assert_eq!(
             cmd,
             Command::Income {
-                action: IncomeAction::Summary { year: None }
+                action: IncomeAction::Summary {
+                    year: None,
+                    categorize: false,
+                    tax_aware: false,
+                }
             }
         );
     }

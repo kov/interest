@@ -20,6 +20,9 @@ pub struct PositionSummary {
     pub current_value: Option<Decimal>,
     pub unrealized_pl: Option<Decimal>,
     pub unrealized_pl_pct: Option<Decimal>,
+    pub ltm_income: Decimal,
+    pub ltm_yield_pct: Option<Decimal>,
+    pub ltm_yield_on_cost_pct: Option<Decimal>,
 }
 
 /// Complete portfolio report
@@ -346,6 +349,9 @@ fn calculate_portfolio_with_cutoff(
             current_value,
             unrealized_pl,
             unrealized_pl_pct,
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         });
     }
 
@@ -356,8 +362,9 @@ fn calculate_portfolio_with_cutoff(
         b_val.cmp(&a_val)
     });
 
-    let (positions, total_cost, total_value) =
+    let (mut positions, total_cost, total_value) =
         normalize_positions_with_prices(conn, as_of, positions)?;
+    apply_ltm_income(conn, as_of, &mut positions);
     let total_pl = total_value - total_cost;
     let total_pl_pct = if total_cost > Decimal::ZERO {
         (total_pl / total_cost) * Decimal::from(100)
@@ -372,6 +379,32 @@ fn calculate_portfolio_with_cutoff(
         total_pl,
         total_pl_pct,
     })
+}
+
+/// Enrich positions with LTM income data
+fn apply_ltm_income(conn: &Connection, as_of: NaiveDate, positions: &mut [PositionSummary]) {
+    let one_year_ago = as_of - chrono::Duration::days(365);
+    let totals = match crate::db::get_income_totals_by_asset(conn, one_year_ago, as_of) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    for position in positions.iter_mut() {
+        if let Some(asset_id) = position.asset.id {
+            if let Some(&income) = totals.get(&asset_id) {
+                position.ltm_income = income;
+                if let Some(value) = position.current_value {
+                    if value > Decimal::ZERO {
+                        position.ltm_yield_pct = Some((income / value) * Decimal::from(100));
+                    }
+                }
+                if position.total_cost > Decimal::ZERO {
+                    position.ltm_yield_on_cost_pct =
+                        Some((income / position.total_cost) * Decimal::from(100));
+                }
+            }
+        }
+    }
 }
 
 fn map_transaction(row: &rusqlite::Row) -> Result<Transaction, rusqlite::Error> {
@@ -750,8 +783,13 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
             current_value: Some(market_value),
             unrealized_pl: Some(unrealized_pl),
             unrealized_pl_pct: Some(unrealized_pl_pct),
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         });
     }
+
+    apply_ltm_income(conn, date, &mut positions);
 
     let total_pl = total_value - total_cost;
     let total_pl_pct = if total_cost > Decimal::ZERO {

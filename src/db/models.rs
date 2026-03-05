@@ -406,7 +406,7 @@ pub struct Position {
 }
 
 /// Income event type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum IncomeEventType {
     Dividend,     // Regular dividend (rendimento)
     Amortization, // Capital return (amortização)

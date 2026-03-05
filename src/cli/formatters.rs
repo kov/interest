@@ -351,6 +351,9 @@ mod tests {
             current_value: Some(current_value),
             unrealized_pl: Some(unrealized_pl),
             unrealized_pl_pct,
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         }
     }
 
