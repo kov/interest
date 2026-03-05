@@ -567,28 +567,6 @@ fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlit
     ))
 }
 
-/// Calculate asset allocation breakdown
-pub fn calculate_allocation(report: &PortfolioReport) -> HashMap<AssetType, (Decimal, Decimal)> {
-    let mut allocation: HashMap<AssetType, (Decimal, Decimal)> = HashMap::new();
-
-    for position in &report.positions {
-        let value = position.current_value.unwrap_or(position.total_cost);
-        let entry = allocation
-            .entry(position.asset.asset_type)
-            .or_insert((Decimal::ZERO, Decimal::ZERO));
-        entry.0 += value;
-    }
-
-    // Calculate percentages
-    if report.total_value > Decimal::ZERO {
-        for (_asset_type, (value, pct)) in allocation.iter_mut() {
-            *pct = (*value / report.total_value) * Decimal::from(100);
-        }
-    }
-
-    allocation
-}
-
 /// Compute a fingerprint for all transactions up to and including a date.
 /// Includes corporate actions to detect when adjustments change.
 pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) -> Result<String> {

@@ -19,7 +19,7 @@ mod terms;
 mod tickers;
 mod transactions;
 use crate::utils::format_currency;
-use crate::{db, formatters, options, tax};
+use crate::{db, formatters, options, output::OutputDocument, tax};
 use anyhow::Result;
 use colored::Colorize;
 use std::io::IsTerminal;
@@ -102,8 +102,31 @@ async fn dispatch_income(
     options: options::OutputOptions,
 ) -> Result<()> {
     match action {
-        crate::cli::IncomeCommands::Show { year } => dispatch_income_show(*year, options).await,
+        crate::cli::IncomeCommands::Show { period } => {
+            let (from_date, to_date, year_val) = resolve_income_period(period.as_deref())?;
+            dispatch_income_show_impl(from_date, to_date, year_val, None, options).await
+        }
+        crate::cli::IncomeCommands::Type { asset_type, period } => {
+            // Validate asset type
+            let at = asset_type
+                .parse::<db::AssetType>()
+                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
+            let (from_date, to_date, year_val) = resolve_income_period(period.as_deref())?;
+            dispatch_income_show_impl(from_date, to_date, year_val, Some(at), options).await
+        }
+        crate::cli::IncomeCommands::Asset { ticker, period } => {
+            let (from_date, to_date, _year_val) = resolve_income_period(period.as_deref())?;
+            // Delegate to detail view filtered by ticker
+            dispatch_income_detail_impl(
+                Some(from_date),
+                Some(to_date),
+                Some(ticker.as_str()),
+                options,
+            )
+            .await
+        }
         crate::cli::IncomeCommands::Detail { year, asset } => {
+            // Legacy: kept for backward compatibility
             dispatch_income_detail(*year, asset.as_deref(), options).await
         }
         crate::cli::IncomeCommands::Summary { year } => {
@@ -133,6 +156,20 @@ async fn dispatch_income(
             .await
         }
     }
+}
+
+/// Resolve income period string to date range and display year.
+/// Default: YTD.
+fn resolve_income_period(
+    period: Option<&str>,
+) -> Result<(chrono::NaiveDate, chrono::NaiveDate, i32)> {
+    use chrono::Datelike;
+
+    let period_str = period.unwrap_or("YTD");
+    let parsed = crate::reports::parse_period(period_str)?;
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(parsed, None)?;
+    let year_val = to_date.year();
+    Ok((from_date, to_date, year_val))
 }
 
 async fn dispatch_tax_report(
@@ -197,9 +234,14 @@ async fn dispatch_tax_summary(year: i32, options: options::OutputOptions) -> Res
     Ok(())
 }
 
-/// Show income summary by asset, grouped by asset type
-async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions) -> Result<()> {
-    use chrono::Datelike;
+/// Show income summary by asset, grouped by asset type (new implementation with date range and optional type filter)
+async fn dispatch_income_show_impl(
+    from_date: chrono::NaiveDate,
+    to_date: chrono::NaiveDate,
+    year_val: i32,
+    asset_type_filter: Option<db::AssetType>,
+    options: options::OutputOptions,
+) -> Result<()> {
     use rust_decimal::Decimal;
     use std::collections::HashMap;
 
@@ -208,32 +250,57 @@ async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions
     db::init_database(None)?;
     let conn = db::open_db(None)?;
 
-    let today = chrono::Local::now().date_naive();
-    let (from_date, to_date, year_val) = match year {
-        Some(y) => {
-            let from = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
-            let to = chrono::NaiveDate::from_ymd_opt(y, 12, 31).unwrap();
-            (Some(from), Some(to), y)
-        }
-        None => {
-            let y = today.year();
-            let from = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
-            (Some(from), Some(today), y)
-        }
-    };
-
-    let events = db::get_income_events_with_assets(&conn, from_date, to_date, None)?;
+    let events = db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
     if events.is_empty() {
-        options.writer().writeln(&format!(
-            "\n{} No income events found for {}.\n",
-            "ℹ".blue().bold(),
-            year_val
-        ))?;
+        if options.is_json() {
+            let output = formatters::render_document(&OutputDocument::default(), options.clone())?;
+            options.writer().writeln(&output)?;
+        } else {
+            options.writer().writeln(&format!(
+                "\n{} No income events found for {}.\n",
+                "ℹ".blue().bold(),
+                year_val
+            ))?;
+        }
         return Ok(());
     }
 
+    // Filter events by asset type if scope is limited
+    let filtered_events: Vec<_> = if let Some(ref at_filter) = asset_type_filter {
+        events
+            .iter()
+            .filter(|(_, asset)| asset.asset_type == *at_filter)
+            .collect()
+    } else {
+        events.iter().collect()
+    };
+
+    if filtered_events.is_empty() {
+        if options.is_json() {
+            let output = formatters::render_document(&OutputDocument::default(), options.clone())?;
+            options.writer().writeln(&output)?;
+        } else {
+            options.writer().writeln(&format!(
+                "\n{} No income events found for {}.\n",
+                "ℹ".blue().bold(),
+                year_val
+            ))?;
+        }
+        return Ok(());
+    }
+
+    // Look up cost basis from current portfolio for yield% calculation
+    let cost_by_ticker: HashMap<String, Decimal> = {
+        let report = crate::reports::calculate_portfolio(&conn, None)?;
+        report
+            .positions
+            .iter()
+            .map(|p| (p.asset.ticker.clone(), p.total_cost))
+            .collect()
+    };
+
     let mut by_ticker: HashMap<String, formatters::income::AssetIncome> = HashMap::new();
-    for (event, asset) in &events {
+    for (event, asset) in &filtered_events {
         let entry =
             by_ticker
                 .entry(asset.ticker.clone())
@@ -243,6 +310,7 @@ async fn dispatch_income_show(year: Option<i32>, options: options::OutputOptions
                     dividends: Decimal::ZERO,
                     jcp: Decimal::ZERO,
                     amortization: Decimal::ZERO,
+                    cost_basis: cost_by_ticker.get(&asset.ticker).copied(),
                 });
 
         match event.event_type {
@@ -337,20 +405,69 @@ async fn dispatch_income_detail(
     let events = db::get_income_events_with_assets(&conn, from_date, to_date, asset)?;
 
     if events.is_empty() {
-        let year_str = year
-            .map(|y| y.to_string())
-            .unwrap_or_else(|| today.year().to_string());
-        let asset_str = asset.map(|a| format!(" for {}", a)).unwrap_or_default();
-        options.writer().writeln(&format!(
-            "\n{} No income events found for {}{}.\n",
-            "ℹ".blue().bold(),
-            year_str,
-            asset_str
-        ))?;
+        if options.is_json() {
+            let output = formatters::render_document(&OutputDocument::default(), options.clone())?;
+            options.writer().writeln(&output)?;
+        } else {
+            let year_str = year
+                .map(|y| y.to_string())
+                .unwrap_or_else(|| today.year().to_string());
+            let asset_str = asset.map(|a| format!(" for {}", a)).unwrap_or_default();
+            options.writer().writeln(&format!(
+                "\n{} No income events found for {}{}.\n",
+                "ℹ".blue().bold(),
+                year_str,
+                asset_str
+            ))?;
+        }
         return Ok(());
     }
 
     let year_val = year.unwrap_or_else(|| today.year());
+    let output = if options.is_json() {
+        formatters::income::format_income_detail_json(&events, options.clone())?
+    } else {
+        formatters::income::format_income_detail_table(&events, year_val, options.clone())?
+    };
+    options.writer().writeln(&output)?;
+
+    Ok(())
+}
+
+/// Show detailed income events with explicit date range (used by `income asset`)
+async fn dispatch_income_detail_impl(
+    from_date: Option<chrono::NaiveDate>,
+    to_date: Option<chrono::NaiveDate>,
+    asset: Option<&str>,
+    options: options::OutputOptions,
+) -> Result<()> {
+    use chrono::Datelike;
+
+    info!("Showing income events detail");
+
+    db::init_database(None)?;
+    let conn = db::open_db(None)?;
+
+    let events = db::get_income_events_with_assets(&conn, from_date, to_date, asset)?;
+
+    if events.is_empty() {
+        if options.is_json() {
+            let output = formatters::render_document(&OutputDocument::default(), options.clone())?;
+            options.writer().writeln(&output)?;
+        } else {
+            let asset_str = asset.map(|a| format!(" for {}", a)).unwrap_or_default();
+            options.writer().writeln(&format!(
+                "\n{} No income events found{}.\n",
+                "ℹ".blue().bold(),
+                asset_str
+            ))?;
+        }
+        return Ok(());
+    }
+
+    let year_val = to_date
+        .map(|d| d.year())
+        .unwrap_or_else(|| chrono::Local::now().date_naive().year());
     let output = if options.is_json() {
         formatters::income::format_income_detail_json(&events, options.clone())?
     } else {
@@ -384,11 +501,17 @@ pub async fn dispatch_income_summary(
                 db::get_income_events_with_assets(&conn, Some(from_date), Some(to_date), None)?;
 
             if events.is_empty() {
-                options.writer().writeln(&format!(
-                    "\n{} No income events found for {}.\n",
-                    "ℹ".blue().bold(),
-                    y
-                ))?;
+                if options.is_json() {
+                    let output =
+                        formatters::render_document(&OutputDocument::default(), options.clone())?;
+                    options.writer().writeln(&output)?;
+                } else {
+                    options.writer().writeln(&format!(
+                        "\n{} No income events found for {}.\n",
+                        "ℹ".blue().bold(),
+                        y
+                    ))?;
+                }
                 return Ok(());
             }
 
@@ -474,10 +597,16 @@ pub async fn dispatch_income_summary(
             let events = db::get_income_events_with_assets(&conn, None, None, None)?;
 
             if events.is_empty() {
-                options.writer().writeln(&format!(
-                    "\n{} No income events found.\n",
-                    "ℹ".blue().bold()
-                ))?;
+                if options.is_json() {
+                    let output =
+                        formatters::render_document(&OutputDocument::default(), options.clone())?;
+                    options.writer().writeln(&output)?;
+                } else {
+                    options.writer().writeln(&format!(
+                        "\n{} No income events found.\n",
+                        "ℹ".blue().bold()
+                    ))?;
+                }
                 return Ok(());
             }
 

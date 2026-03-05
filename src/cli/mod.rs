@@ -190,13 +190,34 @@ pub enum PrivacyToggle {
 pub enum PortfolioCommands {
     /// Show current portfolio with P&L
     Show {
-        /// Filter by asset type (STOCK, FII, FIAGRO, FI_INFRA)
-        #[arg(short, long)]
+        /// Period or date (optional, default: today). Named: MTD, QTD, YTD, 1Y, ALL. Year: YYYY. Range: from:to. Date: YYYY-MM-DD.
+        period: Option<String>,
+
+        /// Filter by asset type (deprecated: use `portfolio type` instead)
+        #[arg(short, long, hide = true)]
         asset_type: Option<String>,
 
-        /// Show portfolio as of this date (YYYY-MM-DD, YYYY-MM, or YYYY)
-        #[arg(long)]
+        /// Show portfolio as of this date (deprecated: use period positional instead)
+        #[arg(long, hide = true)]
         at: Option<String>,
+    },
+
+    /// Filter portfolio by asset type
+    Type {
+        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        asset_type: String,
+
+        /// Period or date (optional, default: today)
+        period: Option<String>,
+    },
+
+    /// Show single asset detail
+    Asset {
+        /// Ticker symbol (e.g., PETR4)
+        ticker: String,
+
+        /// Period or date (optional, default: today)
+        period: Option<String>,
     },
 }
 
@@ -272,10 +293,28 @@ pub enum TaxCommands {
 
 #[derive(Subcommand)]
 pub enum PerformanceCommands {
-    /// Show performance report for a period
+    /// Show portfolio performance report
     Show {
-        /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
-        period: String,
+        /// Period (optional, default: YTD). Named: MTD, QTD, YTD, 1Y, ALL. Year: YYYY. Range: from:to.
+        period: Option<String>,
+    },
+
+    /// Show performance filtered by asset type
+    Type {
+        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        asset_type: String,
+
+        /// Period (optional, default: YTD)
+        period: Option<String>,
+    },
+
+    /// Show single asset performance
+    Asset {
+        /// Ticker symbol (e.g., PETR4)
+        ticker: String,
+
+        /// Period (optional, default: YTD)
+        period: Option<String>,
     },
 }
 
@@ -283,12 +322,31 @@ pub enum PerformanceCommands {
 pub enum CashFlowCommands {
     /// Show cash flow summary
     Show {
-        /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
+        /// Period (optional, default: ALL). Named: MTD, QTD, YTD, 1Y, ALL. Year: YYYY. Range: from:to.
         period: Option<String>,
     },
+
+    /// Show cash flow filtered by asset type
+    Type {
+        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        asset_type: String,
+
+        /// Period (optional, default: ALL)
+        period: Option<String>,
+    },
+
+    /// Show single asset cash flow
+    Asset {
+        /// Ticker symbol (e.g., PETR4)
+        ticker: String,
+
+        /// Period (optional, default: ALL)
+        period: Option<String>,
+    },
+
     /// Show cash flow statistics
     Stats {
-        /// Period: MTD, QTD, YTD, 1Y, ALL, YYYY (e.g., 2025), or from:to (YYYY-MM-DD:YYYY-MM-DD)
+        /// Period (optional, default: ALL)
         period: Option<String>,
     },
 }
@@ -297,8 +355,26 @@ pub enum CashFlowCommands {
 pub enum IncomeCommands {
     /// Show income summary by asset, grouped by asset type
     Show {
-        /// Year to filter (optional, defaults to current year)
-        year: Option<i32>,
+        /// Period (optional, default: YTD). Named: MTD, QTD, YTD, 1Y, ALL. Year: YYYY. Range: from:to.
+        period: Option<String>,
+    },
+
+    /// Show income filtered by asset type
+    Type {
+        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        asset_type: String,
+
+        /// Period (optional, default: YTD)
+        period: Option<String>,
+    },
+
+    /// Show income events for a single asset
+    Asset {
+        /// Ticker symbol (e.g., PETR4)
+        ticker: String,
+
+        /// Period (optional, default: YTD)
+        period: Option<String>,
     },
 
     /// Manually add an income event
@@ -332,7 +408,8 @@ pub enum IncomeCommands {
         notes: Option<String>,
     },
 
-    /// Show detailed income events
+    /// Show detailed income events (deprecated: use `income asset` instead)
+    #[command(hide = true)]
     Detail {
         /// Year to filter (optional, defaults to current year)
         year: Option<i32>,

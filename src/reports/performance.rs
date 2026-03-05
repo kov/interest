@@ -8,6 +8,7 @@ use crate::db::{self, AssetType, Transaction, TransactionType};
 use crate::reports::aggregation::{
     aggregate_positions_by_asset_type, normalize_positions_with_prices, AssetTypeTotals,
 };
+use crate::reports::period::Period;
 use crate::reports::portfolio::{
     calculate_portfolio_at_date, get_valid_snapshot, save_portfolio_snapshot, PortfolioReport,
 };
@@ -26,7 +27,19 @@ pub struct PerformanceReport {
     pub realized_gains: Decimal,       // Placeholder (0 until realized_gains populated)
     pub unrealized_gains: Decimal,     // From snapshot end unrealized sum
     pub asset_breakdown: HashMap<AssetType, AssetPerformance>,
+    pub ticker_breakdown: Vec<TickerPerformance>,
     pub cash_flows: Option<CashFlowSummary>, // Cash flow summary if available
+}
+
+/// Per-ticker performance data, derived from end-of-period portfolio positions.
+#[derive(Debug, Clone)]
+pub struct TickerPerformance {
+    pub ticker: String,
+    pub asset_type: AssetType,
+    pub cost_basis: Decimal,
+    pub market_value: Decimal,
+    pub unrealized_pl: Decimal,
+    pub return_pct: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -40,16 +53,6 @@ pub struct AssetPerformance {
     #[allow(dead_code)] // Kept for future detailed performance breakdown
     pub contribution_to_total: Decimal, // Percentage points
     pub realized_gains: Decimal,
-}
-
-#[derive(Debug, Clone)]
-pub enum Period {
-    Mtd,     // Month-to-date
-    Qtd,     // Quarter-to-date
-    Ytd,     // Year-to-date
-    OneYear, // Last 365 days
-    AllTime, // Since first transaction
-    Custom { from: NaiveDate, to: NaiveDate },
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +216,28 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
     let totals_by_type = aggregate_positions_by_asset_type(&end_snapshot.positions);
     let breakdown = build_asset_breakdown(&totals_by_type, &realized_by_type)?;
 
+    let ticker_breakdown = end_snapshot
+        .positions
+        .iter()
+        .map(|p| {
+            let market_value = p.current_value.unwrap_or(p.total_cost);
+            let unrealized_pl = p.unrealized_pl.unwrap_or(Decimal::ZERO);
+            let return_pct = if p.total_cost > Decimal::ZERO {
+                (unrealized_pl / p.total_cost) * Decimal::from(100)
+            } else {
+                Decimal::ZERO
+            };
+            TickerPerformance {
+                ticker: p.asset.ticker.clone(),
+                asset_type: p.asset.asset_type,
+                cost_basis: p.total_cost,
+                market_value,
+                unrealized_pl,
+                return_pct,
+            }
+        })
+        .collect();
+
     Ok(PerformanceReport {
         period,
         start_date,
@@ -224,6 +249,7 @@ pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<Pe
         realized_gains,
         unrealized_gains: unrealized_sum,
         asset_breakdown: breakdown,
+        ticker_breakdown,
         cash_flows: cash_flow_summary,
     })
 }

@@ -66,24 +66,34 @@ pub struct YearlyChange {
 #[derive(Debug, Clone)]
 pub struct CashFlowEntry {
     pub date: NaiveDate,
+    pub ticker: String,
     pub asset_type: AssetType,
     pub money_in: Decimal,
     pub money_out_sells: Decimal,
     pub money_out_income: Decimal,
 }
 
+#[cfg(test)]
 pub fn calculate_cash_flow_report(
     conn: &rusqlite::Connection,
     from_date: NaiveDate,
     to_date: NaiveDate,
 ) -> Result<CashFlowReport> {
     let entries = cash_flow_entries(conn, from_date, to_date)?;
+    Ok(build_report_from_entries(&entries, from_date, to_date))
+}
 
+/// Build a CashFlowReport from pre-filtered entries.
+pub fn build_report_from_entries(
+    entries: &[CashFlowEntry],
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> CashFlowReport {
     let mut years_map: HashMap<i32, HashMap<AssetType, AssetTypeCashFlow>> = HashMap::new();
     let mut total_in = Decimal::ZERO;
     let mut total_out = Decimal::ZERO;
 
-    for entry in &entries {
+    for entry in entries {
         let year = entry.date.year();
         let asset_map = years_map.entry(year).or_default();
         let bucket = asset_map
@@ -114,14 +124,14 @@ pub fn calculate_cash_flow_report(
 
     years.sort_by_key(|y| y.year);
 
-    Ok(CashFlowReport {
+    CashFlowReport {
         from_date,
         to_date,
         years,
         total_in,
         total_out,
         net_flow: total_in - total_out,
-    })
+    }
 }
 
 pub fn calculate_cash_flow_stats(
@@ -271,7 +281,8 @@ pub fn cash_flow_entries(
                 t.quantity,
                 t.price_per_unit,
                 t.fees,
-                a.asset_type
+                a.asset_type,
+                a.ticker
          FROM transactions t
          JOIN assets a ON t.asset_id = a.id
          WHERE COALESCE(t.settlement_date, t.trade_date) >= ?1
@@ -288,6 +299,7 @@ pub fn cash_flow_entries(
         let price = db::get_decimal_value(row, 3)?;
         let fees = db::get_optional_decimal_value(row, 4)?.unwrap_or(Decimal::ZERO);
         let asset_type_str: String = row.get(5)?;
+        let ticker: String = row.get(6)?;
 
         let tx_type = tx_type_str
             .parse::<TransactionType>()
@@ -309,6 +321,7 @@ pub fn cash_flow_entries(
 
         Ok(CashFlowEntry {
             date,
+            ticker,
             asset_type,
             money_in,
             money_out_sells,
@@ -328,6 +341,7 @@ pub fn cash_flow_entries(
 
         entries.push(CashFlowEntry {
             date: event.event_date,
+            ticker: asset.ticker.clone(),
             asset_type: asset.asset_type,
             money_in: Decimal::ZERO,
             money_out_sells: Decimal::ZERO,

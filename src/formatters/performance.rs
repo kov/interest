@@ -5,32 +5,22 @@ use crate::output::{
     ColumnDef, KeyValueRow, OutputBlock, OutputDocument, Row, TableOptions, Value, ValueKind,
 };
 use crate::reports::performance::PerformanceReport;
+use crate::reports::scope::Scope;
 use anyhow::Result;
 use rust_decimal::Decimal;
 
-/// Format performance report (testable, no I/O)
-///
-/// This is the main formatting entry point that dispatches to the appropriate
-/// formatter based on output mode.
-///
-/// # Arguments
-///
-/// * `report` - The performance report to format
-/// * `mode` - Output format (Table or Json)
-///
-/// # Example
-///
-/// ```ignore
-/// let mode = OutputMode::from_json_flag(json_output);
-/// let output = formatters::performance::format(&report, mode)?;
-/// println!("{}", output);
-/// ```
-pub fn format(report: &PerformanceReport, options: OutputOptions) -> Result<String> {
-    let document = build_performance_document(report);
+/// Format performance report with scope filtering (testable, no I/O)
+pub fn format(report: &PerformanceReport, scope: &Scope, options: OutputOptions) -> Result<String> {
+    let document = build_performance_document(report, scope);
     crate::formatters::render_document(&document, options)
 }
 
-fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
+#[cfg(test)]
+pub fn format_unscoped(report: &PerformanceReport, options: OutputOptions) -> Result<String> {
+    format(report, &Scope::Portfolio, options)
+}
+
+fn build_performance_document(report: &PerformanceReport, scope: &Scope) -> OutputDocument {
     let growth_label = if report.cash_flows.is_some() {
         "Portfolio Growth"
     } else {
@@ -43,10 +33,16 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
         report.unrealized_gains
     };
 
+    let title = match scope {
+        Scope::Portfolio => "Performance Report".to_string(),
+        Scope::AssetType(at) => format!("Performance Report — {}", at.as_str()),
+        Scope::SingleAsset(ticker) => format!("Performance Report — {}", ticker.to_uppercase()),
+    };
+
     let mut blocks = Vec::new();
     blocks.push(OutputBlock::Header {
         level: 1,
-        text: "Performance Report".to_string(),
+        text: title,
     });
 
     blocks.push(OutputBlock::KeyValue {
@@ -84,11 +80,15 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
                 report.realized_gains,
             )),
         },
-        KeyValueRow {
+    ];
+
+    // Only show TWR for portfolio scope (scoped TWR requires per-scope cash flow data)
+    if matches!(scope, Scope::Portfolio) {
+        summary_rows.push(KeyValueRow {
             label: "Time-weighted".to_string(),
             value: Value::Percent(report.time_weighted_return),
-        },
-    ];
+        });
+    }
 
     summary_rows.push(KeyValueRow {
         label: "Realized Gains".to_string(),
@@ -124,40 +124,106 @@ fn build_performance_document(report: &PerformanceReport) -> OutputDocument {
         });
     }
 
-    if !report.asset_breakdown.is_empty() {
-        let mut breakdown_vec: Vec<_> = report.asset_breakdown.iter().collect();
+    // Show asset-type breakdown for Portfolio scope, or single-type detail for AssetType scope
+    if !matches!(scope, Scope::SingleAsset(_)) && !report.asset_breakdown.is_empty() {
+        let mut breakdown_vec: Vec<_> = match scope {
+            Scope::AssetType(at) => report
+                .asset_breakdown
+                .iter()
+                .filter(|(k, _)| *k == at)
+                .collect(),
+            _ => report.asset_breakdown.iter().collect(),
+        };
         breakdown_vec.sort_by(|a, b| b.1.cost_basis.cmp(&a.1.cost_basis));
 
-        let rows = breakdown_vec
-            .iter()
-            .map(|(asset_type, perf)| Row {
-                cells: vec![
-                    Value::Text(asset_type.as_str().to_string()),
-                    Value::Currency(perf.cost_basis),
-                    Value::Currency(perf.market_value),
-                    Value::CurrencyDelta(perf.unrealized_pl),
-                    Value::Percent(perf.return_pct),
-                    Value::Percent(perf.contribution_to_total),
-                    Value::CurrencyDelta(perf.realized_gains),
-                ],
-            })
-            .collect();
+        if !breakdown_vec.is_empty() {
+            let rows = breakdown_vec
+                .iter()
+                .map(|(asset_type, perf)| Row {
+                    cells: vec![
+                        Value::Text(asset_type.as_str().to_string()),
+                        Value::Currency(perf.cost_basis),
+                        Value::Currency(perf.market_value),
+                        Value::CurrencyDelta(perf.unrealized_pl),
+                        Value::Percent(perf.return_pct),
+                        Value::Percent(perf.contribution_to_total),
+                        Value::CurrencyDelta(perf.realized_gains),
+                    ],
+                })
+                .collect();
 
-        blocks.push(OutputBlock::Table {
-            title: Some("By Asset Type".to_string()),
-            columns: vec![
-                ColumnDef::new("asset_type", "Asset Type", ValueKind::Text),
-                ColumnDef::new("cost_basis", "Cost", ValueKind::Currency),
-                ColumnDef::new("market_value", "Value", ValueKind::Currency),
-                ColumnDef::new("unrealized_pl", "P&L", ValueKind::CurrencyDelta),
-                ColumnDef::new("return", "Return", ValueKind::Percent),
-                ColumnDef::new("contribution", "Contribution", ValueKind::Percent),
-                ColumnDef::new("realized_gains", "Realized Gains", ValueKind::CurrencyDelta),
-            ],
-            rows,
-            footer: None,
-            options: TableOptions::default(),
-        });
+            blocks.push(OutputBlock::Table {
+                title: Some("By Asset Type".to_string()),
+                columns: vec![
+                    ColumnDef::new("asset_type", "Asset Type", ValueKind::Text),
+                    ColumnDef::new("cost_basis", "Cost", ValueKind::Currency),
+                    ColumnDef::new("market_value", "Value", ValueKind::Currency),
+                    ColumnDef::new("unrealized_pl", "P&L", ValueKind::CurrencyDelta),
+                    ColumnDef::new("return", "Return", ValueKind::Percent),
+                    ColumnDef::new("contribution", "Contribution", ValueKind::Percent),
+                    ColumnDef::new("realized_gains", "Realized Gains", ValueKind::CurrencyDelta),
+                ],
+                rows,
+                footer: None,
+                options: TableOptions::default(),
+            });
+        }
+    }
+
+    // Per-ticker breakdown for AssetType and SingleAsset scopes
+    if !matches!(scope, Scope::Portfolio) && !report.ticker_breakdown.is_empty() {
+        let mut tickers: Vec<_> = match scope {
+            Scope::AssetType(at) => report
+                .ticker_breakdown
+                .iter()
+                .filter(|t| t.asset_type == *at)
+                .collect(),
+            Scope::SingleAsset(ticker) => {
+                let upper = ticker.to_uppercase();
+                report
+                    .ticker_breakdown
+                    .iter()
+                    .filter(|t| t.ticker == upper)
+                    .collect()
+            }
+            Scope::Portfolio => unreachable!(),
+        };
+        tickers.sort_by(|a, b| b.cost_basis.cmp(&a.cost_basis));
+
+        if !tickers.is_empty() {
+            let rows = tickers
+                .iter()
+                .map(|t| Row {
+                    cells: vec![
+                        Value::Text(t.ticker.clone()),
+                        Value::Currency(t.cost_basis),
+                        Value::Currency(t.market_value),
+                        Value::CurrencyDelta(t.unrealized_pl),
+                        Value::Percent(t.return_pct),
+                    ],
+                })
+                .collect();
+
+            let title = match scope {
+                Scope::AssetType(at) => format!("Per Asset — {}", at.as_str()),
+                Scope::SingleAsset(_) => "Asset Detail".to_string(),
+                _ => "Per Asset".to_string(),
+            };
+
+            blocks.push(OutputBlock::Table {
+                title: Some(title),
+                columns: vec![
+                    ColumnDef::new("ticker", "Ticker", ValueKind::Text),
+                    ColumnDef::new("cost_basis", "Cost", ValueKind::Currency),
+                    ColumnDef::new("market_value", "Value", ValueKind::Currency),
+                    ColumnDef::new("unrealized_pl", "P&L", ValueKind::CurrencyDelta),
+                    ColumnDef::new("return", "Return", ValueKind::Percent),
+                ],
+                rows,
+                footer: None,
+                options: TableOptions::default(),
+            });
+        }
     }
 
     OutputDocument {
@@ -215,6 +281,7 @@ mod tests {
             realized_gains: dec!(200),
             unrealized_gains: dec!(800),
             asset_breakdown,
+            ticker_breakdown: vec![],
             cash_flows: Some(CashFlowSummary {
                 total_contributions: dec!(5000),
                 total_withdrawals: dec!(1000),
@@ -227,7 +294,7 @@ mod tests {
     #[test]
     fn test_json_decimals_as_strings() {
         let report = create_test_report();
-        let json_str = format(&report, OutputOptions::from_flags(true, false)).unwrap();
+        let json_str = format_unscoped(&report, OutputOptions::from_flags(true, false)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -298,7 +365,7 @@ mod tests {
     #[test]
     fn test_json_dates_as_strings() {
         let report = create_test_report();
-        let json_str = format(&report, OutputOptions::from_flags(true, false)).unwrap();
+        let json_str = format_unscoped(&report, OutputOptions::from_flags(true, false)).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         let blocks = json["blocks"].as_array().expect("blocks array missing");
@@ -333,7 +400,7 @@ mod tests {
     #[test]
     fn test_table_has_key_sections() {
         let report = create_test_report();
-        let output = format(&report, OutputOptions::from_flags(false, false)).unwrap();
+        let output = format_unscoped(&report, OutputOptions::from_flags(false, false)).unwrap();
 
         assert!(output.contains("Performance Report"));
         assert!(output.contains("Start Value"));
