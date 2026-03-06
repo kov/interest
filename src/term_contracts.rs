@@ -11,34 +11,11 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
-use std::str::FromStr;
 use tracing::{info, warn};
 
 use crate::db::models::{Transaction, TransactionType};
 use crate::options::OutputOptions;
 use crate::utils::format_currency;
-
-/// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    use rusqlite::types::ValueRef;
-
-    match row.get_ref(idx)? {
-        ValueRef::Text(bytes) => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => {
-            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        _ => Err(rusqlite::Error::InvalidColumnType(
-            idx,
-            "decimal".to_string(),
-            rusqlite::types::Type::Null,
-        )),
-    }
-}
 
 /// Check if a ticker is a term contract (ends with 'T')
 pub fn is_term_contract(ticker: &str) -> bool {
@@ -120,10 +97,10 @@ pub fn match_liquidation_to_purchases(
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 trade_date: row.get(3)?,
                 settlement_date: row.get(4)?,
-                quantity: get_decimal_value(row, 5)?,
-                price_per_unit: get_decimal_value(row, 6)?,
-                total_cost: get_decimal_value(row, 7)?,
-                fees: get_decimal_value(row, 8)?,
+                quantity: crate::db::get_decimal_value(row, 5)?,
+                price_per_unit: crate::db::get_decimal_value(row, 6)?,
+                total_cost: crate::db::get_decimal_value(row, 7)?,
+                fees: crate::db::get_decimal_value(row, 8)?,
                 is_day_trade: row.get(9)?,
                 quota_issuance_date: row.get(10)?,
                 notes: row.get(11)?,
@@ -184,8 +161,8 @@ pub fn process_term_liquidations(conn: &Connection) -> Result<usize> {
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
-                get_decimal_value(row, 3)?,
-                get_decimal_value(row, 4)?,
+                crate::db::get_decimal_value(row, 3)?,
+                crate::db::get_decimal_value(row, 4)?,
                 row.get(5)?,
             ))
         })?

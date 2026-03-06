@@ -3,7 +3,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
-use std::str::FromStr;
 use tracing::info;
 
 use crate::db::{Asset, CorporateAction, CorporateActionType, Transaction, TransactionType};
@@ -38,7 +37,7 @@ pub fn get_applicable_actions(
                     .unwrap_or(CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                quantity_adjustment: get_decimal_value(row, 5)?,
+                quantity_adjustment: crate::db::get_decimal_value(row, 5)?,
                 source: row.get(6)?,
                 notes: row.get(7)?,
                 created_at: row.get(8)?,
@@ -74,7 +73,7 @@ pub fn get_actions_up_to(
                     .unwrap_or(CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                quantity_adjustment: get_decimal_value(row, 5)?,
+                quantity_adjustment: crate::db::get_decimal_value(row, 5)?,
                 source: row.get(6)?,
                 notes: row.get(7)?,
                 created_at: row.get(8)?,
@@ -190,28 +189,6 @@ pub fn apply_corporate_action(
     );
 
     Ok(0)
-}
-
-/// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    use rusqlite::types::ValueRef;
-
-    match row.get_ref(idx)? {
-        ValueRef::Text(bytes) => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => {
-            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        _ => Err(rusqlite::Error::InvalidColumnType(
-            idx,
-            "decimal".to_string(),
-            rusqlite::types::Type::Null,
-        )),
-    }
 }
 
 #[cfg(test)]

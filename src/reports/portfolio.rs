@@ -4,8 +4,6 @@ use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
-
 use crate::db::{Asset, AssetType, Transaction, TransactionType};
 use crate::reports::aggregation::normalize_positions_with_prices;
 
@@ -417,10 +415,10 @@ fn map_transaction(row: &rusqlite::Row) -> Result<Transaction, rusqlite::Error> 
             .unwrap_or(TransactionType::Buy),
         trade_date: row.get(3)?,
         settlement_date: row.get(4)?,
-        quantity: get_decimal_value(row, 5)?,
-        price_per_unit: get_decimal_value(row, 6)?,
-        total_cost: get_decimal_value(row, 7)?,
-        fees: get_decimal_value(row, 8)?,
+        quantity: crate::db::get_decimal_value(row, 5)?,
+        price_per_unit: crate::db::get_decimal_value(row, 6)?,
+        total_cost: crate::db::get_decimal_value(row, 7)?,
+        fees: crate::db::get_decimal_value(row, 8)?,
         is_day_trade: row.get(9)?,
         quota_issuance_date: row.get(10)?,
         notes: row.get(11)?,
@@ -616,32 +614,6 @@ fn apply_exchange_source_effect(
     }
 }
 
-/// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    // Try to get as String first (for TEXT storage)
-    if let Ok(s) = row.get::<_, String>(idx) {
-        return Decimal::from_str(&s)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
-    }
-
-    // Fall back to i64 (for INTEGER storage due to SQLite type affinity)
-    if let Ok(i) = row.get::<_, i64>(idx) {
-        return Ok(Decimal::from(i));
-    }
-
-    // Try f64 for floating point values
-    if let Ok(f) = row.get::<_, f64>(idx) {
-        return Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
-    }
-
-    Err(rusqlite::Error::InvalidColumnType(
-        idx,
-        "quantity".to_string(),
-        rusqlite::types::Type::Null,
-    ))
-}
-
 /// Compute a fingerprint for all transactions up to and including a date.
 /// Includes corporate actions to detect when adjustments change.
 pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) -> Result<String> {
@@ -662,9 +634,9 @@ pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) ->
         let asset_id: i64 = row.get(1)?;
         let tx_type: String = row.get(2)?;
         let trade_date: NaiveDate = row.get(3)?;
-        let quantity = get_decimal_value(row, 4)?;
-        let price_per_unit = get_decimal_value(row, 5)?;
-        let total_cost = get_decimal_value(row, 6)?;
+        let quantity = crate::db::get_decimal_value(row, 4)?;
+        let price_per_unit = crate::db::get_decimal_value(row, 5)?;
+        let total_cost = crate::db::get_decimal_value(row, 6)?;
 
         let line = format!(
             "{}|{}|{}|{}|{}|{}|{}\n",
@@ -781,11 +753,11 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
                 },
-                get_decimal_value(row, 1)?,
-                get_decimal_value(row, 2)?,
-                get_decimal_value(row, 3)?,
-                get_decimal_value(row, 4)?,
-                get_decimal_value(row, 5)?,
+                crate::db::get_decimal_value(row, 1)?,
+                crate::db::get_decimal_value(row, 2)?,
+                crate::db::get_decimal_value(row, 3)?,
+                crate::db::get_decimal_value(row, 4)?,
+                crate::db::get_decimal_value(row, 5)?,
                 row.get::<_, String>(6)?,
             ))
         })?
