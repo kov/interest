@@ -174,6 +174,11 @@ impl AverageCostMatcher {
     }
 
     #[allow(dead_code)]
+    pub fn remaining_cost(&self) -> Decimal {
+        self.total_cost
+    }
+
+    #[cfg(test)]
     pub fn average_cost(&self) -> Decimal {
         if self.total_quantity > Decimal::ZERO {
             self.total_cost / self.total_quantity

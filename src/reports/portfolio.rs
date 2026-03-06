@@ -399,7 +399,7 @@ pub(crate) fn build_rename_carryover_transaction(
         return Ok(None);
     }
 
-    let total_cost = matcher.average_cost() * quantity;
+    let total_cost = matcher.remaining_cost();
     let price_per_unit = if quantity > Decimal::ZERO {
         total_cost / quantity
     } else {

@@ -100,21 +100,25 @@ pub fn get_period_dates(
             (start, today)
         }
         Period::OneYear => {
-            let start = today - chrono::Months::new(12);
+            let start = today
+                .checked_sub_months(chrono::Months::new(12))
+                .ok_or_else(|| anyhow::anyhow!("Failed to compute one-year start"))?;
             (start, today)
         }
         Period::AllTime => {
+            let fallback = today
+                .checked_sub_months(chrono::Months::new(240))
+                .unwrap_or(today);
             // If a connection is provided, try to fetch earliest transaction date, else default to 20 years ago
             if let Some(c) = conn {
                 let mut stmt = c.prepare("SELECT MIN(trade_date) FROM transactions")?;
                 let min_date: Option<NaiveDate> = stmt.query_row([], |row| row.get(0)).ok();
                 let start = min_date
                     .and_then(|d| d.pred_opt())
-                    .unwrap_or_else(|| today - chrono::Months::new(240));
+                    .unwrap_or(fallback);
                 (start, today)
             } else {
-                let start = today - chrono::Months::new(240);
-                (start, today)
+                (fallback, today)
             }
         }
         Period::Custom { from, to } => {
