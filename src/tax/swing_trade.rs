@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
-use crate::db::{Asset, AssetType, Transaction, TransactionType};
+use crate::db::{AssetType, Transaction, TransactionType};
 
 /// Tax category for operations
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -213,12 +213,14 @@ pub fn calculate_monthly_tax(
         let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, month_end)?;
         for rename in renames {
             if let Some(source_asset) = assets_by_id.get(&rename.from_asset_id) {
-                if let Some(carryover) = build_rename_carryover_transaction(
-                    conn,
-                    source_asset,
-                    asset_id,
-                    rename.effective_date,
-                )? {
+                if let Some(carryover) =
+                    crate::reports::portfolio::build_rename_carryover_transaction(
+                        conn,
+                        source_asset,
+                        asset_id,
+                        rename.effective_date,
+                    )?
+                {
                     transactions.push(carryover);
                 }
             }
@@ -466,145 +468,6 @@ pub fn calculate_monthly_tax(
     }
 
     Ok(results)
-}
-
-fn get_transactions_before(
-    conn: &Connection,
-    asset_id: i64,
-    before_date: NaiveDate,
-) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map(rusqlite::params![asset_id, before_date], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: row
-                    .get::<_, String>(2)?
-                    .parse::<TransactionType>()
-                    .unwrap_or(TransactionType::Buy),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: get_decimal_value(row, 5)?,
-                price_per_unit: get_decimal_value(row, 6)?,
-                total_cost: get_decimal_value(row, 7)?,
-                fees: get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
-}
-
-fn build_rename_carryover_transaction(
-    conn: &Connection,
-    source_asset: &Asset,
-    target_asset_id: i64,
-    effective_date: NaiveDate,
-) -> Result<Option<Transaction>> {
-    let source_id = match source_asset.id {
-        Some(id) => id,
-        None => return Ok(None),
-    };
-
-    let transactions = get_transactions_before(conn, source_id, effective_date)?;
-    let mut matcher = AverageCostMatcher::new();
-
-    let amortizations =
-        crate::db::get_amortizations_for_asset(conn, source_id, None, Some(effective_date))?;
-    let mut amort_idx: usize = 0;
-
-    for tx in transactions {
-        if tx.is_day_trade {
-            continue;
-        }
-
-        while amort_idx < amortizations.len()
-            && amortizations[amort_idx].event_date <= tx.trade_date
-        {
-            matcher.apply_amortization(amortizations[amort_idx].total_amount);
-            amort_idx += 1;
-        }
-
-        // Apply corporate action adjustments for rename carryover
-        let actions = crate::corporate_actions::get_applicable_actions(
-            conn,
-            source_id,
-            tx.trade_date,
-            effective_date,
-        )?;
-
-        let adjusted_quantity =
-            crate::corporate_actions::adjust_quantity_for_actions(tx.quantity, &actions);
-
-        let (_adjusted_price, adjusted_cost) =
-            crate::corporate_actions::adjust_price_and_cost_for_actions(
-                tx.quantity,
-                tx.price_per_unit,
-                tx.total_cost,
-                &actions,
-            );
-
-        match tx.transaction_type {
-            TransactionType::Buy => {
-                matcher.add_purchase(&tx, Some(adjusted_quantity), Some(adjusted_cost))
-            }
-            TransactionType::Sell => {
-                let _ = matcher.match_sale(&tx, Some(adjusted_quantity))?;
-            }
-        }
-    }
-
-    // Apply any remaining amortizations up to the effective date
-    while amort_idx < amortizations.len() && amortizations[amort_idx].event_date <= effective_date {
-        matcher.apply_amortization(amortizations[amort_idx].total_amount);
-        amort_idx += 1;
-    }
-
-    let quantity = matcher.remaining_quantity();
-    if quantity <= Decimal::ZERO {
-        return Ok(None);
-    }
-
-    let total_cost = matcher.average_cost() * quantity;
-    // NOTE: Do NOT apply corporate actions here - they will be applied naturally
-    // in the main transaction loop via apply_quantity_adjustment based on
-    // the carryover transaction's trade_date
-    let price_per_unit = if quantity > Decimal::ZERO {
-        total_cost / quantity
-    } else {
-        Decimal::ZERO
-    };
-
-    Ok(Some(Transaction {
-        id: None,
-        asset_id: target_asset_id,
-        transaction_type: TransactionType::Buy,
-        trade_date: effective_date,
-        settlement_date: Some(effective_date),
-        quantity,
-        price_per_unit,
-        total_cost,
-        fees: Decimal::ZERO,
-        is_day_trade: false,
-        quota_issuance_date: None,
-        notes: Some(format!("Rename from {}", source_asset.ticker)),
-        source: "RENAME".to_string(),
-        created_at: chrono::Utc::now(),
-    }))
 }
 
 fn apply_exchange_source_effect(

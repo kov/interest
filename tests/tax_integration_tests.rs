@@ -5,7 +5,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod cli_helpers;
-use cli_helpers::{add_asset, add_transaction, base_cmd, run_cmd, tax_report_json};
+use cli_helpers::{add_asset, add_income, add_transaction, base_cmd, run_cmd, tax_report_json};
 
 fn decimal_from_value(value: &Value) -> Result<Decimal> {
     if let Some(s) = value.as_str() {
@@ -231,10 +231,9 @@ fn test_rename_sale_without_corporate_actions() -> Result<()> {
     Ok(())
 }
 
-/// Source-asset split before rename: the tax module adjusts the carryover
-/// for source-asset corporate actions; the portfolio module does not yet.
-/// This test verifies the tax path is correct. Portfolio divergence will
-/// be fixed when the carryover builders are unified (Phase 3).
+/// Source-asset split before rename: the carryover builder adjusts for
+/// source-asset corporate actions between each transaction and the rename date.
+/// Both portfolio and tax must agree.
 #[test]
 fn test_rename_source_asset_split_before_rename() -> Result<()> {
     let home = TempDir::new()?;
@@ -248,15 +247,55 @@ fn test_rename_source_asset_split_before_rename() -> Result<()> {
     add_rename(&home, "TKRC", "TKRD", "2020-09-01")?;
     add_transaction(&home, "TKRD", "sell", "500", "25", "2021-03-15", false)?;
 
-    // Tax module correctly adjusts carryover for source-asset split:
-    // Carryover: 2000 shares at avg R$20
+    // Carryover: 2000 shares at avg R$20 (split applied to source)
     // Sale of 500: proceeds R$12500, cost_basis R$10000, gain R$2500
+    // Remaining: 1500 shares, R$30000
+
+    // Portfolio check
+    check_portfolio_position(&home, "2021-03-16", "TKRD", "1500.00", "R$ 30.000,00")?;
+
+    // Tax check
     let report = tax_report_json(&home, "2021")?;
     let mar = month_summary(&report, "Março")?;
     let sales = decimal_from_value(&mar["sales"])?;
     let profit = decimal_from_value(&mar["profit"])?;
     assert_eq!(sales, dec!(12500));
     assert_eq!(profit, dec!(2500));
+
+    Ok(())
+}
+
+/// Source-asset amortization before rename: cost reduction must carry over.
+/// Both portfolio and tax must agree.
+#[test]
+fn test_rename_source_asset_amortization_before_rename() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "FIIOLD", "FII")?;
+    add_asset(&home, "FIINEW", "FII")?;
+
+    add_transaction(&home, "FIIOLD", "buy", "1000", "100", "2020-01-15", false)?;
+    // Amortization reduces cost by R$5000 → cost becomes R$95000
+    add_income(&home, "FIIOLD", "amortization", "5000", "2020-06-01")?;
+    add_rename(&home, "FIIOLD", "FIINEW", "2020-09-01")?;
+    add_transaction(&home, "FIINEW", "sell", "500", "110", "2021-03-15", false)?;
+
+    // Carryover: 1000 shares, cost R$95000, avg R$95
+    // Sale of 500: proceeds R$55000, cost_basis R$47500, gain R$7500
+    // Remaining: 500 shares, R$47500
+
+    // Portfolio check
+    check_portfolio_position(&home, "2021-03-16", "FIINEW", "500.00", "R$ 47.500,00")?;
+
+    // Tax check (FII swing trade: 20%, no exemption)
+    let report = tax_report_json(&home, "2021")?;
+    let mar = month_summary(&report, "Março")?;
+    let sales = decimal_from_value(&mar["sales"])?;
+    let profit = decimal_from_value(&mar["profit"])?;
+    let tax_due = decimal_from_value(&mar["tax_due"])?;
+    assert_eq!(sales, dec!(55000));
+    assert_eq!(profit, dec!(7500));
+    assert_eq!(tax_due, dec!(1500)); // 20% of 7500
 
     Ok(())
 }

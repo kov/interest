@@ -491,45 +491,92 @@ pub(crate) fn get_asset_transactions_until(
     Ok(transactions)
 }
 
+/// Build a synthetic buy transaction representing the carryover position
+/// from a renamed source asset. Replays source-asset transactions with
+/// interleaved amortizations and per-transaction corporate action
+/// adjustments (source-asset splits between trade date and rename date).
+///
+/// Target-asset corporate actions are NOT applied here — they are handled
+/// by the caller's main transaction loop at the correct chronological point.
 pub(crate) fn build_rename_carryover_transaction(
     conn: &Connection,
     source_asset: &Asset,
     target_asset_id: i64,
     effective_date: NaiveDate,
 ) -> Result<Option<Transaction>> {
+    use crate::tax::cost_basis::AverageCostMatcher;
+
     let source_id = match source_asset.id {
         Some(id) => id,
         None => return Ok(None),
     };
 
     let transactions = get_asset_transactions_before(conn, source_id, effective_date)?;
-    let mut position = AvgCostPosition::new(source_id);
+    let mut matcher = AverageCostMatcher::new();
+
+    // Interleave amortizations with transactions
+    let amortizations =
+        crate::db::get_amortizations_for_asset(conn, source_id, None, Some(effective_date))?;
+    let mut amort_idx: usize = 0;
 
     for tx in transactions {
         if tx.is_day_trade {
             continue;
         }
 
+        // Apply amortizations that occurred on or before this transaction date
+        while amort_idx < amortizations.len()
+            && amortizations[amort_idx].event_date <= tx.trade_date
+        {
+            matcher.apply_amortization(amortizations[amort_idx].total_amount);
+            amort_idx += 1;
+        }
+
+        // Adjust this transaction for source-asset corporate actions that
+        // occurred between its trade date and the rename effective date
+        let actions = crate::corporate_actions::get_applicable_actions(
+            conn,
+            source_id,
+            tx.trade_date,
+            effective_date,
+        )?;
+
+        let mut adjusted_quantity = tx.quantity;
+        let adjusted_cost = tx.total_cost;
+        for action in &actions {
+            match action.action_type {
+                crate::db::CorporateActionType::Split
+                | crate::db::CorporateActionType::ReverseSplit => {
+                    adjusted_quantity += action.quantity_adjustment;
+                }
+                _ => {}
+            }
+        }
+
         match tx.transaction_type {
             TransactionType::Buy => {
-                position.add_buy(tx.quantity, tx.total_cost);
+                matcher.add_purchase(&tx, Some(adjusted_quantity), Some(adjusted_cost));
             }
             TransactionType::Sell => {
-                position.remove_sell(tx.quantity, &source_asset.ticker)?;
+                let _ = matcher.match_sale(&tx, Some(adjusted_quantity))?;
             }
         }
     }
 
-    if position.quantity <= Decimal::ZERO {
+    // Apply any remaining amortizations up to the effective date
+    while amort_idx < amortizations.len()
+        && amortizations[amort_idx].event_date <= effective_date
+    {
+        matcher.apply_amortization(amortizations[amort_idx].total_amount);
+        amort_idx += 1;
+    }
+
+    let quantity = matcher.remaining_quantity();
+    if quantity <= Decimal::ZERO {
         return Ok(None);
     }
 
-    let quantity = position.quantity;
-    let total_cost = position.total_cost;
-    // NOTE: Do NOT apply corporate actions here - they will be applied naturally
-    // in the main transaction loop via apply_forward_qty_adjustments based on
-    // the carryover transaction's trade_date
-
+    let total_cost = matcher.average_cost() * quantity;
     let price_per_unit = if quantity > Decimal::ZERO {
         total_cost / quantity
     } else {
@@ -568,11 +615,6 @@ fn apply_exchange_source_effect(
         }
     }
 }
-
-// NOTE: apply_actions_to_carryover removed - carryover transaction is created at
-// the rename effective_date, and corporate actions are applied naturally by
-// the main transaction loop's apply_forward_qty_adjustments based on chronological
-// trade_date ordering. Applying actions here caused double-adjustment bugs.
 
 /// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)
 fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
