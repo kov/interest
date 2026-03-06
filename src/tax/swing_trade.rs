@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
-use crate::db::{Asset, AssetType, CorporateActionType, Transaction, TransactionType};
+use crate::db::{Asset, AssetType, Transaction, TransactionType};
 
 /// Tax category for operations
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -574,23 +574,15 @@ fn build_rename_carryover_transaction(
         amort_idx += 1;
     }
 
-    let mut quantity = matcher.remaining_quantity();
+    let quantity = matcher.remaining_quantity();
     if quantity <= Decimal::ZERO {
         return Ok(None);
     }
 
-    let mut total_cost = matcher.average_cost() * quantity;
-    apply_actions_to_carryover(
-        conn,
-        target_asset_id,
-        effective_date,
-        &mut quantity,
-        &mut total_cost,
-    )?;
-    if quantity <= Decimal::ZERO {
-        return Ok(None);
-    }
-
+    let total_cost = matcher.average_cost() * quantity;
+    // NOTE: Do NOT apply corporate actions here - they will be applied naturally
+    // in the main transaction loop via apply_quantity_adjustment based on
+    // the carryover transaction's trade_date
     let price_per_unit = if quantity > Decimal::ZERO {
         total_cost / quantity
     } else {
@@ -613,60 +605,6 @@ fn build_rename_carryover_transaction(
         source: "RENAME".to_string(),
         created_at: chrono::Utc::now(),
     }))
-}
-
-fn apply_actions_to_carryover(
-    conn: &Connection,
-    asset_id: i64,
-    effective_date: NaiveDate,
-    quantity: &mut Decimal,
-    _total_cost: &mut Decimal,
-) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT action_type, quantity_adjustment, ex_date
-         FROM corporate_actions
-         WHERE asset_id = ?1 AND ex_date >= ?2
-         ORDER BY ex_date ASC",
-    )?;
-
-    let actions = stmt
-        .query_map(rusqlite::params![asset_id, effective_date], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                {
-                    use rusqlite::types::ValueRef;
-                    match row.get_ref(1)? {
-                        ValueRef::Text(bytes) => {
-                            let s = std::str::from_utf8(bytes).unwrap_or("0");
-                            Decimal::from_str(s).unwrap_or(Decimal::ZERO)
-                        }
-                        ValueRef::Integer(i) => Decimal::from(i),
-                        ValueRef::Real(f) => Decimal::try_from(f).unwrap_or(Decimal::ZERO),
-                        _ => Decimal::ZERO,
-                    }
-                },
-                row.get::<_, NaiveDate>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (action_type_str, qty_adj, _ex_date) in actions {
-        let action_type = action_type_str
-            .parse::<CorporateActionType>()
-            .unwrap_or(CorporateActionType::Split);
-
-        match action_type {
-            CorporateActionType::CapitalReturn => {
-                // Capital return handling not defined in quantity-based model yet; ignore for now
-            }
-            _ => {
-                *quantity += qty_adj;
-                // total_cost remains unchanged; average price adjusts automatically
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn apply_exchange_source_effect(

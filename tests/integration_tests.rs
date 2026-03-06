@@ -2139,7 +2139,7 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
     assert_eq!(cols[2], "R$  6,58");
     assert_eq!(cols[3], "R$ 227.300,00");
 
-    // Verify performance and tax outputs (like test_06)
+    // Verify performance output (like test_06)
     let perf_out = base_cmd(&home)
         .env("INTEREST_SKIP_PRICE_FETCH", "1")
         .arg("--json")
@@ -2156,6 +2156,35 @@ fn test_16_rename_with_post_rename_split() -> Result<()> {
         end_value_dec,
         dec!(0),
         "Performance end value should be zero when prices are missing"
+    );
+
+    // Add a sale to exercise the tax path — this is the key regression test
+    // for the double-adjustment bug. Sell 1000 SIMH3 @ R$9 on 2023-03-15.
+    add_transaction(&home, "SIMH3", "sell", "1000", "9", "2023-03-15", false)?;
+
+    // Verify portfolio after sale: 34500 - 1000 = 33500 shares
+    // avg_cost = 227300/34500 = R$6.5884...
+    // cost_basis for 1000 = 6588.4057..., remaining cost = 227300 - 6588.40... = 220711.59...
+    check_portfolio("2023-03-16", "33500.00", "R$  6,58", "R$ 220.711,59")?;
+
+    // Verify tax report: sale of 1000 @ R$9 = R$9000
+    // profit = 9000 - 6588.40... = R$2411.59...
+    let tax_report = tax_report_json(&home, "2023")?;
+    let mar = tax_report
+        .get("monthly_summaries")
+        .and_then(|v| v.as_array())
+        .expect("monthly_summaries missing")
+        .iter()
+        .find(|s| s.get("month").and_then(|v| v.as_str()) == Some("Março"))
+        .expect("March summary not found");
+
+    let sales = decimal_from_value(&mar["sales"])?;
+    let profit = decimal_from_value(&mar["profit"])?;
+    assert_eq!(sales, dec!(9000));
+    assert!(
+        profit > dec!(2411) && profit < dec!(2412),
+        "Expected profit ~R$2411.59, got {}",
+        profit
     );
 
     Ok(())
