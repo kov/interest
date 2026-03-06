@@ -53,7 +53,7 @@ fn build_cashflow_show_document(report: &CashFlowReport) -> OutputDocument {
 
     let mut rows = Vec::new();
     for year in &report.years {
-        for asset_type in &type_order {
+        for asset_type in type_order {
             if let Some(values) = year.by_asset_type.get(asset_type) {
                 if values.net_flow == Decimal::ZERO {
                     continue;
@@ -72,7 +72,7 @@ fn build_cashflow_show_document(report: &CashFlowReport) -> OutputDocument {
         }
     }
 
-    let breakdown_rows = build_cashflow_breakdown_rows(report, &type_order);
+    let breakdown_rows = build_cashflow_breakdown_rows(report, type_order);
 
     OutputDocument {
         title: None,
@@ -166,7 +166,7 @@ fn build_cashflow_monthly_document(
     let mut rows = Vec::new();
     for ((year, month), asset_map) in months {
         let label = format!("{} {}", month_name_pt(month), year);
-        for asset_type in &type_order {
+        for asset_type in type_order {
             if let Some((money_in, money_out_sells, money_out_income)) = asset_map.get(asset_type) {
                 let net = *money_in - *money_out_sells - *money_out_income;
                 if net == Decimal::ZERO {
@@ -186,7 +186,7 @@ fn build_cashflow_monthly_document(
         }
     }
 
-    let breakdown_rows = build_cashflow_breakdown_rows(report, &type_order);
+    let breakdown_rows = build_cashflow_breakdown_rows(report, type_order);
 
     OutputDocument {
         title: None,
@@ -273,19 +273,8 @@ fn month_name_pt(month: u32) -> &'static str {
     }
 }
 
-fn asset_type_order() -> Vec<AssetType> {
-    vec![
-        AssetType::Stock,
-        AssetType::Bdr,
-        AssetType::Fii,
-        AssetType::Fiagro,
-        AssetType::FiInfra,
-        AssetType::Etf,
-        AssetType::Fidc,
-        AssetType::Fip,
-        AssetType::Bond,
-        AssetType::GovBond,
-    ]
+fn asset_type_order() -> &'static [AssetType] {
+    AssetType::display_order()
 }
 
 fn build_cashflow_breakdown_rows(report: &CashFlowReport, type_order: &[AssetType]) -> Vec<Row> {

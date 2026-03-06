@@ -194,25 +194,9 @@ async fn dispatch_income_show_impl(
         });
     }
 
-    let type_order = [
-        db::AssetType::Stock,
-        db::AssetType::Bdr,
-        db::AssetType::Fii,
-        db::AssetType::Fiagro,
-        db::AssetType::FiInfra,
-        db::AssetType::Etf,
-        db::AssetType::Fidc,
-        db::AssetType::Fip,
-        db::AssetType::Bond,
-        db::AssetType::GovBond,
-        db::AssetType::Option,
-        db::AssetType::TermContract,
-        db::AssetType::Unknown,
-    ];
-
     let mut ordered: Vec<(db::AssetType, Vec<formatters::income::AssetIncome>)> = Vec::new();
     let mut all_assets: Vec<formatters::income::AssetIncome> = Vec::new();
-    for asset_type in &type_order {
+    for asset_type in db::AssetType::display_order() {
         if let Some(assets) = by_type.get(asset_type) {
             if assets.is_empty() {
                 continue;

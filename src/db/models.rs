@@ -39,6 +39,42 @@ impl AssetType {
             AssetType::Unknown => "UNKNOWN",
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AssetType::Stock => "Stocks",
+            AssetType::Bdr => "BDRs",
+            AssetType::Etf => "ETFs",
+            AssetType::Fii => "Real Estate Funds",
+            AssetType::Fiagro => "Agribusiness Funds",
+            AssetType::FiInfra => "Infrastructure Funds",
+            AssetType::Fidc => "FIDCs",
+            AssetType::Fip => "FIPs",
+            AssetType::Bond => "Corporate Bonds",
+            AssetType::GovBond => "Government Bonds",
+            AssetType::Option => "Options",
+            AssetType::TermContract => "Term Contracts",
+            AssetType::Unknown => "Unknown",
+        }
+    }
+
+    pub fn display_order() -> &'static [AssetType] {
+        &[
+            AssetType::Stock,
+            AssetType::Bdr,
+            AssetType::Fii,
+            AssetType::Fiagro,
+            AssetType::FiInfra,
+            AssetType::Etf,
+            AssetType::Fidc,
+            AssetType::Fip,
+            AssetType::Bond,
+            AssetType::GovBond,
+            AssetType::Option,
+            AssetType::TermContract,
+            AssetType::Unknown,
+        ]
+    }
 }
 
 impl FromStr for AssetType {
