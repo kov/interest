@@ -84,31 +84,6 @@ pub fn get_actions_up_to(
     Ok(actions)
 }
 
-/// Apply forward-only quantity adjustments for splits/reverse splits up to `cutoff_date`.
-///
-/// Advances `action_idx` as actions are applied. Ignores bonus and capital return.
-pub fn apply_forward_qty_adjustments(
-    quantity: &mut Decimal,
-    actions: &[CorporateAction],
-    action_idx: &mut usize,
-    cutoff_date: chrono::NaiveDate,
-) {
-    while *action_idx < actions.len() {
-        let action = &actions[*action_idx];
-        if action.ex_date <= cutoff_date {
-            match action.action_type {
-                CorporateActionType::Split | CorporateActionType::ReverseSplit => {
-                    *quantity += action.quantity_adjustment;
-                }
-                _ => {}
-            }
-            *action_idx += 1;
-        } else {
-            break;
-        }
-    }
-}
-
 /// Get unapplied corporate actions for an asset (or all assets if None)
 /// Apply a corporate action by creating synthetic transactions (for bonus shares)
 ///

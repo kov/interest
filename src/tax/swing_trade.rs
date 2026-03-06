@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
-use crate::db::{AssetType, Transaction, TransactionType};
+use crate::db::{AssetType, TransactionType};
 
 /// Tax category for operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,162 +203,51 @@ pub fn calculate_monthly_tax(
             continue;
         }
 
-        // Get all transactions for this asset up to end of month
-        let mut transactions = crate::db::get_asset_transactions_until(conn, asset_id, month_end)?;
-
-        let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, month_end)?;
-        for rename in renames {
-            if let Some(source_asset) = assets_by_id.get(&rename.from_asset_id) {
-                if let Some(carryover) =
-                    crate::reports::portfolio::build_rename_carryover_transaction(
-                        conn,
-                        source_asset,
-                        asset_id,
-                        rename.effective_date,
-                    )?
-                {
-                    transactions.push(carryover);
-                }
-            }
-        }
-
-        let exchanges = crate::db::get_asset_exchanges_as_target_up_to(conn, asset_id, month_end)?;
-        for exchange in exchanges {
-            if exchange.to_quantity <= Decimal::ZERO {
-                continue;
-            }
-
-            let source_ticker = assets_by_id
-                .get(&exchange.from_asset_id)
-                .map(|a| a.ticker.as_str())
-                .unwrap_or("UNKNOWN");
-            let notes = match exchange.event_type {
-                crate::db::AssetExchangeType::Spinoff => {
-                    format!("Spin-off from {}", source_ticker)
-                }
-                crate::db::AssetExchangeType::Merger => {
-                    format!("Merger from {}", source_ticker)
-                }
-            };
-
-            let price_per_unit = if exchange.to_quantity > Decimal::ZERO {
-                exchange.allocated_cost / exchange.to_quantity
-            } else {
-                Decimal::ZERO
-            };
-
-            transactions.push(Transaction {
-                id: None,
-                asset_id,
-                transaction_type: TransactionType::Buy,
-                trade_date: exchange.effective_date,
-                settlement_date: Some(exchange.effective_date),
-                quantity: exchange.to_quantity,
-                price_per_unit,
-                total_cost: exchange.allocated_cost,
-                fees: Decimal::ZERO,
-                is_day_trade: false,
-                quota_issuance_date: None,
-                notes: Some(notes),
-                source: "EXCHANGE".to_string(),
-                created_at: chrono::Utc::now(),
-            });
-        }
-
-        transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
-
-        // Calculate cost basis for sales in this month using average cost
-        // Separate matchers for swing and day trade flows
+        let enriched =
+            crate::reports::enrichment::build_enriched_transactions(
+                conn, asset_id, month_end, &assets_by_id,
+            )?;
         let mut swing_matcher = AverageCostMatcher::new();
         let mut day_trade_matcher = AverageCostMatcher::new();
 
-        // Capital return (amortization) events reduce cost basis without changing quantity
-        let amortizations =
-            crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(month_end))?;
-        let mut amort_idx: usize = 0;
-        let exchanges_as_source =
-            crate::db::get_asset_exchanges_as_source_up_to(conn, asset_id, month_end)?;
-        let mut exchange_idx: usize = 0;
-
-        // Forward-only corporate action adjustments: apply once at ex-date
-        // We only apply quantity adjustments to the swing matcher (persistent holdings)
-        let actions_up_to = crate::corporate_actions::get_actions_up_to(conn, asset_id, month_end)?;
-        let mut action_idx: usize = 0;
-
-        for tx in transactions {
-            // Apply amortizations that occurred on or before this transaction date
-            while amort_idx < amortizations.len()
-                && amortizations[amort_idx].event_date <= tx.trade_date
-            {
-                swing_matcher.apply_amortization(amortizations[amort_idx].total_amount);
-                amort_idx += 1;
-            }
-
-            while exchange_idx < exchanges_as_source.len()
-                && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
-            {
-                crate::tax::cost_basis::apply_exchange_source_effect(
-                    &mut swing_matcher,
-                    &exchanges_as_source[exchange_idx],
-                );
-                exchange_idx += 1;
-            }
-
-            // Before processing this transaction, apply any corporate actions up to its date
-            while action_idx < actions_up_to.len()
-                && actions_up_to[action_idx].ex_date <= tx.trade_date
-            {
-                match actions_up_to[action_idx].action_type {
-                    crate::db::CorporateActionType::Split
-                    | crate::db::CorporateActionType::ReverseSplit => {
-                        swing_matcher.apply_quantity_adjustment(
-                            actions_up_to[action_idx].quantity_adjustment,
-                        );
-                    }
-                    // Bonus is auto-applied as a transaction on import; capital return handled elsewhere
-                    _ => {}
-                }
-                action_idx += 1;
-            }
-
+        enriched.replay(&mut swing_matcher, month_end, |tx, swing| {
             match tx.transaction_type {
                 TransactionType::Buy => {
                     if tx.is_day_trade {
-                        day_trade_matcher.add_purchase(&tx, None, None);
+                        day_trade_matcher.add_purchase(tx, None, None);
                     } else {
-                        swing_matcher.add_purchase(&tx, None, None);
+                        swing.add_purchase(tx, None, None);
                     }
                 }
                 TransactionType::Sell => {
                     // Only process sales in the target month
                     if tx.trade_date >= month_start && tx.trade_date <= month_end {
-                        // Determine category based on asset type and day trade flag
                         let category = TaxCategory::from_asset_and_trade_type(
                             &asset.asset_type,
                             tx.is_day_trade,
                         );
 
                         let mut sale = if tx.is_day_trade {
-                            day_trade_matcher.match_sale(&tx, None)?
+                            day_trade_matcher.match_sale(tx, None)?
                         } else {
-                            swing_matcher.match_sale(&tx, None)?
+                            swing.match_sale(tx, None)?
                         };
                         sale.asset_type = asset.asset_type;
                         sales_by_category.entry(category).or_default().push(sale);
                     } else if tx.trade_date > month_end {
-                        // We've passed the target month, no need to process further
-                        break;
+                        // We've passed the target month; remaining events are harmless
                     } else {
-                        // Sale before target month, still need to process to maintain average cost
+                        // Sale before target month, maintain average cost
                         if tx.is_day_trade {
-                            let _ = day_trade_matcher.match_sale(&tx, None)?;
+                            let _ = day_trade_matcher.match_sale(tx, None)?;
                         } else {
-                            let _ = swing_matcher.match_sale(&tx, None)?;
+                            let _ = swing.match_sale(tx, None)?;
                         }
                     }
                 }
             }
-        }
+            Ok(())
+        })?;
     }
 
     // Now calculate tax for each category

@@ -9,6 +9,7 @@ use crate::db::{AssetExchange, AssetExchangeType, Transaction, TransactionType};
 pub trait CostTracker {
     fn apply_amortization(&mut self, amount: Decimal);
     fn clear_position(&mut self);
+    fn apply_quantity_adjustment(&mut self, adjustment: Decimal);
 }
 
 /// Apply the effect of an asset exchange where this asset is the source.
@@ -189,6 +190,10 @@ impl CostTracker for AverageCostMatcher {
 
     fn clear_position(&mut self) {
         self.clear_position();
+    }
+
+    fn apply_quantity_adjustment(&mut self, adjustment: Decimal) {
+        self.apply_quantity_adjustment(adjustment);
     }
 }
 

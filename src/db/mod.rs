@@ -436,16 +436,6 @@ const TRANSACTION_SELECT: &str =
             quota_issuance_date, notes, source, created_at
      FROM transactions";
 
-/// Get all transactions for an asset, ordered by trade date.
-pub fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transaction>> {
-    let sql = format!("{} WHERE asset_id = ?1 ORDER BY trade_date ASC, id ASC", TRANSACTION_SELECT);
-    let mut stmt = conn.prepare(&sql)?;
-    let transactions = stmt
-        .query_map([asset_id], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(transactions)
-}
-
 /// Get all transactions for an asset before a cutoff date (exclusive).
 pub fn get_asset_transactions_before(
     conn: &Connection,
