@@ -13,11 +13,8 @@ pub async fn dispatch_cashflow(
             dispatch_cashflow_scoped(period_str, Scope::Portfolio, options).await
         }
         crate::cli::CashFlowCommands::Type { asset_type, period } => {
-            let at = asset_type
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
             let period_str = period.as_deref().unwrap_or("ALL");
-            dispatch_cashflow_scoped(period_str, Scope::AssetType(at), options).await
+            dispatch_cashflow_scoped(period_str, Scope::AssetType(*asset_type), options).await
         }
         crate::cli::CashFlowCommands::Asset { ticker, period } => {
             let period_str = period.as_deref().unwrap_or("ALL");

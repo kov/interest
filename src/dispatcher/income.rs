@@ -15,11 +15,8 @@ pub async fn dispatch_income(
             dispatch_income_show_impl(from_date, to_date, year_val, None, options).await
         }
         crate::cli::IncomeCommands::Type { asset_type, period } => {
-            let at = asset_type
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
             let (from_date, to_date, year_val) = resolve_income_period(period.as_deref())?;
-            dispatch_income_show_impl(from_date, to_date, year_val, Some(at), options).await
+            dispatch_income_show_impl(from_date, to_date, year_val, Some(*asset_type), options).await
         }
         crate::cli::IncomeCommands::Asset { ticker, period } => {
             let (from_date, to_date, _year_val) = resolve_income_period(period.as_deref())?;
@@ -64,7 +61,7 @@ pub async fn dispatch_income(
         }
         crate::cli::IncomeCommands::Yield {
             ticker, asset_type, ..
-        } => dispatch_income_yield(ticker.as_deref(), asset_type.as_deref(), options).await,
+        } => dispatch_income_yield(ticker.as_deref(), *asset_type, options).await,
         crate::cli::IncomeCommands::Trends { ticker, months } => {
             dispatch_income_trends(ticker.as_deref(), *months, options).await
         }
@@ -660,7 +657,7 @@ async fn dispatch_income_add(
 
 async fn dispatch_income_yield(
     ticker: Option<&str>,
-    asset_type: Option<&str>,
+    asset_type: Option<db::AssetType>,
     options: options::OutputOptions,
 ) -> Result<()> {
     use crate::reports::income_analytics;
@@ -706,11 +703,9 @@ async fn dispatch_income_yield(
                 continue;
             }
         }
-        if let Some(filter_type) = asset_type {
-            if let Ok(at) = filter_type.parse::<db::AssetType>() {
-                if position.asset.asset_type != at {
-                    continue;
-                }
+        if let Some(at) = asset_type {
+            if position.asset.asset_type != at {
+                continue;
             }
         }
 

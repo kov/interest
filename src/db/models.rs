@@ -4,21 +4,32 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 /// Asset types supported by the system
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
+    clap::ValueEnum,
+)]
+#[clap(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AssetType {
-    Stock,        // Brazilian stocks (ações)
-    Etf,          // Exchange-traded funds
-    Fii,          // Real estate investment funds
-    Fiagro,       // Agribusiness investment funds
-    FiInfra,      // Infrastructure investment funds
-    Bond,         // Corporate bonds
-    GovBond,      // Government bonds (Tesouro Direto)
-    Bdr,          // Brazilian Depositary Receipts
-    Fidc,         // Credit rights investment funds
-    Fip,          // Private equity funds
-    Option,       // Options on equities
-    TermContract, // Term contracts (e.g., ANIM3T)
-    Unknown,      // Unresolved/unknown type
+    Stock,
+    Etf,
+    Fii,
+    Fiagro,
+    FiInfra,
+    Bond,
+    GovBond,
+    Bdr,
+    Fidc,
+    Fip,
+    Option,
+    #[value(name = "TERM")]
+    TermContract,
+    Unknown,
+}
+
+impl std::fmt::Display for AssetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl AssetType {

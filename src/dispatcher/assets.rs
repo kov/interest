@@ -9,16 +9,16 @@ pub async fn dispatch_assets(
 ) -> Result<()> {
     match action {
         crate::cli::AssetsCommands::List { asset_type } => {
-            list_assets(asset_type.as_deref(), options)
+            list_assets(*asset_type, options)
         }
         crate::cli::AssetsCommands::Show { ticker } => show_asset(ticker, options),
         crate::cli::AssetsCommands::Add {
             ticker,
             asset_type,
             name,
-        } => add_asset(ticker, asset_type.as_deref(), name.as_deref(), options),
+        } => add_asset(ticker, *asset_type, name.as_deref(), options),
         crate::cli::AssetsCommands::SetType { ticker, asset_type } => {
-            set_asset_type(ticker, asset_type, options)
+            set_asset_type(ticker, *asset_type, options)
         }
         crate::cli::AssetsCommands::SetName { ticker, name } => {
             set_asset_name(ticker, name, options)
@@ -31,7 +31,7 @@ pub async fn dispatch_assets(
         crate::cli::AssetsCommands::SyncMaisRetorno {
             asset_type,
             dry_run,
-        } => sync_maisretorno(asset_type.as_deref(), *dry_run, options).await,
+        } => sync_maisretorno(*asset_type, *dry_run, options).await,
     }
 }
 
@@ -40,11 +40,10 @@ fn open_conn() -> Result<rusqlite::Connection> {
     db::open_db(None)
 }
 
-fn list_assets(asset_type: Option<&str>, options: options::OutputOptions) -> Result<()> {
+fn list_assets(asset_type: Option<db::AssetType>, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
-    let assets = if let Some(type_str) = asset_type {
-        let parsed = parse_asset_type(type_str)?;
-        db::list_assets_by_type(&conn, parsed)?
+    let assets = if let Some(at) = asset_type {
+        db::list_assets_by_type(&conn, at)?
     } else {
         db::get_all_assets(&conn)?
     };
@@ -68,7 +67,7 @@ fn show_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
 
 fn add_asset(
     ticker: &str,
-    asset_type: Option<&str>,
+    asset_type: Option<db::AssetType>,
     name: Option<&str>,
     options: options::OutputOptions,
 ) -> Result<()> {
@@ -77,7 +76,6 @@ fn add_asset(
         anyhow::bail!("Ticker {} already exists in assets", ticker);
     }
 
-    let asset_type = asset_type.map(parse_asset_type).transpose()?;
     let asset_id = if let Some(asset_type) = asset_type {
         db::insert_asset(&conn, ticker, &asset_type, name)?
     } else {
@@ -91,12 +89,11 @@ fn add_asset(
     Ok(())
 }
 
-fn set_asset_type(ticker: &str, asset_type: &str, options: options::OutputOptions) -> Result<()> {
+fn set_asset_type(ticker: &str, asset_type: db::AssetType, options: options::OutputOptions) -> Result<()> {
     let conn = open_conn()?;
-    let parsed = parse_asset_type(asset_type)?;
-    db::update_asset_type(&conn, ticker, &parsed)?;
+    db::update_asset_type(&conn, ticker, &asset_type)?;
 
-    let output = formatters::assets::format_asset_set_type(ticker, &parsed, options.clone())?;
+    let output = formatters::assets::format_asset_set_type(ticker, &asset_type, options.clone())?;
     options.writer().writeln(&output)?;
 
     Ok(())
@@ -167,13 +164,12 @@ fn remove_asset(ticker: &str, options: options::OutputOptions) -> Result<()> {
 }
 
 async fn sync_maisretorno(
-    asset_type: Option<&str>,
+    asset_type: Option<db::AssetType>,
     dry_run: bool,
     options: options::OutputOptions,
 ) -> Result<()> {
     let conn = open_conn()?;
-    let parsed_type = asset_type.map(parse_asset_type).transpose()?;
-    let sources = scraping::maisretorno::select_sources(parsed_type);
+    let sources = scraping::maisretorno::select_sources(asset_type);
     if sources.is_empty() {
         anyhow::bail!("No Mais Retorno sources available for this asset type");
     }
@@ -208,8 +204,3 @@ fn prompt_exact(allowed: &[&str]) -> Result<bool> {
     Ok(allowed.contains(&trimmed))
 }
 
-fn parse_asset_type(input: &str) -> Result<db::AssetType> {
-    input
-        .parse::<db::AssetType>()
-        .map_err(|_| anyhow::anyhow!("Unknown asset type: {}", input))
-}

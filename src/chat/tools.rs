@@ -579,7 +579,7 @@ pub async fn execute_tool(
             let asset_type = arguments
                 .get("asset_type")
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .and_then(|s| s.parse::<crate::db::AssetType>().ok());
             let ticker = arguments
                 .get("ticker")
                 .and_then(|v| v.as_str())
@@ -614,7 +614,7 @@ pub async fn execute_tool(
             let asset_type = arguments
                 .get("asset_type")
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .and_then(|s| s.parse::<crate::db::AssetType>().ok());
             let ticker = arguments
                 .get("ticker")
                 .and_then(|v| v.as_str())
@@ -683,7 +683,7 @@ pub async fn execute_tool(
             let asset_type = arguments
                 .get("asset_type")
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .and_then(|s| s.parse::<crate::db::AssetType>().ok());
             let ticker = arguments
                 .get("ticker")
                 .and_then(|v| v.as_str())
@@ -740,7 +740,7 @@ pub async fn execute_tool(
             let asset_type = arguments
                 .get("asset_type")
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .and_then(|s| s.parse::<crate::db::AssetType>().ok());
 
             let command = Commands::Income {
                 action: crate::cli::IncomeCommands::Yield {
@@ -801,7 +801,7 @@ pub async fn execute_tool(
             let asset_type = arguments
                 .get("asset_type")
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .and_then(|s| s.parse::<crate::db::AssetType>().ok());
             let ticker = arguments
                 .get("ticker")
                 .and_then(|v| v.as_str())
@@ -822,7 +822,7 @@ pub async fn execute_tool(
             let asset_type = arguments
                 .get("asset_type")
                 .and_then(|v| v.as_str())
-                .map(String::from);
+                .and_then(|s| s.parse::<crate::db::AssetType>().ok());
 
             let command = Commands::Assets {
                 action: crate::cli::AssetsCommands::List { asset_type },

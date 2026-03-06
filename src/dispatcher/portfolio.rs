@@ -68,11 +68,8 @@ pub async fn dispatch_portfolio(
             };
 
             // Handle legacy --asset-type flag
-            let scope = if let Some(type_str) = asset_type {
-                let at = type_str
-                    .parse::<db::AssetType>()
-                    .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", type_str))?;
-                Scope::AssetType(at)
+            let scope = if let Some(at) = asset_type {
+                Scope::AssetType(*at)
             } else {
                 Scope::Portfolio
             };
@@ -80,11 +77,8 @@ pub async fn dispatch_portfolio(
             dispatch_portfolio_show(scope, as_of_date, options).await
         }
         crate::cli::PortfolioCommands::Type { asset_type, period } => {
-            let at = asset_type
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
             let as_of_date = resolve_as_of_date(period.as_deref())?;
-            dispatch_portfolio_show(Scope::AssetType(at), as_of_date, options).await
+            dispatch_portfolio_show(Scope::AssetType(*asset_type), as_of_date, options).await
         }
         crate::cli::PortfolioCommands::Asset { ticker, period } => {
             let as_of_date = resolve_as_of_date(period.as_deref())?;

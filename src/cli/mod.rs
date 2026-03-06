@@ -1,6 +1,8 @@
 use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 
+use crate::db::AssetType;
+
 pub mod help;
 
 #[derive(Parser)]
@@ -195,7 +197,7 @@ pub enum PortfolioCommands {
 
         /// Filter by asset type (deprecated: use `portfolio type` instead)
         #[arg(short, long, hide = true)]
-        asset_type: Option<String>,
+        asset_type: Option<AssetType>,
 
         /// Show portfolio as of this date (deprecated: use period positional instead)
         #[arg(long, hide = true)]
@@ -205,7 +207,7 @@ pub enum PortfolioCommands {
     /// Filter portfolio by asset type
     Type {
         /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
-        asset_type: String,
+        asset_type: AssetType,
 
         /// Period or date (optional, default: today)
         period: Option<String>,
@@ -302,7 +304,7 @@ pub enum PerformanceCommands {
     /// Show performance filtered by asset type
     Type {
         /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
-        asset_type: String,
+        asset_type: AssetType,
 
         /// Period (optional, default: YTD)
         period: Option<String>,
@@ -329,7 +331,7 @@ pub enum CashFlowCommands {
     /// Show cash flow filtered by asset type
     Type {
         /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
-        asset_type: String,
+        asset_type: AssetType,
 
         /// Period (optional, default: ALL)
         period: Option<String>,
@@ -362,7 +364,7 @@ pub enum IncomeCommands {
     /// Show income filtered by asset type
     Type {
         /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
-        asset_type: String,
+        asset_type: AssetType,
 
         /// Period (optional, default: YTD)
         period: Option<String>,
@@ -440,7 +442,7 @@ pub enum IncomeCommands {
 
         /// Filter by asset type
         #[arg(long)]
-        asset_type: Option<String>,
+        asset_type: Option<AssetType>,
 
         /// Yield period (default: LTM)
         #[arg(long, default_value = "LTM")]
@@ -715,7 +717,7 @@ pub enum TickersCommands {
 
         /// Asset type to set (required when a ticker is provided)
         #[arg(long = "type")]
-        asset_type: Option<String>,
+        asset_type: Option<AssetType>,
     },
 }
 
@@ -725,7 +727,7 @@ pub enum AssetsCommands {
     List {
         /// Asset type to filter (STOCK, FII, FIAGRO, FI_INFRA, etc.)
         #[arg(long = "type")]
-        asset_type: Option<String>,
+        asset_type: Option<AssetType>,
     },
 
     /// Show details for a single asset
@@ -741,7 +743,7 @@ pub enum AssetsCommands {
 
         /// Asset type (overrides auto-detect)
         #[arg(long = "type")]
-        asset_type: Option<String>,
+        asset_type: Option<AssetType>,
 
         /// Optional name
         #[arg(long)]
@@ -754,7 +756,7 @@ pub enum AssetsCommands {
         ticker: String,
 
         /// Asset type
-        asset_type: String,
+        asset_type: AssetType,
     },
 
     /// Update asset name
@@ -786,7 +788,7 @@ pub enum AssetsCommands {
     SyncMaisRetorno {
         /// Asset type to filter (STOCK, FII, FIAGRO, FI_INFRA, etc.)
         #[arg(long = "type")]
-        asset_type: Option<String>,
+        asset_type: Option<AssetType>,
 
         /// Fetch only (do not write to the registry)
         #[arg(long)]
