@@ -265,6 +265,43 @@ fn test_rename_source_asset_split_before_rename() -> Result<()> {
     Ok(())
 }
 
+/// Multiple buys before a source-asset split + rename: regression test for
+/// the bug where quantity_adjustment was applied per-transaction instead of
+/// once to the position. With two buys (600 + 400 = 1000 shares) and a
+/// +1000 split, the correct result is 2000 shares, NOT 3000.
+#[test]
+fn test_rename_multiple_buys_before_split() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "SRCA", "STOCK")?;
+    add_asset(&home, "TGTA", "STOCK")?;
+
+    // Two buys totaling 1000 shares at R$40000
+    add_transaction(&home, "SRCA", "buy", "600", "40", "2020-01-10", false)?;
+    add_transaction(&home, "SRCA", "buy", "400", "40", "2020-02-10", false)?;
+    // 2:1 split: +1000 shares → 2000 total, cost stays R$40000, avg R$20
+    add_split(&home, "SRCA", "1000", "2020-06-01")?;
+    add_rename(&home, "SRCA", "TGTA", "2020-09-01")?;
+    add_transaction(&home, "TGTA", "sell", "500", "25", "2021-03-15", false)?;
+
+    // Carryover: 2000 shares at avg R$20 (R$40000 total)
+    // Sale of 500: proceeds R$12500, cost_basis R$10000, gain R$2500
+    // Remaining: 1500 shares, R$30000
+
+    // Portfolio check
+    check_portfolio_position(&home, "2021-03-16", "TGTA", "1500.00", "R$ 30.000,00")?;
+
+    // Tax check
+    let report = tax_report_json(&home, "2021")?;
+    let mar = month_summary(&report, "Março")?;
+    let sales = decimal_from_value(&mar["sales"])?;
+    let profit = decimal_from_value(&mar["profit"])?;
+    assert_eq!(sales, dec!(12500));
+    assert_eq!(profit, dec!(2500));
+
+    Ok(())
+}
+
 /// Source-asset amortization before rename: cost reduction must carry over.
 /// Both portfolio and tax must agree.
 #[test]

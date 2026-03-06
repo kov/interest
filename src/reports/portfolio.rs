@@ -316,8 +316,8 @@ fn get_asset_transactions_before(
 
 /// Build a synthetic buy transaction representing the carryover position
 /// from a renamed source asset. Replays source-asset transactions with
-/// interleaved amortizations and per-transaction corporate action
-/// adjustments (source-asset splits between trade date and rename date).
+/// interleaved amortizations and corporate action adjustments applied
+/// to the position (not per-transaction).
 ///
 /// Target-asset corporate actions are NOT applied here — they are handled
 /// by the caller's main transaction loop at the correct chronological point.
@@ -327,6 +327,7 @@ pub(crate) fn build_rename_carryover_transaction(
     target_asset_id: i64,
     effective_date: NaiveDate,
 ) -> Result<Option<Transaction>> {
+    use crate::reports::enrichment::EnrichedTransactions;
     use crate::tax::cost_basis::AverageCostMatcher;
 
     let source_id = match source_asset.id {
@@ -335,64 +336,33 @@ pub(crate) fn build_rename_carryover_transaction(
     };
 
     let transactions = get_asset_transactions_before(conn, source_id, effective_date)?;
-    let mut matcher = AverageCostMatcher::new();
-
-    // Interleave amortizations with transactions
     let amortizations =
         crate::db::get_amortizations_for_asset(conn, source_id, None, Some(effective_date))?;
-    let mut amort_idx: usize = 0;
+    let exchanges_as_source =
+        crate::db::get_asset_exchanges_as_source_up_to(conn, source_id, effective_date)?;
+    let corporate_actions =
+        crate::corporate_actions::get_actions_up_to(conn, source_id, effective_date)?;
 
-    for tx in transactions {
+    let enriched = EnrichedTransactions {
+        transactions,
+        amortizations,
+        exchanges_as_source,
+        corporate_actions,
+    };
+
+    let mut matcher = AverageCostMatcher::new();
+    enriched.replay(&mut matcher, effective_date, |tx, m| {
         if tx.is_day_trade {
-            continue;
+            return Ok(());
         }
-
-        // Apply amortizations that occurred on or before this transaction date
-        while amort_idx < amortizations.len()
-            && amortizations[amort_idx].event_date <= tx.trade_date
-        {
-            matcher.apply_amortization(amortizations[amort_idx].total_amount);
-            amort_idx += 1;
-        }
-
-        // Adjust this transaction for source-asset corporate actions that
-        // occurred between its trade date and the rename effective date
-        let actions = crate::corporate_actions::get_applicable_actions(
-            conn,
-            source_id,
-            tx.trade_date,
-            effective_date,
-        )?;
-
-        let mut adjusted_quantity = tx.quantity;
-        let adjusted_cost = tx.total_cost;
-        for action in &actions {
-            match action.action_type {
-                crate::db::CorporateActionType::Split
-                | crate::db::CorporateActionType::ReverseSplit => {
-                    adjusted_quantity += action.quantity_adjustment;
-                }
-                _ => {}
-            }
-        }
-
         match tx.transaction_type {
-            TransactionType::Buy => {
-                matcher.add_purchase(&tx, Some(adjusted_quantity), Some(adjusted_cost));
-            }
+            TransactionType::Buy => m.add_purchase(tx, None, None),
             TransactionType::Sell => {
-                let _ = matcher.match_sale(&tx, Some(adjusted_quantity))?;
+                m.match_sale(tx, None)?;
             }
         }
-    }
-
-    // Apply any remaining amortizations up to the effective date
-    while amort_idx < amortizations.len()
-        && amortizations[amort_idx].event_date <= effective_date
-    {
-        matcher.apply_amortization(amortizations[amort_idx].total_amount);
-        amort_idx += 1;
-    }
+        Ok(())
+    })?;
 
     let quantity = matcher.remaining_quantity();
     if quantity <= Decimal::ZERO {

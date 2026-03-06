@@ -6,47 +6,6 @@ use rust_decimal::Decimal;
 use tracing::info;
 
 use crate::db::{Asset, CorporateAction, CorporateActionType, Transaction, TransactionType};
-use chrono::NaiveDate;
-
-/// Get all corporate actions for an asset that occurred between two dates (inclusive)
-///
-/// Used for query-time adjustment: finds actions that should be applied to
-/// a transaction based on trade_date and as_of_date.
-pub fn get_applicable_actions(
-    conn: &Connection,
-    asset_id: i64,
-    after_date: NaiveDate,
-    up_to_date: NaiveDate,
-) -> Result<Vec<CorporateAction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, action_type, event_date, ex_date, quantity_adjustment,
-                source, notes, created_at
-         FROM corporate_actions
-         WHERE asset_id = ?1 AND ex_date > ?2 AND ex_date <= ?3
-         ORDER BY ex_date ASC",
-    )?;
-
-    let actions = stmt
-        .query_map(rusqlite::params![asset_id, after_date, up_to_date], |row| {
-            Ok(CorporateAction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                action_type: row
-                    .get::<_, String>(2)?
-                    .parse::<CorporateActionType>()
-                    .unwrap_or(CorporateActionType::Split),
-                event_date: row.get(3)?,
-                ex_date: row.get(4)?,
-                quantity_adjustment: crate::db::get_decimal_value(row, 5)?,
-                source: row.get(6)?,
-                notes: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(actions)
-}
 
 /// Get all corporate actions for an asset with `ex_date <= up_to_date` (inclusive), sorted by `ex_date ASC`.
 pub fn get_actions_up_to(
