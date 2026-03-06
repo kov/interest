@@ -1523,6 +1523,31 @@ pub fn get_income_events_with_assets(
     Ok(results)
 }
 
+/// Get total income per asset_id within a date range
+pub fn get_income_totals_by_asset(
+    conn: &Connection,
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> Result<std::collections::HashMap<i64, Decimal>> {
+    let mut stmt = conn.prepare(
+        "SELECT asset_id, SUM(total_amount)
+         FROM income_events
+         WHERE event_date >= ?1 AND event_date <= ?2
+         GROUP BY asset_id",
+    )?;
+
+    let mut totals = std::collections::HashMap::new();
+    let mut rows = stmt.query(params![from_date, to_date])?;
+
+    while let Some(row) = rows.next()? {
+        let asset_id: i64 = row.get(0)?;
+        let amount = get_decimal_value(row, 1)?;
+        totals.insert(asset_id, amount);
+    }
+
+    Ok(totals)
+}
+
 /// Get amortization (capital return) events for a specific asset, ordered ASC by event_date.
 pub fn get_amortizations_for_asset(
     conn: &Connection,

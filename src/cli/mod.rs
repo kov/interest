@@ -423,6 +423,72 @@ pub enum IncomeCommands {
     Summary {
         /// Year (optional - omit for yearly totals)
         year: Option<i32>,
+
+        /// Categorize income as baseline vs exceptional
+        #[arg(long)]
+        categorize: bool,
+
+        /// Show tax-aware breakdown (withholding impact)
+        #[arg(long)]
+        tax_aware: bool,
+    },
+
+    /// Show yield analysis (LTM portfolio and per-asset yields)
+    Yield {
+        /// Ticker symbol to filter (optional, shows all if omitted)
+        ticker: Option<String>,
+
+        /// Filter by asset type
+        #[arg(long)]
+        asset_type: Option<String>,
+
+        /// Yield period (default: LTM)
+        #[arg(long, default_value = "LTM")]
+        period: String,
+    },
+
+    /// Show income trend analysis
+    Trends {
+        /// Ticker symbol to analyze (optional, shows portfolio-wide if omitted)
+        ticker: Option<String>,
+
+        /// Number of months to analyze (default: 36)
+        #[arg(long, default_value_t = 36)]
+        months: i32,
+    },
+
+    /// Forecast future income based on historical patterns
+    Forecast {
+        /// Forecast year (default: next year)
+        year: Option<i32>,
+
+        /// Use conservative estimates
+        #[arg(long)]
+        conservative: bool,
+    },
+
+    /// Predict upcoming payment dates
+    Calendar {
+        /// Filter by month (MM/YYYY)
+        #[arg(long)]
+        month: Option<String>,
+    },
+
+    /// Detect income anomalies (missed payments, unusual amounts)
+    Alerts,
+
+    /// Export income data to file
+    Export {
+        /// Year to export
+        year: i32,
+
+        /// Export format (csv or xlsx)
+        #[arg(long, default_value = "xlsx")]
+        format: String,
+
+        /// Output file path (default: income_<year>.<format>)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 

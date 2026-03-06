@@ -245,6 +245,82 @@ pub fn get_all_tools() -> Vec<Tool> {
                 }
             })),
         },
+        // Income analytics tools
+        Tool {
+            name: "income_yield".to_string(),
+            description: "Show yield analysis: LTM portfolio yield and per-asset yields. Can filter by ticker or asset type.".to_string(),
+            policy_group: PolicyGroup::Read,
+            parameters_schema: with_output_mode(json!({
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Filter by ticker symbol"
+                    },
+                    "asset_type": {
+                        "type": "string",
+                        "description": "Filter by asset type",
+                        "enum": ["STOCK", "FII", "FIAGRO", "FI_INFRA", "BDR", "ETF"]
+                    }
+                }
+            })),
+        },
+        Tool {
+            name: "income_trends".to_string(),
+            description: "Analyze income trends over time: direction (growing/declining/stable), YoY growth, volatility, and monthly series.".to_string(),
+            policy_group: PolicyGroup::Read,
+            parameters_schema: with_output_mode(json!({
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Filter by ticker symbol"
+                    },
+                    "months": {
+                        "type": "integer",
+                        "description": "Number of months to analyze (default: 36)",
+                        "default": 36
+                    }
+                }
+            })),
+        },
+        Tool {
+            name: "income_forecast".to_string(),
+            description: "Forecast future income based on historical patterns. Shows expected annual income, confidence bounds, and per-asset forecasts.".to_string(),
+            policy_group: PolicyGroup::Read,
+            parameters_schema: with_output_mode(json!({
+                "type": "object",
+                "properties": {
+                    "year": {
+                        "type": "integer",
+                        "description": "Forecast year (default: next year)"
+                    },
+                    "conservative": {
+                        "type": "boolean",
+                        "description": "Use conservative estimates",
+                        "default": false
+                    }
+                }
+            })),
+        },
+        Tool {
+            name: "income_calendar".to_string(),
+            description: "Predict upcoming payment dates and amounts based on historical payment patterns.".to_string(),
+            policy_group: PolicyGroup::Read,
+            parameters_schema: with_output_mode(json!({
+                "type": "object",
+                "properties": {}
+            })),
+        },
+        Tool {
+            name: "income_alerts".to_string(),
+            description: "Detect income anomalies: missed payments, unusual amounts, income drops.".to_string(),
+            policy_group: PolicyGroup::Read,
+            parameters_schema: with_output_mode(json!({
+                "type": "object",
+                "properties": {}
+            })),
+        },
         // Cash flow tools
         Tool {
             name: "cashflow_show".to_string(),
@@ -647,9 +723,74 @@ pub async fn execute_tool(
                 .map(|y| y as i32);
 
             let command = Commands::Income {
-                action: crate::cli::IncomeCommands::Summary { year },
+                action: crate::cli::IncomeCommands::Summary {
+                    year,
+                    categorize: false,
+                    tax_aware: false,
+                },
             };
 
+            execute_command(command, output_mode, policy_group).await
+        }
+        "income_yield" => {
+            let ticker = arguments
+                .get("ticker")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let asset_type = arguments
+                .get("asset_type")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let command = Commands::Income {
+                action: crate::cli::IncomeCommands::Yield {
+                    ticker,
+                    asset_type,
+                    period: "LTM".to_string(),
+                },
+            };
+            execute_command(command, output_mode, policy_group).await
+        }
+        "income_trends" => {
+            let ticker = arguments
+                .get("ticker")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let months = arguments
+                .get("months")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(36) as i32;
+
+            let command = Commands::Income {
+                action: crate::cli::IncomeCommands::Trends { ticker, months },
+            };
+            execute_command(command, output_mode, policy_group).await
+        }
+        "income_forecast" => {
+            let year = arguments
+                .get("year")
+                .and_then(|v| v.as_i64())
+                .map(|y| y as i32);
+            let conservative = arguments
+                .get("conservative")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let command = Commands::Income {
+                action: crate::cli::IncomeCommands::Forecast { year, conservative },
+            };
+            execute_command(command, output_mode, policy_group).await
+        }
+        "income_calendar" => {
+            let command = Commands::Income {
+                action: crate::cli::IncomeCommands::Calendar { month: None },
+            };
+            execute_command(command, output_mode, policy_group).await
+        }
+        "income_alerts" => {
+            let command = Commands::Income {
+                action: crate::cli::IncomeCommands::Alerts,
+            };
             execute_command(command, output_mode, policy_group).await
         }
         "cashflow_show" => {

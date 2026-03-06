@@ -82,6 +82,11 @@ fn build_portfolio_document(
 
     let totals_by_type = aggregate_positions_by_asset_type(&report.positions);
 
+    let has_ltm_data = report
+        .positions
+        .iter()
+        .any(|p| p.ltm_income > Decimal::ZERO);
+
     for (asset_type, positions) in &grouped {
         let totals = totals_by_type.get(asset_type).cloned().unwrap_or_default();
 
@@ -136,6 +141,22 @@ fn build_portfolio_document(
                     cells.push(yield_pct.map(Value::Percent).unwrap_or(Value::Null));
                 }
 
+                // LTM yield columns (always present when positions have LTM data)
+                if has_ltm_data {
+                    cells.push(
+                        position
+                            .ltm_yield_pct
+                            .map(Value::Percent)
+                            .unwrap_or(Value::Null),
+                    );
+                    cells.push(
+                        position
+                            .ltm_yield_on_cost_pct
+                            .map(Value::Percent)
+                            .unwrap_or(Value::Null),
+                    );
+                }
+
                 Row { cells }
             })
             .collect::<Vec<_>>();
@@ -155,6 +176,19 @@ fn build_portfolio_document(
         if enrichment.is_some() {
             columns.push(ColumnDef::new("income", "Income", ValueKind::Currency));
             columns.push(ColumnDef::new("yield_pct", "Yield%", ValueKind::Percent));
+        }
+
+        if has_ltm_data {
+            columns.push(ColumnDef::new(
+                "ltm_yield_pct",
+                "LTM Yield%",
+                ValueKind::Percent,
+            ));
+            columns.push(ColumnDef::new(
+                "ltm_on_cost_pct",
+                "On Cost%",
+                ValueKind::Percent,
+            ));
         }
 
         let type_income = enrichment.and_then(|e| e.income_by_type.get(asset_type).copied());
@@ -195,6 +229,23 @@ fn build_portfolio_document(
                     label: "Yield%".to_string(),
                     value: Value::Percent(yld),
                 });
+            }
+        }
+
+        if has_ltm_data {
+            let type_ltm_income: Decimal = positions.iter().map(|p| p.ltm_income).sum();
+            if type_ltm_income > Decimal::ZERO {
+                subtotal_rows.push(KeyValueRow {
+                    label: "LTM Income".to_string(),
+                    value: Value::Currency(type_ltm_income),
+                });
+                if totals.market_value > Decimal::ZERO {
+                    let ltm_yield = (type_ltm_income / totals.market_value) * Decimal::from(100);
+                    subtotal_rows.push(KeyValueRow {
+                        label: "LTM Yield%".to_string(),
+                        value: Value::Percent(ltm_yield),
+                    });
+                }
             }
         }
 
@@ -252,6 +303,30 @@ fn build_portfolio_document(
                 summary_rows.push(KeyValueRow {
                     label: "Yield%".to_string(),
                     value: Value::Percent(yield_pct),
+                });
+            }
+        }
+    }
+
+    if has_ltm_data {
+        let total_ltm_income: Decimal = report.positions.iter().map(|p| p.ltm_income).sum();
+        if total_ltm_income > Decimal::ZERO {
+            summary_rows.push(KeyValueRow {
+                label: "LTM Income".to_string(),
+                value: Value::Currency(total_ltm_income),
+            });
+            if report.total_value > Decimal::ZERO {
+                let ltm_yield = (total_ltm_income / report.total_value) * Decimal::from(100);
+                summary_rows.push(KeyValueRow {
+                    label: "LTM Yield%".to_string(),
+                    value: Value::Percent(ltm_yield),
+                });
+            }
+            if report.total_cost > Decimal::ZERO {
+                let ltm_on_cost = (total_ltm_income / report.total_cost) * Decimal::from(100);
+                summary_rows.push(KeyValueRow {
+                    label: "LTM On Cost%".to_string(),
+                    value: Value::Percent(ltm_on_cost),
                 });
             }
         }
@@ -349,6 +424,9 @@ mod tests {
             current_value: Some(current_value),
             unrealized_pl: Some(unrealized_pl),
             unrealized_pl_pct,
+            ltm_income: Decimal::ZERO,
+            ltm_yield_pct: None,
+            ltm_yield_on_cost_pct: None,
         }
     }
 
