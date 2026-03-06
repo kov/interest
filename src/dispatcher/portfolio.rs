@@ -162,9 +162,10 @@ async fn dispatch_portfolio_show(
         apply_single_asset_filter(&mut report, ticker);
         if report.positions.is_empty() {
             if !options.is_json() {
-                options
-                    .writer()
-                    .writeln(&format!("\nNo position found for {}.\n", ticker.to_uppercase()))?;
+                options.writer().writeln(&format!(
+                    "\nNo position found for {}.\n",
+                    ticker.to_uppercase()
+                ))?;
             }
             return Ok(());
         }

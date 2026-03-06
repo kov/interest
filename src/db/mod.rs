@@ -407,6 +407,79 @@ pub fn insert_transaction(conn: &Connection, tx: &Transaction) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// Map a row from the standard 14-column transaction SELECT to a Transaction.
+pub fn map_transaction(row: &rusqlite::Row) -> Result<Transaction, rusqlite::Error> {
+    Ok(Transaction {
+        id: Some(row.get(0)?),
+        asset_id: row.get(1)?,
+        transaction_type: row
+            .get::<_, String>(2)?
+            .parse::<TransactionType>()
+            .unwrap_or(TransactionType::Buy),
+        trade_date: row.get(3)?,
+        settlement_date: row.get(4)?,
+        quantity: get_decimal_value(row, 5)?,
+        price_per_unit: get_decimal_value(row, 6)?,
+        total_cost: get_decimal_value(row, 7)?,
+        fees: get_decimal_value(row, 8)?,
+        is_day_trade: row.get(9)?,
+        quota_issuance_date: row.get(10)?,
+        notes: row.get(11)?,
+        source: row.get(12)?,
+        created_at: row.get(13)?,
+    })
+}
+
+const TRANSACTION_SELECT: &str =
+    "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
+            quantity, price_per_unit, total_cost, fees, is_day_trade,
+            quota_issuance_date, notes, source, created_at
+     FROM transactions";
+
+/// Get all transactions for an asset, ordered by trade date.
+pub fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transaction>> {
+    let sql = format!("{} WHERE asset_id = ?1 ORDER BY trade_date ASC, id ASC", TRANSACTION_SELECT);
+    let mut stmt = conn.prepare(&sql)?;
+    let transactions = stmt
+        .query_map([asset_id], map_transaction)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(transactions)
+}
+
+/// Get all transactions for an asset before a cutoff date (exclusive).
+pub fn get_asset_transactions_before(
+    conn: &Connection,
+    asset_id: i64,
+    before_date: NaiveDate,
+) -> Result<Vec<Transaction>> {
+    let sql = format!(
+        "{} WHERE asset_id = ?1 AND trade_date < ?2 ORDER BY trade_date ASC, id ASC",
+        TRANSACTION_SELECT
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let transactions = stmt
+        .query_map(params![asset_id, before_date], map_transaction)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(transactions)
+}
+
+/// Get all transactions for an asset up to and including a cutoff date.
+pub fn get_asset_transactions_until(
+    conn: &Connection,
+    asset_id: i64,
+    cutoff_date: NaiveDate,
+) -> Result<Vec<Transaction>> {
+    let sql = format!(
+        "{} WHERE asset_id = ?1 AND trade_date <= ?2 ORDER BY trade_date ASC, id ASC",
+        TRANSACTION_SELECT
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let transactions = stmt
+        .query_map(params![asset_id, cutoff_date], map_transaction)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(transactions)
+}
+
 /// Insert inconsistency record
 pub fn insert_inconsistency(conn: &Connection, issue: &Inconsistency) -> Result<i64> {
     conn.execute(

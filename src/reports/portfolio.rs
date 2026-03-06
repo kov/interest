@@ -113,6 +113,16 @@ impl AvgCostPosition {
     }
 }
 
+impl crate::tax::cost_basis::CostTracker for AvgCostPosition {
+    fn apply_amortization(&mut self, amount: Decimal) {
+        self.apply_amortization(amount);
+    }
+
+    fn clear_position(&mut self) {
+        self.clear();
+    }
+}
+
 /// Calculate current portfolio positions using average cost
 pub fn calculate_portfolio(
     conn: &Connection,
@@ -268,7 +278,10 @@ fn calculate_portfolio_with_cutoff(
             while exchange_idx < exchanges_as_source.len()
                 && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
             {
-                apply_exchange_source_effect(&mut position, &exchanges_as_source[exchange_idx]);
+                crate::tax::cost_basis::apply_exchange_source_effect(
+                    &mut position,
+                    &exchanges_as_source[exchange_idx],
+                );
                 exchange_idx += 1;
             }
 
@@ -299,7 +312,10 @@ fn calculate_portfolio_with_cutoff(
         while exchange_idx < exchanges_as_source.len()
             && exchanges_as_source[exchange_idx].effective_date <= as_of
         {
-            apply_exchange_source_effect(&mut position, &exchanges_as_source[exchange_idx]);
+            crate::tax::cost_basis::apply_exchange_source_effect(
+                &mut position,
+                &exchanges_as_source[exchange_idx],
+            );
             exchange_idx += 1;
         }
 
@@ -405,88 +421,24 @@ fn apply_ltm_income(conn: &Connection, as_of: NaiveDate, positions: &mut [Positi
     }
 }
 
-fn map_transaction(row: &rusqlite::Row) -> Result<Transaction, rusqlite::Error> {
-    Ok(Transaction {
-        id: Some(row.get(0)?),
-        asset_id: row.get(1)?,
-        transaction_type: row
-            .get::<_, String>(2)?
-            .parse::<TransactionType>()
-            .unwrap_or(TransactionType::Buy),
-        trade_date: row.get(3)?,
-        settlement_date: row.get(4)?,
-        quantity: crate::db::get_decimal_value(row, 5)?,
-        price_per_unit: crate::db::get_decimal_value(row, 6)?,
-        total_cost: crate::db::get_decimal_value(row, 7)?,
-        fees: crate::db::get_decimal_value(row, 8)?,
-        is_day_trade: row.get(9)?,
-        quota_issuance_date: row.get(10)?,
-        notes: row.get(11)?,
-        source: row.get(12)?,
-        created_at: row.get(13)?,
-    })
-}
-
-/// Get all transactions for an asset, ordered by trade date
 fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map([asset_id], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
+    crate::db::get_asset_transactions(conn, asset_id)
 }
 
-/// Get all transactions for an asset before a cutoff date (exclusive).
 fn get_asset_transactions_before(
     conn: &Connection,
     asset_id: i64,
     before_date: NaiveDate,
 ) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map(rusqlite::params![asset_id, before_date], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
+    crate::db::get_asset_transactions_before(conn, asset_id, before_date)
 }
 
-/// Get all transactions for an asset up to and including a cutoff date.
 pub(crate) fn get_asset_transactions_until(
     conn: &Connection,
     asset_id: i64,
     cutoff_date: NaiveDate,
 ) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date <= ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map(rusqlite::params![asset_id, cutoff_date], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
+    crate::db::get_asset_transactions_until(conn, asset_id, cutoff_date)
 }
 
 /// Build a synthetic buy transaction representing the carryover position
@@ -597,21 +549,6 @@ pub(crate) fn build_rename_carryover_transaction(
         source: "RENAME".to_string(),
         created_at: chrono::Utc::now(),
     }))
-}
-
-fn apply_exchange_source_effect(
-    position: &mut AvgCostPosition,
-    exchange: &crate::db::AssetExchange,
-) {
-    match exchange.event_type {
-        crate::db::AssetExchangeType::Spinoff => {
-            let reduction = exchange.allocated_cost + exchange.cash_amount;
-            position.apply_amortization(reduction);
-        }
-        crate::db::AssetExchangeType::Merger => {
-            position.clear();
-        }
-    }
 }
 
 /// Compute a fingerprint for all transactions up to and including a date.

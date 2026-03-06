@@ -363,7 +363,7 @@ fn calculate_realized_gains_by_asset_type(
         }
 
         let mut transactions =
-            crate::reports::portfolio::get_asset_transactions_until(conn, asset_id, to_date)?;
+            crate::db::get_asset_transactions_until(conn, asset_id, to_date)?;
 
         let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, to_date)?;
         for rename in renames {
@@ -449,7 +449,7 @@ fn calculate_realized_gains_by_asset_type(
             while exchange_idx < exchanges_as_source.len()
                 && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
             {
-                apply_exchange_source_effect(
+                crate::tax::cost_basis::apply_exchange_source_effect(
                     &mut swing_matcher,
                     &exchanges_as_source[exchange_idx],
                 );
@@ -498,21 +498,6 @@ fn calculate_realized_gains_by_asset_type(
     }
 
     Ok(realized_by_type)
-}
-
-fn apply_exchange_source_effect(
-    matcher: &mut AverageCostMatcher,
-    exchange: &crate::db::AssetExchange,
-) {
-    match exchange.event_type {
-        crate::db::AssetExchangeType::Spinoff => {
-            let reduction = exchange.allocated_cost + exchange.cash_amount;
-            matcher.apply_amortization(reduction);
-        }
-        crate::db::AssetExchangeType::Merger => {
-            matcher.clear_position();
-        }
-    }
 }
 
 /// Extract cash flows from transaction history within a date range

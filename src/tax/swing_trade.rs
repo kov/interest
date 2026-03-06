@@ -204,7 +204,7 @@ pub fn calculate_monthly_tax(
         }
 
         // Get all transactions for this asset up to end of month
-        let mut transactions = get_transactions_up_to_month(conn, asset_id, year, month)?;
+        let mut transactions = crate::db::get_asset_transactions_until(conn, asset_id, month_end)?;
 
         let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, month_end)?;
         for rename in renames {
@@ -297,7 +297,7 @@ pub fn calculate_monthly_tax(
             while exchange_idx < exchanges_as_source.len()
                 && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
             {
-                apply_exchange_source_effect(
+                crate::tax::cost_basis::apply_exchange_source_effect(
                     &mut swing_matcher,
                     &exchanges_as_source[exchange_idx],
                 );
@@ -466,76 +466,8 @@ pub fn calculate_monthly_tax(
     Ok(results)
 }
 
-fn apply_exchange_source_effect(
-    matcher: &mut AverageCostMatcher,
-    exchange: &crate::db::AssetExchange,
-) {
-    match exchange.event_type {
-        crate::db::AssetExchangeType::Spinoff => {
-            let reduction = exchange.allocated_cost + exchange.cash_amount;
-            matcher.apply_amortization(reduction);
-        }
-        crate::db::AssetExchangeType::Merger => {
-            matcher.clear_position();
-        }
-    }
-}
 
 /// Get all transactions for an asset up to the end of specified month
-fn get_transactions_up_to_month(
-    conn: &Connection,
-    asset_id: i64,
-    year: i32,
-    month: u32,
-) -> Result<Vec<Transaction>> {
-    let end_date = if month == 12 {
-        NaiveDate::from_ymd_opt(year + 1, 1, 1)
-            .unwrap()
-            .pred_opt()
-            .unwrap()
-    } else {
-        NaiveDate::from_ymd_opt(year, month + 1, 1)
-            .unwrap()
-            .pred_opt()
-            .unwrap()
-    };
-
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date <= ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map([asset_id.to_string(), end_date.to_string()], |row| {
-            Ok(Transaction {
-                id: Some(row.get(0)?),
-                asset_id: row.get(1)?,
-                transaction_type: row
-                    .get::<_, String>(2)?
-                    .parse::<TransactionType>()
-                    .unwrap_or(TransactionType::Buy),
-                trade_date: row.get(3)?,
-                settlement_date: row.get(4)?,
-                quantity: crate::db::get_decimal_value(row, 5)?,
-                price_per_unit: crate::db::get_decimal_value(row, 6)?,
-                total_cost: crate::db::get_decimal_value(row, 7)?,
-                fees: crate::db::get_decimal_value(row, 8)?,
-                is_day_trade: row.get(9)?,
-                quota_issuance_date: row.get(10)?,
-                notes: row.get(11)?,
-                source: row.get(12)?,
-                created_at: row.get(13)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
