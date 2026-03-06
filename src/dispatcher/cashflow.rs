@@ -13,11 +13,8 @@ pub async fn dispatch_cashflow(
             dispatch_cashflow_scoped(period_str, Scope::Portfolio, options).await
         }
         crate::cli::CashFlowCommands::Type { asset_type, period } => {
-            let at = asset_type
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
             let period_str = period.as_deref().unwrap_or("ALL");
-            dispatch_cashflow_scoped(period_str, Scope::AssetType(at), options).await
+            dispatch_cashflow_scoped(period_str, Scope::AssetType(*asset_type), options).await
         }
         crate::cli::CashFlowCommands::Asset { ticker, period } => {
             let period_str = period.as_deref().unwrap_or("ALL");
@@ -56,7 +53,8 @@ async fn dispatch_cashflow_scoped(
     let conn = db::open_db(None)?;
 
     let period = reports::parse_period(period_str)?;
-    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn))?;
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn), today)?;
 
     // Check if this is a single-year request (show monthly breakdown)
     let is_single_year = period_str
@@ -92,7 +90,8 @@ async fn dispatch_cashflow_stats(period_str: &str, options: options::OutputOptio
     let conn = db::open_db(None)?;
 
     let period = reports::parse_period(period_str)?;
-    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn))?;
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn), today)?;
 
     let stats = cashflow::calculate_cash_flow_stats(&conn, from_date, to_date)?;
 

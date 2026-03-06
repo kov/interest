@@ -4,21 +4,34 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 /// Asset types supported by the system
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
+    clap::ValueEnum,
+)]
+#[clap(rename_all = "kebab-case")]
 pub enum AssetType {
-    Stock,        // Brazilian stocks (ações)
-    Etf,          // Exchange-traded funds
-    Fii,          // Real estate investment funds
-    Fiagro,       // Agribusiness investment funds
-    FiInfra,      // Infrastructure investment funds
-    Bond,         // Corporate bonds
-    GovBond,      // Government bonds (Tesouro Direto)
-    Bdr,          // Brazilian Depositary Receipts
-    Fidc,         // Credit rights investment funds
-    Fip,          // Private equity funds
-    Option,       // Options on equities
-    TermContract, // Term contracts (e.g., ANIM3T)
-    Unknown,      // Unresolved/unknown type
+    Stock,
+    Etf,
+    Fii,
+    Fiagro,
+    #[value(alias = "FI_INFRA")]
+    FiInfra,
+    Bond,
+    #[value(alias = "GOV_BOND")]
+    GovBond,
+    Bdr,
+    Fidc,
+    Fip,
+    Option,
+    #[value(name = "term", alias = "TERM")]
+    TermContract,
+    Unknown,
+}
+
+impl std::fmt::Display for AssetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl AssetType {
@@ -39,13 +52,52 @@ impl AssetType {
             AssetType::Unknown => "UNKNOWN",
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AssetType::Stock => "Stocks",
+            AssetType::Bdr => "BDRs",
+            AssetType::Etf => "ETFs",
+            AssetType::Fii => "Real Estate Funds",
+            AssetType::Fiagro => "Agribusiness Funds",
+            AssetType::FiInfra => "Infrastructure Funds",
+            AssetType::Fidc => "FIDCs",
+            AssetType::Fip => "FIPs",
+            AssetType::Bond => "Corporate Bonds",
+            AssetType::GovBond => "Government Bonds",
+            AssetType::Option => "Options",
+            AssetType::TermContract => "Term Contracts",
+            AssetType::Unknown => "Unknown",
+        }
+    }
+
+    pub fn display_order() -> &'static [AssetType] {
+        &[
+            AssetType::Stock,
+            AssetType::Bdr,
+            AssetType::Fii,
+            AssetType::Fiagro,
+            AssetType::FiInfra,
+            AssetType::Etf,
+            AssetType::Fidc,
+            AssetType::Fip,
+            AssetType::Bond,
+            AssetType::GovBond,
+            AssetType::Option,
+            AssetType::TermContract,
+            AssetType::Unknown,
+        ]
+    }
 }
 
 impl FromStr for AssetType {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_uppercase().as_str() {
+        // Normalize: trim, uppercase, replace hyphens with underscores
+        // so both "fi-infra" and "FI_INFRA" are accepted.
+        let normalized = s.trim().to_ascii_uppercase().replace('-', "_");
+        match normalized.as_str() {
             "STOCK" => Ok(AssetType::Stock),
             "ETF" => Ok(AssetType::Etf),
             "FII" => Ok(AssetType::Fii),

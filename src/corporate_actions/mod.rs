@@ -3,7 +3,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
-use std::str::FromStr;
 use tracing::info;
 
 use crate::db::{Asset, CorporateAction, CorporateActionType, Transaction, TransactionType};
@@ -38,7 +37,7 @@ pub fn get_applicable_actions(
                     .unwrap_or(CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                quantity_adjustment: get_decimal_value(row, 5)?,
+                quantity_adjustment: crate::db::get_decimal_value(row, 5)?,
                 source: row.get(6)?,
                 notes: row.get(7)?,
                 created_at: row.get(8)?,
@@ -74,7 +73,7 @@ pub fn get_actions_up_to(
                     .unwrap_or(CorporateActionType::Split),
                 event_date: row.get(3)?,
                 ex_date: row.get(4)?,
-                quantity_adjustment: get_decimal_value(row, 5)?,
+                quantity_adjustment: crate::db::get_decimal_value(row, 5)?,
                 source: row.get(6)?,
                 notes: row.get(7)?,
                 created_at: row.get(8)?,
@@ -83,97 +82,6 @@ pub fn get_actions_up_to(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(actions)
-}
-
-/// Apply forward-only quantity adjustments for splits/reverse splits up to `cutoff_date`.
-///
-/// Advances `action_idx` as actions are applied. Ignores bonus and capital return.
-pub fn apply_forward_qty_adjustments(
-    quantity: &mut Decimal,
-    actions: &[CorporateAction],
-    action_idx: &mut usize,
-    cutoff_date: chrono::NaiveDate,
-) {
-    while *action_idx < actions.len() {
-        let action = &actions[*action_idx];
-        if action.ex_date <= cutoff_date {
-            match action.action_type {
-                CorporateActionType::Split | CorporateActionType::ReverseSplit => {
-                    *quantity += action.quantity_adjustment;
-                }
-                _ => {}
-            }
-            *action_idx += 1;
-        } else {
-            break;
-        }
-    }
-}
-
-/// Apply corporate action adjustments to a quantity at query time
-///
-/// Adds/subtracts the adjustment quantity (sign convention: positive = add, negative = subtract)
-/// For bonus: no adjustment (bonus creates separate transaction)
-/// For capital return: no quantity adjustment (affects cost basis only)
-///
-/// Returns the adjusted quantity
-pub fn adjust_quantity_for_actions(quantity: Decimal, actions: &[CorporateAction]) -> Decimal {
-    let mut adjusted = quantity;
-    for action in actions {
-        match action.action_type {
-            CorporateActionType::Split | CorporateActionType::ReverseSplit => {
-                // Apply the quantity adjustment directly (sign convention: positive = add, negative = subtract)
-                adjusted += action.quantity_adjustment;
-            }
-            CorporateActionType::Bonus => {
-                // Bonus creates a separate zero-cost transaction, doesn't adjust existing transactions
-            }
-            CorporateActionType::CapitalReturn => {
-                // Capital return affects cost basis, not quantity
-            }
-        }
-    }
-    adjusted
-}
-
-/// Adjust price per unit for corporate actions at query time
-///
-/// For quantity-based adjustments: recalculate price from adjusted total cost
-/// For capital return: affects total cost, compute new price = new_total / quantity
-///
-/// Returns (adjusted_price, adjusted_total_cost)
-pub fn adjust_price_and_cost_for_actions(
-    quantity: Decimal,
-    _price: Decimal,
-    total_cost: Decimal,
-    actions: &[CorporateAction],
-) -> (Decimal, Decimal) {
-    let mut adjusted_qty = quantity;
-    let adjusted_cost = total_cost;
-
-    for action in actions {
-        match action.action_type {
-            CorporateActionType::Split
-            | CorporateActionType::ReverseSplit
-            | CorporateActionType::Bonus => {
-                // Apply quantity adjustment
-                adjusted_qty += action.quantity_adjustment;
-                // Total cost stays same for splits/bonuses; price per unit adjusts automatically
-            }
-            CorporateActionType::CapitalReturn => {
-                // Capital return handling should be revised for new approach
-            }
-        }
-    }
-
-    // Recompute price per unit based on adjusted quantity
-    let adjusted_price = if adjusted_qty > Decimal::ZERO {
-        adjusted_cost / adjusted_qty
-    } else {
-        Decimal::ZERO
-    };
-
-    (adjusted_price, adjusted_cost)
 }
 
 /// Get unapplied corporate actions for an asset (or all assets if None)
@@ -256,28 +164,6 @@ pub fn apply_corporate_action(
     );
 
     Ok(0)
-}
-
-/// Helper to read Decimal from SQLite (handles both INTEGER, REAL and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    use rusqlite::types::ValueRef;
-
-    match row.get_ref(idx)? {
-        ValueRef::Text(bytes) => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Decimal::from_str(s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        ValueRef::Integer(i) => Ok(Decimal::from(i)),
-        ValueRef::Real(f) => {
-            Decimal::try_from(f).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        }
-        _ => Err(rusqlite::Error::InvalidColumnType(
-            idx,
-            "decimal".to_string(),
-            rusqlite::types::Type::Null,
-        )),
-    }
 }
 
 #[cfg(test)]

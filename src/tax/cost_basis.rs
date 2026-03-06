@@ -3,7 +3,28 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 use crate::db::models::AssetType;
-use crate::db::{Transaction, TransactionType};
+use crate::db::{AssetExchange, AssetExchangeType, Transaction, TransactionType};
+
+/// Common interface for position trackers that support cost adjustments.
+pub trait CostTracker {
+    fn apply_amortization(&mut self, amount: Decimal);
+    fn clear_position(&mut self);
+    fn apply_quantity_adjustment(&mut self, adjustment: Decimal);
+}
+
+/// Apply the effect of an asset exchange where this asset is the source.
+/// Spinoffs reduce cost by the allocated amount; mergers clear the position.
+pub fn apply_exchange_source_effect<T: CostTracker>(tracker: &mut T, exchange: &AssetExchange) {
+    match exchange.event_type {
+        AssetExchangeType::Spinoff => {
+            let reduction = exchange.allocated_cost + exchange.cash_amount;
+            tracker.apply_amortization(reduction);
+        }
+        AssetExchangeType::Merger => {
+            tracker.clear_position();
+        }
+    }
+}
 
 /// Cost basis result for a sale
 #[derive(Debug, Clone)]
@@ -153,12 +174,31 @@ impl AverageCostMatcher {
     }
 
     #[allow(dead_code)]
+    pub fn remaining_cost(&self) -> Decimal {
+        self.total_cost
+    }
+
+    #[cfg(test)]
     pub fn average_cost(&self) -> Decimal {
         if self.total_quantity > Decimal::ZERO {
             self.total_cost / self.total_quantity
         } else {
             Decimal::ZERO
         }
+    }
+}
+
+impl CostTracker for AverageCostMatcher {
+    fn apply_amortization(&mut self, amount: Decimal) {
+        self.apply_amortization(amount);
+    }
+
+    fn clear_position(&mut self) {
+        self.clear_position();
+    }
+
+    fn apply_quantity_adjustment(&mut self, adjustment: Decimal) {
+        self.apply_quantity_adjustment(adjustment);
     }
 }
 

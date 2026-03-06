@@ -15,11 +15,8 @@ pub async fn dispatch_income(
             dispatch_income_show_impl(from_date, to_date, year_val, None, options).await
         }
         crate::cli::IncomeCommands::Type { asset_type, period } => {
-            let at = asset_type
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
             let (from_date, to_date, year_val) = resolve_income_period(period.as_deref())?;
-            dispatch_income_show_impl(from_date, to_date, year_val, Some(at), options).await
+            dispatch_income_show_impl(from_date, to_date, year_val, Some(*asset_type), options).await
         }
         crate::cli::IncomeCommands::Asset { ticker, period } => {
             let (from_date, to_date, _year_val) = resolve_income_period(period.as_deref())?;
@@ -64,7 +61,7 @@ pub async fn dispatch_income(
         }
         crate::cli::IncomeCommands::Yield {
             ticker, asset_type, ..
-        } => dispatch_income_yield(ticker.as_deref(), asset_type.as_deref(), options).await,
+        } => dispatch_income_yield(ticker.as_deref(), *asset_type, options).await,
         crate::cli::IncomeCommands::Trends { ticker, months } => {
             dispatch_income_trends(ticker.as_deref(), *months, options).await
         }
@@ -91,7 +88,8 @@ fn resolve_income_period(
 
     let period_str = period.unwrap_or("YTD");
     let parsed = crate::reports::parse_period(period_str)?;
-    let (from_date, to_date) = crate::reports::performance::get_period_dates(parsed, None)?;
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(parsed, None, today)?;
     let year_val = to_date.year();
     Ok((from_date, to_date, year_val))
 }
@@ -194,25 +192,9 @@ async fn dispatch_income_show_impl(
         });
     }
 
-    let type_order = [
-        db::AssetType::Stock,
-        db::AssetType::Bdr,
-        db::AssetType::Fii,
-        db::AssetType::Fiagro,
-        db::AssetType::FiInfra,
-        db::AssetType::Etf,
-        db::AssetType::Fidc,
-        db::AssetType::Fip,
-        db::AssetType::Bond,
-        db::AssetType::GovBond,
-        db::AssetType::Option,
-        db::AssetType::TermContract,
-        db::AssetType::Unknown,
-    ];
-
     let mut ordered: Vec<(db::AssetType, Vec<formatters::income::AssetIncome>)> = Vec::new();
     let mut all_assets: Vec<formatters::income::AssetIncome> = Vec::new();
-    for asset_type in &type_order {
+    for asset_type in db::AssetType::display_order() {
         if let Some(assets) = by_type.get(asset_type) {
             if assets.is_empty() {
                 continue;
@@ -676,7 +658,7 @@ async fn dispatch_income_add(
 
 async fn dispatch_income_yield(
     ticker: Option<&str>,
-    asset_type: Option<&str>,
+    asset_type: Option<db::AssetType>,
     options: options::OutputOptions,
 ) -> Result<()> {
     use crate::reports::income_analytics;
@@ -722,11 +704,9 @@ async fn dispatch_income_yield(
                 continue;
             }
         }
-        if let Some(filter_type) = asset_type {
-            if let Ok(at) = filter_type.parse::<db::AssetType>() {
-                if position.asset.asset_type != at {
-                    continue;
-                }
+        if let Some(at) = asset_type {
+            if position.asset.asset_type != at {
+                continue;
             }
         }
 
@@ -815,7 +795,7 @@ async fn dispatch_income_forecast(
     }
 
     // Single batch query for all income events in the 2-year window
-    let two_years_ago = today - chrono::Duration::days(730);
+    let two_years_ago = today - chrono::Months::new(24);
     let all_events =
         db::get_income_events_with_assets(&conn, Some(two_years_ago), Some(today), None)?;
 
@@ -906,7 +886,7 @@ async fn dispatch_income_calendar(
     let report = crate::reports::calculate_portfolio(&conn, None)?;
 
     // Single batch query for all income events in the 2-year window
-    let two_years_ago = today - chrono::Duration::days(730);
+    let two_years_ago = today - chrono::Months::new(24);
     let all_events =
         db::get_income_events_with_assets(&conn, Some(two_years_ago), Some(today), None)?;
 

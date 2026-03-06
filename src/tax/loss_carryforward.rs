@@ -2,7 +2,6 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 use tracing::debug;
 
 use super::swing_trade::TaxCategory;
@@ -50,8 +49,8 @@ pub fn get_losses_for_category(
                     .get::<_, String>(3)?
                     .parse::<TaxCategory>()
                     .unwrap_or(TaxCategory::StockSwingTrade),
-                loss_amount: get_decimal_value(row, 4)?,
-                remaining_amount: get_decimal_value(row, 5)?,
+                loss_amount: crate::db::get_decimal_value(row, 4)?,
+                remaining_amount: crate::db::get_decimal_value(row, 5)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -140,7 +139,7 @@ pub fn get_total_losses_by_category(conn: &Connection) -> Result<HashMap<TaxCate
     let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
 
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, get_decimal_value(row, 1)?))
+        Ok((row.get::<_, String>(0)?, crate::db::get_decimal_value(row, 1)?))
     })?;
 
     for row in rows {
@@ -169,7 +168,7 @@ pub fn get_remaining_losses_before_year(
     let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
 
     let rows = stmt.query_map([year], |row| {
-        Ok((row.get::<_, String>(0)?, get_decimal_value(row, 1)?))
+        Ok((row.get::<_, String>(0)?, crate::db::get_decimal_value(row, 1)?))
     })?;
 
     for row in rows {
@@ -196,9 +195,9 @@ pub fn compute_year_fingerprint(conn: &Connection, year: i32) -> Result<String> 
     let row = stmt.query_row([year.to_string()], |row| {
         Ok((
             row.get::<_, i64>(0)?,
-            get_decimal_value(row, 1)?,
-            get_decimal_value(row, 2)?,
-            get_decimal_value(row, 3)?,
+            crate::db::get_decimal_value(row, 1)?,
+            crate::db::get_decimal_value(row, 2)?,
+            crate::db::get_decimal_value(row, 3)?,
         ))
     })?;
 
@@ -217,7 +216,7 @@ pub fn load_snapshots(conn: &Connection) -> Result<HashMap<i32, LossSnapshot>> {
         Ok((
             row.get::<_, i32>(0)?,
             row.get::<_, String>(1)?,
-            get_decimal_value(row, 2)?,
+            crate::db::get_decimal_value(row, 2)?,
             row.get::<_, String>(3)?,
         ))
     })?;
@@ -295,32 +294,6 @@ pub fn earliest_transaction_year(conn: &Connection) -> Result<Option<i32>> {
 pub fn clear_year_losses(conn: &Connection, year: i32) -> Result<()> {
     conn.execute("DELETE FROM loss_carryforward WHERE year = ?1", [year])?;
     Ok(())
-}
-
-/// Helper to read Decimal from SQLite
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    // Try to get as String first (for TEXT storage)
-    if let Ok(s) = row.get::<_, String>(idx) {
-        return Decimal::from_str(&s)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
-    }
-
-    // Fall back to i64 (for INTEGER storage)
-    if let Ok(i) = row.get::<_, i64>(idx) {
-        return Ok(Decimal::from(i));
-    }
-
-    // Try f64 for floating point values
-    if let Ok(f) = row.get::<_, f64>(idx) {
-        return Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
-    }
-
-    Err(rusqlite::Error::InvalidColumnType(
-        idx,
-        "decimal".to_string(),
-        rusqlite::types::Type::Null,
-    ))
 }
 
 #[cfg(test)]

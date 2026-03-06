@@ -2,6 +2,7 @@
 
 pub mod aggregation;
 pub mod cashflow;
+pub mod enrichment;
 pub mod income_analytics;
 pub mod performance;
 pub mod period;

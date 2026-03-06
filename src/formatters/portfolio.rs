@@ -266,7 +266,7 @@ fn build_portfolio_document(
         document.blocks.push(OutputBlock::Section {
             title: Some(format!(
                 "{} ({})",
-                asset_type_name(asset_type),
+                asset_type.display_name(),
                 asset_type.as_str()
             )),
             blocks: section_blocks,
@@ -338,25 +338,6 @@ fn build_portfolio_document(
     });
 
     document
-}
-
-/// Get friendly name for asset type
-fn asset_type_name(asset_type: &AssetType) -> &'static str {
-    match asset_type {
-        AssetType::Stock => "Stocks",
-        AssetType::Bdr => "BDRs",
-        AssetType::Etf => "ETFs",
-        AssetType::Fii => "Real Estate Funds",
-        AssetType::Fiagro => "Agribusiness Funds",
-        AssetType::FiInfra => "Infrastructure Funds",
-        AssetType::Fidc => "FIDCs",
-        AssetType::Fip => "FIPs",
-        AssetType::Bond => "Corporate Bonds",
-        AssetType::GovBond => "Government Bonds",
-        AssetType::Option => "Options",
-        AssetType::TermContract => "Term Contracts",
-        AssetType::Unknown => "Unknown",
-    }
 }
 
 /// Format empty portfolio message
@@ -675,18 +656,18 @@ mod tests {
 
     #[test]
     fn test_asset_type_name_mapping() {
-        assert_eq!(asset_type_name(&AssetType::Stock), "Stocks");
-        assert_eq!(asset_type_name(&AssetType::Bdr), "BDRs");
-        assert_eq!(asset_type_name(&AssetType::Etf), "ETFs");
-        assert_eq!(asset_type_name(&AssetType::Fii), "Real Estate Funds");
-        assert_eq!(asset_type_name(&AssetType::Fiagro), "Agribusiness Funds");
-        assert_eq!(asset_type_name(&AssetType::FiInfra), "Infrastructure Funds");
-        assert_eq!(asset_type_name(&AssetType::Fidc), "FIDCs");
-        assert_eq!(asset_type_name(&AssetType::Fip), "FIPs");
-        assert_eq!(asset_type_name(&AssetType::Bond), "Corporate Bonds");
-        assert_eq!(asset_type_name(&AssetType::GovBond), "Government Bonds");
-        assert_eq!(asset_type_name(&AssetType::Option), "Options");
-        assert_eq!(asset_type_name(&AssetType::TermContract), "Term Contracts");
-        assert_eq!(asset_type_name(&AssetType::Unknown), "Unknown");
+        assert_eq!(AssetType::Stock.display_name(), "Stocks");
+        assert_eq!(AssetType::Bdr.display_name(), "BDRs");
+        assert_eq!(AssetType::Etf.display_name(), "ETFs");
+        assert_eq!(AssetType::Fii.display_name(), "Real Estate Funds");
+        assert_eq!(AssetType::Fiagro.display_name(), "Agribusiness Funds");
+        assert_eq!(AssetType::FiInfra.display_name(), "Infrastructure Funds");
+        assert_eq!(AssetType::Fidc.display_name(), "FIDCs");
+        assert_eq!(AssetType::Fip.display_name(), "FIPs");
+        assert_eq!(AssetType::Bond.display_name(), "Corporate Bonds");
+        assert_eq!(AssetType::GovBond.display_name(), "Government Bonds");
+        assert_eq!(AssetType::Option.display_name(), "Options");
+        assert_eq!(AssetType::TermContract.display_name(), "Term Contracts");
+        assert_eq!(AssetType::Unknown.display_name(), "Unknown");
     }
 }

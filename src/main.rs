@@ -1,6 +1,5 @@
 mod chat;
 mod cli;
-mod commands;
 mod corporate_actions;
 mod db;
 mod dispatcher;

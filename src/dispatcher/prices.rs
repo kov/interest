@@ -148,8 +148,9 @@ async fn dispatch_price_update(options: options::OutputOptions) -> Result<()> {
     crate::db::init_database(None)?;
     let conn = crate::db::open_db(None)?;
 
-    // Get all assets
-    let assets = crate::db::get_all_assets(&conn)?;
+    // Get priceable assets with open positions
+    let all_assets = crate::db::get_assets_with_transactions(&conn)?;
+    let assets = crate::pricing::resolver::filter_priceable_assets(&all_assets);
 
     if assets.is_empty() {
         options.writer().writeln(&format!(

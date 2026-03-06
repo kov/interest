@@ -1,7 +1,6 @@
 //! Performance command dispatcher implementation
 
 use crate::reports::scope::Scope;
-use crate::ui::progress::{ProgressEvent, ProgressPrinter};
 use crate::{db, formatters, options, reports};
 use anyhow::Result;
 
@@ -25,97 +24,23 @@ async fn dispatch_performance_scoped(
     }
 
     let period = reports::parse_period(period_str)?;
-    // Determine period boundaries (used for price range limiting)
+    let today = chrono::Local::now().date_naive();
     let (period_start, period_end) =
-        crate::reports::performance::get_period_dates(period.clone(), Some(&conn))?;
-    // Allow disabling live price fetching via env var (mirrors portfolio command)
-    let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
-        .map(|v| v != "0")
-        .unwrap_or(false);
+        crate::reports::performance::get_period_dates(period.clone(), Some(&conn), today)?;
 
     // Ensure prices are available for the required date range
-    // Filter out blocked assets
     let assets = db::get_assets_with_transactions(&conn)?;
-    let priceable_assets = crate::pricing::resolver::filter_priceable_assets(&assets);
     if !assets.is_empty() {
-        // Get the date range for prices
         let earliest = db::get_earliest_transaction_date(&conn)?;
         if let Some(earliest_date) = earliest {
-            // Limit price resolution to the end of the requested period
-            let today = period_end;
             let price_start = std::cmp::max(earliest_date, period_start);
-
-            if !options.is_json() && !skip_price_fetch {
-                let total = priceable_assets.len();
-                let printer = ProgressPrinter::new(&options);
-
-                // Show initial spinner
-                printer.handle_event(&ProgressEvent::Spinner {
-                    message: format!("Fetching prices 0/{}...", total),
-                });
-
-                crate::pricing::resolver::ensure_prices_available_with_progress(
-                    &mut conn,
-                    &assets,
-                    (price_start, today),
-                    options.clone(),
-                    |event| {
-                        // For ticker results, also update the spinner with current count
-                        match event {
-                            ProgressEvent::TickerResult {
-                                ticker,
-                                price,
-                                current,
-                                total,
-                            } => {
-                                let masked = if options.is_private() {
-                                    ProgressEvent::TickerResult {
-                                        ticker: ticker.clone(),
-                                        price: price
-                                            .as_ref()
-                                            .map(|_| "R$ ***".to_string())
-                                            .map_err(|err| err.clone()),
-                                        current: *current,
-                                        total: *total,
-                                    }
-                                } else {
-                                    ProgressEvent::TickerResult {
-                                        ticker: ticker.clone(),
-                                        price: price.clone(),
-                                        current: *current,
-                                        total: *total,
-                                    }
-                                };
-                                printer.handle_event(&masked);
-                                printer.handle_event(&ProgressEvent::Spinner {
-                                    message: format!("Fetching prices {}/{}...", current, total),
-                                });
-                            }
-                            _ => printer.handle_event(event),
-                        }
-                    },
-                )
-                .await
-                .or_else(|e: anyhow::Error| {
-                    tracing::warn!("Price resolution failed: {}", e);
-                    // Continue anyway - performance calculation will use available prices
-                    Ok::<(), anyhow::Error>(())
-                })?;
-            } else if !skip_price_fetch {
-                // JSON mode: no spinner, just fetch silently
-                crate::pricing::resolver::ensure_prices_available(
-                    &mut conn,
-                    &assets,
-                    (price_start, today),
-                    options.clone(),
-                )
-                .await
-                .or_else(|e: anyhow::Error| {
-                    tracing::warn!("Price resolution failed: {}", e);
-                    // Continue anyway - performance calculation will use available prices
-                    Ok::<(), anyhow::Error>(())
-                })?;
-            }
+            super::prices_ui::ensure_prices_with_ui(
+                &mut conn,
+                &assets,
+                (price_start, period_end),
+                &options,
+            )
+            .await?;
         }
     }
 
@@ -206,11 +131,8 @@ pub async fn dispatch_performance(
             dispatch_performance_scoped(period_str, Scope::Portfolio, options).await
         }
         crate::cli::PerformanceCommands::Type { asset_type, period } => {
-            let at = asset_type
-                .parse::<db::AssetType>()
-                .map_err(|_| anyhow::anyhow!("Invalid asset type: {}", asset_type))?;
             let period_str = period.as_deref().unwrap_or("YTD");
-            dispatch_performance_scoped(period_str, Scope::AssetType(at), options).await
+            dispatch_performance_scoped(period_str, Scope::AssetType(*asset_type), options).await
         }
         crate::cli::PerformanceCommands::Asset { ticker, period } => {
             let period_str = period.as_deref().unwrap_or("YTD");

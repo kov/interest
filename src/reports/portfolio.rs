@@ -4,8 +4,6 @@ use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
-
 use crate::db::{Asset, AssetType, Transaction, TransactionType};
 use crate::reports::aggregation::normalize_positions_with_prices;
 
@@ -115,6 +113,20 @@ impl AvgCostPosition {
     }
 }
 
+impl crate::tax::cost_basis::CostTracker for AvgCostPosition {
+    fn apply_amortization(&mut self, amount: Decimal) {
+        self.apply_amortization(amount);
+    }
+
+    fn clear_position(&mut self) {
+        self.clear();
+    }
+
+    fn apply_quantity_adjustment(&mut self, adjustment: Decimal) {
+        self.quantity += adjustment;
+    }
+}
+
 /// Calculate current portfolio positions using average cost
 pub fn calculate_portfolio(
     conn: &Connection,
@@ -181,137 +193,24 @@ fn calculate_portfolio_with_cutoff(
     for asset in filtered_assets {
         let asset_id = asset.id.unwrap();
 
-        // Get all transactions for this asset, ordered by date
-        let mut transactions = match as_of_date {
-            Some(cutoff) => get_asset_transactions_until(conn, asset_id, cutoff)?,
-            None => get_asset_transactions(conn, asset_id)?,
-        };
-
-        let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, as_of)?;
-        for rename in renames {
-            if let Some(source_asset) = assets_by_id.get(&rename.from_asset_id) {
-                if let Some(carryover) = build_rename_carryover_transaction(
-                    conn,
-                    source_asset,
-                    asset_id,
-                    rename.effective_date,
-                )? {
-                    transactions.push(carryover);
-                }
-            }
-        }
-
-        let exchanges = crate::db::get_asset_exchanges_as_target_up_to(conn, asset_id, as_of)?;
-        for exchange in exchanges {
-            if exchange.to_quantity <= Decimal::ZERO {
-                continue;
-            }
-
-            let source_ticker = assets_by_id
-                .get(&exchange.from_asset_id)
-                .map(|a| a.ticker.as_str())
-                .unwrap_or("UNKNOWN");
-            let notes = match exchange.event_type {
-                crate::db::AssetExchangeType::Spinoff => {
-                    format!("Spin-off from {}", source_ticker)
-                }
-                crate::db::AssetExchangeType::Merger => {
-                    format!("Merger from {}", source_ticker)
-                }
-            };
-
-            let price_per_unit = if exchange.to_quantity > Decimal::ZERO {
-                exchange.allocated_cost / exchange.to_quantity
-            } else {
-                Decimal::ZERO
-            };
-
-            transactions.push(Transaction {
-                id: None,
-                asset_id,
-                transaction_type: TransactionType::Buy,
-                trade_date: exchange.effective_date,
-                settlement_date: Some(exchange.effective_date),
-                quantity: exchange.to_quantity,
-                price_per_unit,
-                total_cost: exchange.allocated_cost,
-                fees: Decimal::ZERO,
-                is_day_trade: false,
-                quota_issuance_date: None,
-                notes: Some(notes),
-                source: "EXCHANGE".to_string(),
-                created_at: chrono::Utc::now(),
-            });
-        }
-
-        transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
-
-        // Calculate average-cost position
+        // Build enriched transaction list and replay with interleaved events
+        let enriched =
+            crate::reports::enrichment::build_enriched_transactions(
+                conn, asset_id, as_of, &assets_by_id,
+            )?;
         let mut position = AvgCostPosition::new(asset_id);
-
-        // Apply fixed split adjustments forward-only, at the time they occur
-        let amortizations =
-            crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(as_of))?;
-        let mut amort_idx = 0usize;
-        let exchanges_as_source =
-            crate::db::get_asset_exchanges_as_source_up_to(conn, asset_id, as_of)?;
-        let mut exchange_idx = 0usize;
-        let actions = crate::corporate_actions::get_actions_up_to(conn, asset_id, as_of)?;
-
-        let mut action_idx = 0usize;
-        for tx in transactions {
-            while amort_idx < amortizations.len()
-                && amortizations[amort_idx].event_date <= tx.trade_date
-            {
-                position.apply_amortization(amortizations[amort_idx].total_amount);
-                amort_idx += 1;
-            }
-
-            while exchange_idx < exchanges_as_source.len()
-                && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
-            {
-                apply_exchange_source_effect(&mut position, &exchanges_as_source[exchange_idx]);
-                exchange_idx += 1;
-            }
-
-            // Apply any corporate actions effective up to this transaction's date
-            crate::corporate_actions::apply_forward_qty_adjustments(
-                &mut position.quantity,
-                &actions,
-                &mut action_idx,
-                tx.trade_date,
-            );
-
-            // Build raw position for this transaction
+        let ticker = asset.ticker.clone();
+        enriched.replay(&mut position, as_of, |tx, pos| {
             match tx.transaction_type {
                 TransactionType::Buy => {
-                    position.add_buy(tx.quantity, tx.total_cost);
+                    pos.add_buy(tx.quantity, tx.total_cost);
                 }
                 TransactionType::Sell => {
-                    position.remove_sell(tx.quantity, &asset.ticker)?;
+                    pos.remove_sell(tx.quantity, &ticker)?;
                 }
             }
-        }
-
-        while amort_idx < amortizations.len() && amortizations[amort_idx].event_date <= as_of {
-            position.apply_amortization(amortizations[amort_idx].total_amount);
-            amort_idx += 1;
-        }
-
-        while exchange_idx < exchanges_as_source.len()
-            && exchanges_as_source[exchange_idx].effective_date <= as_of
-        {
-            apply_exchange_source_effect(&mut position, &exchanges_as_source[exchange_idx]);
-            exchange_idx += 1;
-        }
-
-        // Apply any remaining actions after the last transaction but before as_of
-        crate::corporate_actions::apply_forward_qty_adjustments(
-            &mut position.quantity,
-            &actions,
-            &mut action_idx,
-            as_of,
-        );
+            Ok(())
+        })?;
 
         // Skip assets with zero quantity
         if position.quantity <= Decimal::ZERO {
@@ -383,7 +282,7 @@ fn calculate_portfolio_with_cutoff(
 
 /// Enrich positions with LTM income data
 fn apply_ltm_income(conn: &Connection, as_of: NaiveDate, positions: &mut [PositionSummary]) {
-    let one_year_ago = as_of - chrono::Duration::days(365);
+    let one_year_ago = as_of - chrono::Months::new(12);
     let totals = match crate::db::get_income_totals_by_asset(conn, one_year_ago, as_of) {
         Ok(t) => t,
         Err(_) => return,
@@ -407,129 +306,100 @@ fn apply_ltm_income(conn: &Connection, as_of: NaiveDate, positions: &mut [Positi
     }
 }
 
-fn map_transaction(row: &rusqlite::Row) -> Result<Transaction, rusqlite::Error> {
-    Ok(Transaction {
-        id: Some(row.get(0)?),
-        asset_id: row.get(1)?,
-        transaction_type: row
-            .get::<_, String>(2)?
-            .parse::<TransactionType>()
-            .unwrap_or(TransactionType::Buy),
-        trade_date: row.get(3)?,
-        settlement_date: row.get(4)?,
-        quantity: get_decimal_value(row, 5)?,
-        price_per_unit: get_decimal_value(row, 6)?,
-        total_cost: get_decimal_value(row, 7)?,
-        fees: get_decimal_value(row, 8)?,
-        is_day_trade: row.get(9)?,
-        quota_issuance_date: row.get(10)?,
-        notes: row.get(11)?,
-        source: row.get(12)?,
-        created_at: row.get(13)?,
-    })
-}
-
-/// Get all transactions for an asset, ordered by trade date
-fn get_asset_transactions(conn: &Connection, asset_id: i64) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map([asset_id], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
-}
-
-/// Get all transactions for an asset before a cutoff date (exclusive).
 fn get_asset_transactions_before(
     conn: &Connection,
     asset_id: i64,
     before_date: NaiveDate,
 ) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date < ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map(rusqlite::params![asset_id, before_date], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
+    crate::db::get_asset_transactions_before(conn, asset_id, before_date)
 }
 
-/// Get all transactions for an asset up to and including a cutoff date.
-pub(crate) fn get_asset_transactions_until(
-    conn: &Connection,
-    asset_id: i64,
-    cutoff_date: NaiveDate,
-) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, asset_id, transaction_type, trade_date, settlement_date,
-                quantity, price_per_unit, total_cost, fees, is_day_trade,
-                quota_issuance_date, notes, source, created_at
-         FROM transactions
-         WHERE asset_id = ?1 AND trade_date <= ?2
-         ORDER BY trade_date ASC, id ASC",
-    )?;
-
-    let transactions = stmt
-        .query_map(rusqlite::params![asset_id, cutoff_date], map_transaction)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(transactions)
-}
-
+/// Build a synthetic buy transaction representing the carryover position
+/// from a renamed source asset. Replays source-asset transactions with
+/// interleaved amortizations and per-transaction corporate action
+/// adjustments (source-asset splits between trade date and rename date).
+///
+/// Target-asset corporate actions are NOT applied here — they are handled
+/// by the caller's main transaction loop at the correct chronological point.
 pub(crate) fn build_rename_carryover_transaction(
     conn: &Connection,
     source_asset: &Asset,
     target_asset_id: i64,
     effective_date: NaiveDate,
 ) -> Result<Option<Transaction>> {
+    use crate::tax::cost_basis::AverageCostMatcher;
+
     let source_id = match source_asset.id {
         Some(id) => id,
         None => return Ok(None),
     };
 
     let transactions = get_asset_transactions_before(conn, source_id, effective_date)?;
-    let mut position = AvgCostPosition::new(source_id);
+    let mut matcher = AverageCostMatcher::new();
+
+    // Interleave amortizations with transactions
+    let amortizations =
+        crate::db::get_amortizations_for_asset(conn, source_id, None, Some(effective_date))?;
+    let mut amort_idx: usize = 0;
 
     for tx in transactions {
         if tx.is_day_trade {
             continue;
         }
 
+        // Apply amortizations that occurred on or before this transaction date
+        while amort_idx < amortizations.len()
+            && amortizations[amort_idx].event_date <= tx.trade_date
+        {
+            matcher.apply_amortization(amortizations[amort_idx].total_amount);
+            amort_idx += 1;
+        }
+
+        // Adjust this transaction for source-asset corporate actions that
+        // occurred between its trade date and the rename effective date
+        let actions = crate::corporate_actions::get_applicable_actions(
+            conn,
+            source_id,
+            tx.trade_date,
+            effective_date,
+        )?;
+
+        let mut adjusted_quantity = tx.quantity;
+        let adjusted_cost = tx.total_cost;
+        for action in &actions {
+            match action.action_type {
+                crate::db::CorporateActionType::Split
+                | crate::db::CorporateActionType::ReverseSplit => {
+                    adjusted_quantity += action.quantity_adjustment;
+                }
+                _ => {}
+            }
+        }
+
         match tx.transaction_type {
             TransactionType::Buy => {
-                position.add_buy(tx.quantity, tx.total_cost);
+                matcher.add_purchase(&tx, Some(adjusted_quantity), Some(adjusted_cost));
             }
             TransactionType::Sell => {
-                position.remove_sell(tx.quantity, &source_asset.ticker)?;
+                let _ = matcher.match_sale(&tx, Some(adjusted_quantity))?;
             }
         }
     }
 
-    if position.quantity <= Decimal::ZERO {
+    // Apply any remaining amortizations up to the effective date
+    while amort_idx < amortizations.len()
+        && amortizations[amort_idx].event_date <= effective_date
+    {
+        matcher.apply_amortization(amortizations[amort_idx].total_amount);
+        amort_idx += 1;
+    }
+
+    let quantity = matcher.remaining_quantity();
+    if quantity <= Decimal::ZERO {
         return Ok(None);
     }
 
-    let quantity = position.quantity;
-    let total_cost = position.total_cost;
-    // NOTE: Do NOT apply corporate actions here - they will be applied naturally
-    // in the main transaction loop via apply_forward_qty_adjustments based on
-    // the carryover transaction's trade_date
-
+    let total_cost = matcher.remaining_cost();
     let price_per_unit = if quantity > Decimal::ZERO {
         total_cost / quantity
     } else {
@@ -554,52 +424,6 @@ pub(crate) fn build_rename_carryover_transaction(
     }))
 }
 
-fn apply_exchange_source_effect(
-    position: &mut AvgCostPosition,
-    exchange: &crate::db::AssetExchange,
-) {
-    match exchange.event_type {
-        crate::db::AssetExchangeType::Spinoff => {
-            let reduction = exchange.allocated_cost + exchange.cash_amount;
-            position.apply_amortization(reduction);
-        }
-        crate::db::AssetExchangeType::Merger => {
-            position.clear();
-        }
-    }
-}
-
-// NOTE: apply_actions_to_carryover removed - carryover transaction is created at
-// the rename effective_date, and corporate actions are applied naturally by
-// the main transaction loop's apply_forward_qty_adjustments based on chronological
-// trade_date ordering. Applying actions here caused double-adjustment bugs.
-
-/// Helper to read Decimal from SQLite (handles both INTEGER and TEXT)
-fn get_decimal_value(row: &rusqlite::Row, idx: usize) -> Result<Decimal, rusqlite::Error> {
-    // Try to get as String first (for TEXT storage)
-    if let Ok(s) = row.get::<_, String>(idx) {
-        return Decimal::from_str(&s)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
-    }
-
-    // Fall back to i64 (for INTEGER storage due to SQLite type affinity)
-    if let Ok(i) = row.get::<_, i64>(idx) {
-        return Ok(Decimal::from(i));
-    }
-
-    // Try f64 for floating point values
-    if let Ok(f) = row.get::<_, f64>(idx) {
-        return Decimal::try_from(f)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
-    }
-
-    Err(rusqlite::Error::InvalidColumnType(
-        idx,
-        "quantity".to_string(),
-        rusqlite::types::Type::Null,
-    ))
-}
-
 /// Compute a fingerprint for all transactions up to and including a date.
 /// Includes corporate actions to detect when adjustments change.
 pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) -> Result<String> {
@@ -620,9 +444,9 @@ pub fn compute_snapshot_fingerprint(conn: &Connection, as_of_date: NaiveDate) ->
         let asset_id: i64 = row.get(1)?;
         let tx_type: String = row.get(2)?;
         let trade_date: NaiveDate = row.get(3)?;
-        let quantity = get_decimal_value(row, 4)?;
-        let price_per_unit = get_decimal_value(row, 5)?;
-        let total_cost = get_decimal_value(row, 6)?;
+        let quantity = crate::db::get_decimal_value(row, 4)?;
+        let price_per_unit = crate::db::get_decimal_value(row, 5)?;
+        let total_cost = crate::db::get_decimal_value(row, 6)?;
 
         let line = format!(
             "{}|{}|{}|{}|{}|{}|{}\n",
@@ -739,11 +563,11 @@ pub fn get_valid_snapshot(conn: &Connection, date: NaiveDate) -> Result<Option<P
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
                 },
-                get_decimal_value(row, 1)?,
-                get_decimal_value(row, 2)?,
-                get_decimal_value(row, 3)?,
-                get_decimal_value(row, 4)?,
-                get_decimal_value(row, 5)?,
+                crate::db::get_decimal_value(row, 1)?,
+                crate::db::get_decimal_value(row, 2)?,
+                crate::db::get_decimal_value(row, 3)?,
+                crate::db::get_decimal_value(row, 4)?,
+                crate::db::get_decimal_value(row, 5)?,
                 row.get::<_, String>(6)?,
             ))
         })?

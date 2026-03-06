@@ -1,15 +1,12 @@
 use anyhow::Result;
 use std::io::{stdin, stdout, Write};
 
+use clap::ValueEnum;
+
 use crate::{
     db::{self, AssetType},
     formatters, options,
 };
-
-const KNOWN_TYPES: &[&str] = &[
-    "STOCK", "BDR", "ETF", "FII", "FIAGRO", "FI_INFRA", "FIDC", "FIP", "BOND", "GOV_BOND",
-    "OPTION", "UNKNOWN",
-];
 
 pub async fn dispatch_tickers(
     action: &crate::cli::TickersCommands,
@@ -72,14 +69,13 @@ pub async fn dispatch_tickers(
             }
 
             if let Some(ticker) = ticker {
-                let asset_type = asset_type.clone().ok_or_else(|| {
+                let at = asset_type.ok_or_else(|| {
                     anyhow::anyhow!("tickers resolve requires --type when a ticker is provided")
                 })?;
-                let parsed = parse_asset_type(&asset_type)?;
-                db::update_asset_type(&conn, ticker, &parsed)?;
+                db::update_asset_type(&conn, ticker, &at)?;
                 println!(
                     "{}",
-                    formatters::tickers::format_resolve(ticker, parsed.as_str(), options)?
+                    formatters::tickers::format_resolve(ticker, at.as_str(), options)?
                 );
                 return Ok(());
             }
@@ -141,9 +137,14 @@ enum PromptSelection {
 }
 
 fn prompt_asset_type(ticker: &str) -> Result<PromptSelection> {
+    let type_names: Vec<&str> = AssetType::value_variants()
+        .iter()
+        .map(|v| v.as_str())
+        .collect();
+
     let mut input = String::new();
     loop {
-        print!("Type for {} [{}]: ", ticker, KNOWN_TYPES.join("/"));
+        print!("Type for {} [{}]: ", ticker, type_names.join("/"));
         stdout().flush()?;
         input.clear();
         if stdin().read_line(&mut input)? == 0 {
@@ -156,17 +157,11 @@ fn prompt_asset_type(ticker: &str) -> Result<PromptSelection> {
         if trimmed.eq_ignore_ascii_case("q") {
             return Ok(PromptSelection::Quit);
         }
-        match parse_asset_type(trimmed) {
+        match trimmed.parse::<AssetType>() {
             Ok(asset_type) => return Ok(PromptSelection::Selected(asset_type)),
             Err(_) => {
-                println!("Invalid type. Use one of: {}", KNOWN_TYPES.join(", "));
+                println!("Invalid type. Use one of: {}", type_names.join(", "));
             }
         }
     }
-}
-
-fn parse_asset_type(input: &str) -> Result<AssetType> {
-    input
-        .parse::<AssetType>()
-        .map_err(|_| anyhow::anyhow!("Unknown asset type: {}", input))
 }

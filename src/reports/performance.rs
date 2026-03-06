@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
-use crate::db::{self, AssetType, Transaction, TransactionType};
+use crate::db::{self, AssetType, TransactionType};
 use crate::reports::aggregation::{
     aggregate_positions_by_asset_type, normalize_positions_with_prices, AssetTypeTotals,
 };
@@ -79,8 +79,9 @@ pub struct CashFlowSummary {
 pub fn get_period_dates(
     period: Period,
     conn: Option<&Connection>,
+    as_of: NaiveDate,
 ) -> Result<(NaiveDate, NaiveDate)> {
-    let today = Local::now().date_naive();
+    let today = as_of;
     let (start, end) = match period {
         Period::Mtd => {
             let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
@@ -100,26 +101,24 @@ pub fn get_period_dates(
         }
         Period::OneYear => {
             let start = today
-                .checked_sub_days(chrono::Days::new(365))
+                .checked_sub_months(chrono::Months::new(12))
                 .ok_or_else(|| anyhow::anyhow!("Failed to compute one-year start"))?;
             (start, today)
         }
         Period::AllTime => {
+            let fallback = today
+                .checked_sub_months(chrono::Months::new(240))
+                .unwrap_or(today);
             // If a connection is provided, try to fetch earliest transaction date, else default to 20 years ago
             if let Some(c) = conn {
                 let mut stmt = c.prepare("SELECT MIN(trade_date) FROM transactions")?;
                 let min_date: Option<NaiveDate> = stmt.query_row([], |row| row.get(0)).ok();
-                let start = min_date.and_then(|d| d.pred_opt()).unwrap_or_else(|| {
-                    today
-                        .checked_sub_days(chrono::Days::new(365 * 20))
-                        .unwrap_or(today)
-                });
+                let start = min_date
+                    .and_then(|d| d.pred_opt())
+                    .unwrap_or(fallback);
                 (start, today)
             } else {
-                let start = today
-                    .checked_sub_days(chrono::Days::new(365 * 20))
-                    .unwrap_or(today);
-                (start, today)
+                (fallback, today)
             }
         }
         Period::Custom { from, to } => {
@@ -143,7 +142,8 @@ fn ensure_snapshot(conn: &mut Connection, date: NaiveDate) -> Result<()> {
 }
 
 pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<PerformanceReport> {
-    let (start_date, end_date) = get_period_dates(period.clone(), Some(conn))?;
+    let today = Local::now().date_naive();
+    let (start_date, end_date) = get_period_dates(period.clone(), Some(conn), today)?;
 
     // Ensure snapshots exist
     ensure_snapshot(conn, start_date)?;
@@ -362,131 +362,30 @@ fn calculate_realized_gains_by_asset_type(
             continue;
         }
 
-        let mut transactions =
-            crate::reports::portfolio::get_asset_transactions_until(conn, asset_id, to_date)?;
-
-        let renames = crate::db::get_asset_renames_as_target_up_to(conn, asset_id, to_date)?;
-        for rename in renames {
-            if let Some(source_asset) = assets_by_id.get(&rename.from_asset_id) {
-                if let Some(carryover) =
-                    crate::reports::portfolio::build_rename_carryover_transaction(
-                        conn,
-                        source_asset,
-                        asset_id,
-                        rename.effective_date,
-                    )?
-                {
-                    transactions.push(carryover);
-                }
-            }
-        }
-
-        let exchanges = crate::db::get_asset_exchanges_as_target_up_to(conn, asset_id, to_date)?;
-        for exchange in exchanges {
-            if exchange.to_quantity <= Decimal::ZERO {
-                continue;
-            }
-
-            let source_ticker = assets_by_id
-                .get(&exchange.from_asset_id)
-                .map(|a| a.ticker.as_str())
-                .unwrap_or("UNKNOWN");
-            let notes = match exchange.event_type {
-                crate::db::AssetExchangeType::Spinoff => {
-                    format!("Spin-off from {}", source_ticker)
-                }
-                crate::db::AssetExchangeType::Merger => {
-                    format!("Merger from {}", source_ticker)
-                }
-            };
-
-            let price_per_unit = if exchange.to_quantity > Decimal::ZERO {
-                exchange.allocated_cost / exchange.to_quantity
-            } else {
-                Decimal::ZERO
-            };
-
-            transactions.push(Transaction {
-                id: None,
-                asset_id,
-                transaction_type: TransactionType::Buy,
-                trade_date: exchange.effective_date,
-                settlement_date: Some(exchange.effective_date),
-                quantity: exchange.to_quantity,
-                price_per_unit,
-                total_cost: exchange.allocated_cost,
-                fees: Decimal::ZERO,
-                is_day_trade: false,
-                quota_issuance_date: None,
-                notes: Some(notes),
-                source: "EXCHANGE".to_string(),
-                created_at: chrono::Utc::now(),
-            });
-        }
-
-        transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
-
+        let enriched =
+            crate::reports::enrichment::build_enriched_transactions(
+                conn, asset_id, to_date, &assets_by_id,
+            )?;
         let mut swing_matcher = AverageCostMatcher::new();
         let mut day_trade_matcher = AverageCostMatcher::new();
 
-        let amortizations =
-            crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(to_date))?;
-        let mut amort_idx: usize = 0;
-        let exchanges_as_source =
-            crate::db::get_asset_exchanges_as_source_up_to(conn, asset_id, to_date)?;
-        let mut exchange_idx: usize = 0;
-        let actions_up_to = crate::corporate_actions::get_actions_up_to(conn, asset_id, to_date)?;
-        let mut action_idx: usize = 0;
-
-        for tx in transactions {
-            while amort_idx < amortizations.len()
-                && amortizations[amort_idx].event_date <= tx.trade_date
-            {
-                swing_matcher.apply_amortization(amortizations[amort_idx].total_amount);
-                amort_idx += 1;
-            }
-
-            while exchange_idx < exchanges_as_source.len()
-                && exchanges_as_source[exchange_idx].effective_date <= tx.trade_date
-            {
-                apply_exchange_source_effect(
-                    &mut swing_matcher,
-                    &exchanges_as_source[exchange_idx],
-                );
-                exchange_idx += 1;
-            }
-
-            while action_idx < actions_up_to.len()
-                && actions_up_to[action_idx].ex_date <= tx.trade_date
-            {
-                match actions_up_to[action_idx].action_type {
-                    crate::db::CorporateActionType::Split
-                    | crate::db::CorporateActionType::ReverseSplit => {
-                        swing_matcher.apply_quantity_adjustment(
-                            actions_up_to[action_idx].quantity_adjustment,
-                        );
-                    }
-                    _ => {}
-                }
-                action_idx += 1;
-            }
-
+        enriched.replay(&mut swing_matcher, to_date, |tx, swing| {
             match tx.transaction_type {
                 TransactionType::Buy => {
                     if tx.is_day_trade {
-                        day_trade_matcher.add_purchase(&tx, None, None);
+                        day_trade_matcher.add_purchase(tx, None, None);
                     } else {
-                        swing_matcher.add_purchase(&tx, None, None);
+                        swing.add_purchase(tx, None, None);
                     }
                 }
                 TransactionType::Sell => {
                     let matcher = if tx.is_day_trade {
                         &mut day_trade_matcher
                     } else {
-                        &mut swing_matcher
+                        swing
                     };
 
-                    let sale = matcher.match_sale(&tx, None)?;
+                    let sale = matcher.match_sale(tx, None)?;
                     if tx.trade_date >= from_date && tx.trade_date <= to_date {
                         *realized_by_type
                             .entry(asset.asset_type)
@@ -494,25 +393,11 @@ fn calculate_realized_gains_by_asset_type(
                     }
                 }
             }
-        }
+            Ok(())
+        })?;
     }
 
     Ok(realized_by_type)
-}
-
-fn apply_exchange_source_effect(
-    matcher: &mut AverageCostMatcher,
-    exchange: &crate::db::AssetExchange,
-) {
-    match exchange.event_type {
-        crate::db::AssetExchangeType::Spinoff => {
-            let reduction = exchange.allocated_cost + exchange.cash_amount;
-            matcher.apply_amortization(reduction);
-        }
-        crate::db::AssetExchangeType::Merger => {
-            matcher.clear_position();
-        }
-    }
 }
 
 /// Extract cash flows from transaction history within a date range
@@ -763,7 +648,8 @@ mod tests {
 
     #[test]
     fn test_get_period_dates_mtd() {
-        let (start, end) = get_period_dates(Period::Mtd, None).unwrap();
+        let today = Local::now().date_naive();
+        let (start, end) = get_period_dates(Period::Mtd, None, today).unwrap();
         assert!(start <= end);
     }
 

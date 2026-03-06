@@ -148,11 +148,9 @@ pub async fn dispatch_inconsistencies(
                 let resolution = if set.is_empty() && json.is_none() {
                     // Interactive mode: prompt based on issue type
                     let result = match &issue.issue_type {
-                        crate::db::InconsistencyType::MissingCostBasis => {
-                            prompt_missing_cost_basis(issue, &options)
-                        }
-                        crate::db::InconsistencyType::MissingPurchaseHistory => {
-                            prompt_missing_purchase_history(issue, &options)
+                        crate::db::InconsistencyType::MissingCostBasis
+                        | crate::db::InconsistencyType::MissingPurchaseHistory => {
+                            prompt_missing_transaction(issue, &options)
                         }
                         crate::db::InconsistencyType::InvalidTicker
                         | crate::db::InconsistencyType::InvalidDate => {
@@ -344,13 +342,14 @@ fn prompt_confirm(msg: &str) -> Result<bool> {
     Ok(input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes"))
 }
 
-fn prompt_missing_cost_basis(
+fn prompt_missing_transaction(
     issue: &db::Inconsistency,
     options: &options::OutputOptions,
 ) -> Result<Map<String, Value>> {
     println!(
-        "\nResolving inconsistency #{}: MissingCostBasis",
-        issue.id.unwrap_or(0)
+        "\nResolving inconsistency #{}: {}",
+        issue.id.unwrap_or(0),
+        issue.issue_type.as_str()
     );
     println!("  Ticker: {}", issue.ticker.as_deref().unwrap_or("-"));
     println!(
@@ -367,6 +366,10 @@ fn prompt_missing_cost_basis(
             .map(|q| format_quantity(q, options))
             .unwrap_or_else(|| "-".to_string())
     );
+    if issue.issue_type == db::InconsistencyType::MissingPurchaseHistory {
+        println!();
+        println!("You need to add the missing purchase(s) for this asset.");
+    }
     println!();
 
     let price = prompt_decimal("Enter price per unit (required)", None)?
@@ -410,72 +413,71 @@ fn prompt_missing_cost_basis(
     Ok(map)
 }
 
-fn prompt_missing_purchase_history(
+fn create_resolution_transaction(
+    conn: &rusqlite::Connection,
     issue: &db::Inconsistency,
-    options: &options::OutputOptions,
-) -> Result<Map<String, Value>> {
-    println!(
-        "\nResolving inconsistency #{}: MissingPurchaseHistory",
-        issue.id.unwrap_or(0)
-    );
-    println!("  Ticker: {}", issue.ticker.as_deref().unwrap_or("-"));
-    println!(
-        "  Date: {}",
-        issue
-            .trade_date
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "-".to_string())
-    );
-    println!(
-        "  Quantity: {}",
-        issue
-            .quantity
-            .map(|q| format_quantity(q, options))
-            .unwrap_or_else(|| "-".to_string())
-    );
-    println!();
-    println!("You need to add the missing purchase(s) for this asset.");
-    println!();
-
-    let price = prompt_decimal("Enter price per unit (required)", None)?
+    resolution: &Map<String, Value>,
+) -> Result<()> {
+    let price = get_decimal_field(resolution, "price_per_unit")?
+        .or_else(|| get_decimal_field(resolution, "price").ok().flatten())
         .ok_or_else(|| anyhow::anyhow!("price_per_unit is required"))?;
 
-    let quantity = prompt_decimal("Enter quantity", issue.quantity)?
+    let quantity = get_decimal_field(resolution, "quantity")?
+        .or(issue.quantity)
         .ok_or_else(|| anyhow::anyhow!("quantity is required"))?;
 
-    let fees = prompt_decimal("Enter fees", Some(Decimal::ZERO))?.unwrap_or(Decimal::ZERO);
+    let fees = get_decimal_field(resolution, "fees")?.unwrap_or(Decimal::ZERO);
+    let total_cost =
+        get_decimal_field(resolution, "total_cost")?.unwrap_or_else(|| price * quantity + fees);
 
-    let trade_date = prompt_date("Enter trade date", issue.trade_date)?
-        .ok_or_else(|| anyhow::anyhow!("trade_date is required"))?;
+    let trade_date = if let Some(date_str) = get_string_field(resolution, "trade_date") {
+        chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+            .map_err(|e| anyhow::anyhow!("Invalid trade_date: {}", e))?
+    } else if let Some(date) = issue.trade_date {
+        date
+    } else {
+        return Err(anyhow::anyhow!("trade_date is required"));
+    };
 
-    let total_cost = price * quantity + fees;
-    println!();
-    println!("Creating BUY transaction:");
-    println!(
-        "  {} x {} @ {} + {} fees = {}",
-        issue.ticker.as_deref().unwrap_or("?"),
-        format_quantity(quantity, options),
-        format_currency(price, options),
-        format_currency(fees, options),
-        format_currency(total_cost, options)
+    let asset_id = if let Some(asset_id) = issue.asset_id {
+        asset_id
+    } else if let Some(ticker) = issue.ticker.as_ref() {
+        db::upsert_asset(conn, ticker, &db::AssetType::Unknown, None)?
+    } else {
+        return Err(anyhow::anyhow!("asset is required"));
+    };
+
+    let notes = format!(
+        "Resolved inconsistency {} ({})",
+        issue.id.unwrap_or(0),
+        issue.issue_type.as_str().to_lowercase().replace('_', " ")
     );
 
-    if !prompt_confirm("Confirm?")? {
-        return Err(anyhow::anyhow!("Resolution cancelled"));
-    }
-
-    let mut map = Map::new();
-    map.insert(
-        "price_per_unit".to_string(),
-        Value::String(price.to_string()),
-    );
-    map.insert("quantity".to_string(), Value::String(quantity.to_string()));
-    map.insert("fees".to_string(), Value::String(fees.to_string()));
-    map.insert(
-        "trade_date".to_string(),
-        Value::String(trade_date.to_string()),
-    );
-    Ok(map)
+    let tx = db::Transaction {
+        id: None,
+        asset_id,
+        transaction_type: db::TransactionType::Buy,
+        trade_date,
+        settlement_date: Some(trade_date),
+        quantity,
+        price_per_unit: price,
+        total_cost,
+        fees,
+        is_day_trade: false,
+        quota_issuance_date: None,
+        notes: Some(notes),
+        source: "INCONSISTENCY".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+    db::insert_transaction(conn, &tx)?;
+    reports::invalidate_snapshots_after(conn, trade_date)?;
+    db::resolve_inconsistency(
+        conn,
+        issue.id.unwrap_or(0),
+        Some("ADD_TX"),
+        Some(&Value::Object(resolution.clone()).to_string()),
+    )?;
+    Ok(())
 }
 
 fn apply_inconsistency_resolution(
@@ -484,130 +486,9 @@ fn apply_inconsistency_resolution(
     resolution: &Map<String, Value>,
 ) -> Result<()> {
     match &issue.issue_type {
-        db::InconsistencyType::MissingCostBasis => {
-            let price = get_decimal_field(resolution, "price_per_unit")?
-                .or_else(|| get_decimal_field(resolution, "price").ok().flatten())
-                .ok_or_else(|| anyhow::anyhow!("price_per_unit is required"))?;
-
-            let quantity = get_decimal_field(resolution, "quantity")?
-                .or(issue.quantity)
-                .ok_or_else(|| anyhow::anyhow!("quantity is required"))?;
-
-            let fees = get_decimal_field(resolution, "fees")?.unwrap_or(Decimal::ZERO);
-            let total_cost = get_decimal_field(resolution, "total_cost")?
-                .unwrap_or_else(|| price * quantity + fees);
-
-            let trade_date = if let Some(date_str) = get_string_field(resolution, "trade_date") {
-                chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                    .map_err(|e| anyhow::anyhow!("Invalid trade_date: {}", e))?
-            } else if let Some(date) = issue.trade_date {
-                date
-            } else {
-                return Err(anyhow::anyhow!("trade_date is required"));
-            };
-
-            let asset_id = if let Some(asset_id) = issue.asset_id {
-                asset_id
-            } else if let Some(ticker) = issue.ticker.as_ref() {
-                let asset_type = db::AssetType::Unknown;
-                db::upsert_asset(conn, ticker, &asset_type, None)?
-            } else {
-                return Err(anyhow::anyhow!("asset is required"));
-            };
-
-            let notes = format!(
-                "Resolved inconsistency {} (missing cost basis)",
-                issue.id.unwrap_or(0)
-            );
-
-            let tx = db::Transaction {
-                id: None,
-                asset_id,
-                transaction_type: db::TransactionType::Buy,
-                trade_date,
-                settlement_date: Some(trade_date),
-                quantity,
-                price_per_unit: price,
-                total_cost,
-                fees,
-                is_day_trade: false,
-                quota_issuance_date: None,
-                notes: Some(notes),
-                source: "INCONSISTENCY".to_string(),
-                created_at: chrono::Utc::now(),
-            };
-            db::insert_transaction(conn, &tx)?;
-            reports::invalidate_snapshots_after(conn, trade_date)?;
-            db::resolve_inconsistency(
-                conn,
-                issue.id.unwrap_or(0),
-                Some("ADD_TX"),
-                Some(&Value::Object(resolution.clone()).to_string()),
-            )?;
-            Ok(())
-        }
-        db::InconsistencyType::MissingPurchaseHistory => {
-            // Same logic as MissingCostBasis - creates a BUY transaction
-            let price = get_decimal_field(resolution, "price_per_unit")?
-                .or_else(|| get_decimal_field(resolution, "price").ok().flatten())
-                .ok_or_else(|| anyhow::anyhow!("price_per_unit is required"))?;
-
-            let quantity = get_decimal_field(resolution, "quantity")?
-                .or(issue.quantity)
-                .ok_or_else(|| anyhow::anyhow!("quantity is required"))?;
-
-            let fees = get_decimal_field(resolution, "fees")?.unwrap_or(Decimal::ZERO);
-            let total_cost = get_decimal_field(resolution, "total_cost")?
-                .unwrap_or_else(|| price * quantity + fees);
-
-            let trade_date = if let Some(date_str) = get_string_field(resolution, "trade_date") {
-                chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                    .map_err(|e| anyhow::anyhow!("Invalid trade_date: {}", e))?
-            } else if let Some(date) = issue.trade_date {
-                date
-            } else {
-                return Err(anyhow::anyhow!("trade_date is required"));
-            };
-
-            let asset_id = if let Some(asset_id) = issue.asset_id {
-                asset_id
-            } else if let Some(ticker) = issue.ticker.as_ref() {
-                let asset_type = db::AssetType::Unknown;
-                db::upsert_asset(conn, ticker, &asset_type, None)?
-            } else {
-                return Err(anyhow::anyhow!("asset is required"));
-            };
-
-            let notes = format!(
-                "Resolved inconsistency {} (missing purchase history)",
-                issue.id.unwrap_or(0)
-            );
-
-            let tx = db::Transaction {
-                id: None,
-                asset_id,
-                transaction_type: db::TransactionType::Buy,
-                trade_date,
-                settlement_date: Some(trade_date),
-                quantity,
-                price_per_unit: price,
-                total_cost,
-                fees,
-                is_day_trade: false,
-                quota_issuance_date: None,
-                notes: Some(notes),
-                source: "INCONSISTENCY".to_string(),
-                created_at: chrono::Utc::now(),
-            };
-            db::insert_transaction(conn, &tx)?;
-            reports::invalidate_snapshots_after(conn, trade_date)?;
-            db::resolve_inconsistency(
-                conn,
-                issue.id.unwrap_or(0),
-                Some("ADD_TX"),
-                Some(&Value::Object(resolution.clone()).to_string()),
-            )?;
-            Ok(())
+        db::InconsistencyType::MissingCostBasis
+        | db::InconsistencyType::MissingPurchaseHistory => {
+            create_resolution_transaction(conn, issue, resolution)
         }
         db::InconsistencyType::InvalidTicker | db::InconsistencyType::InvalidDate => Err(
             anyhow::anyhow!("Resolution for this inconsistency type is not implemented yet"),
