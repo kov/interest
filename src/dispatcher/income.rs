@@ -795,7 +795,7 @@ async fn dispatch_income_forecast(
     }
 
     // Single batch query for all income events in the 2-year window
-    let two_years_ago = today - chrono::Duration::days(730);
+    let two_years_ago = today - chrono::Months::new(24);
     let all_events =
         db::get_income_events_with_assets(&conn, Some(two_years_ago), Some(today), None)?;
 
@@ -886,7 +886,7 @@ async fn dispatch_income_calendar(
     let report = crate::reports::calculate_portfolio(&conn, None)?;
 
     // Single batch query for all income events in the 2-year window
-    let two_years_ago = today - chrono::Duration::days(730);
+    let two_years_ago = today - chrono::Months::new(24);
     let all_events =
         db::get_income_events_with_assets(&conn, Some(two_years_ago), Some(today), None)?;
 

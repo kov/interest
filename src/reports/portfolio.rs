@@ -282,7 +282,7 @@ fn calculate_portfolio_with_cutoff(
 
 /// Enrich positions with LTM income data
 fn apply_ltm_income(conn: &Connection, as_of: NaiveDate, positions: &mut [PositionSummary]) {
-    let one_year_ago = as_of - chrono::Duration::days(365);
+    let one_year_ago = as_of - chrono::Months::new(12);
     let totals = match crate::db::get_income_totals_by_asset(conn, one_year_ago, as_of) {
         Ok(t) => t,
         Err(_) => return,

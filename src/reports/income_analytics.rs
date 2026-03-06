@@ -7,7 +7,7 @@
 
 use crate::db::{self, AssetType, IncomeEvent, IncomeEventType};
 use anyhow::Result;
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap};
 
@@ -166,7 +166,7 @@ pub fn calculate_ltm_yield(
     current_portfolio_value: Decimal,
     as_of: NaiveDate,
 ) -> Result<LtmYieldResult> {
-    let one_year_ago = as_of - Duration::days(365);
+    let one_year_ago = as_of - Months::new(12);
 
     let events = db::get_income_events_with_assets(conn, Some(one_year_ago), Some(as_of), None)?;
 
@@ -197,7 +197,7 @@ pub fn calculate_asset_yield(
     current_position_value: Decimal,
     as_of: NaiveDate,
 ) -> Result<AssetYield> {
-    let one_year_ago = as_of - Duration::days(365);
+    let one_year_ago = as_of - Months::new(12);
 
     let events =
         db::get_income_events_with_assets(conn, Some(one_year_ago), Some(as_of), Some(ticker))?;
@@ -276,7 +276,7 @@ pub fn get_monthly_income_series(
     ticker: Option<&str>,
     as_of: NaiveDate,
 ) -> Result<MonthlyIncomeSeries> {
-    let start_date = as_of - Duration::days(months_back as i64 * 30);
+    let start_date = as_of - Months::new(months_back as u32);
     let events = db::get_income_events_with_assets(conn, Some(start_date), Some(as_of), ticker)?;
     Ok(build_monthly_series_from_events(&events, start_date, as_of))
 }
@@ -379,7 +379,7 @@ pub fn categorize_income_event_with_history(
     }
 
     // Get preceding events in the last 12 months
-    let twelve_months_ago = event.event_date - Duration::days(365);
+    let twelve_months_ago = event.event_date - Months::new(12);
     let preceding_amounts: Vec<Decimal> = same_type_history
         .iter()
         .filter(|e| e.event_date < event.event_date && e.event_date >= twelve_months_ago)
@@ -451,7 +451,7 @@ pub fn forecast_income_from_events(
     conservative: bool,
     as_of: NaiveDate,
 ) -> IncomeForecast {
-    let one_year_ago = as_of - Duration::days(365);
+    let one_year_ago = as_of - Months::new(12);
 
     let ltm_events: Vec<_> = events
         .iter()
@@ -491,7 +491,7 @@ pub fn forecast_income_from_events(
 
     // Apply trend adjustment if enough history
     let mut expected = ltm_total;
-    let series_start = as_of - Duration::days(24 * 30);
+    let series_start = as_of - Months::new(24);
     let series = build_monthly_series_from_events(events, series_start, as_of);
     if series.amounts.len() >= 24 {
         let trend = analyze_income_trends_from_series(&series);
@@ -536,7 +536,7 @@ pub fn forecast_income_for_asset(
     conservative: bool,
     as_of: NaiveDate,
 ) -> Result<IncomeForecast> {
-    let two_years_ago = as_of - Duration::days(730);
+    let two_years_ago = as_of - Months::new(24);
     let events =
         db::get_income_events_with_assets(conn, Some(two_years_ago), Some(as_of), Some(ticker))?;
     Ok(forecast_income_from_events(
@@ -562,7 +562,7 @@ pub fn predict_payment_dates_from_events(
         return Vec::new();
     }
 
-    let series_start = as_of - Duration::days(24 * 30);
+    let series_start = as_of - Months::new(24);
     let series = build_monthly_series_from_events(events, series_start, as_of);
 
     if series.months.is_empty() {
@@ -617,7 +617,7 @@ pub fn predict_payment_dates(
     num_predictions: usize,
     as_of: NaiveDate,
 ) -> Result<Vec<(NaiveDate, Decimal, ConfidenceLevel)>> {
-    let two_years_ago = as_of - Duration::days(730);
+    let two_years_ago = as_of - Months::new(24);
     let events =
         db::get_income_events_with_assets(conn, Some(two_years_ago), Some(as_of), Some(ticker))?;
     Ok(predict_payment_dates_from_events(
