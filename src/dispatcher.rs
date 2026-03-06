@@ -16,6 +16,7 @@ mod inspect;
 mod irpf;
 mod portfolio;
 mod prices;
+mod prices_ui;
 mod terms;
 mod tickers;
 mod transactions;

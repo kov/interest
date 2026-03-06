@@ -2,7 +2,6 @@ use anyhow::Result;
 
 use crate::reports::period::parse_date_flexible;
 use crate::reports::scope::Scope;
-use crate::ui::progress::{ProgressEvent, ProgressPrinter};
 use crate::{db, formatters, reports};
 use formatters::portfolio::format_empty_portfolio;
 
@@ -134,11 +133,6 @@ async fn dispatch_portfolio_show(
         _ => None,
     };
 
-    // Allow disabling live price fetching via env var
-    let skip_price_fetch = std::env::var("INTEREST_SKIP_PRICE_FETCH")
-        .map(|v| v != "0")
-        .unwrap_or(false);
-
     // Get earliest transaction date to determine price range needed
     let earliest_date = db::get_earliest_transaction_date(&conn)?;
     if earliest_date.is_none() {
@@ -179,120 +173,32 @@ async fn dispatch_portfolio_show(
     }
 
     // Now fetch prices ONLY for assets that have current positions
-    if !skip_price_fetch {
-        if !options.is_json() {
-            let assets_with_positions: Vec<_> =
-                report.positions.iter().map(|p| p.asset.clone()).collect();
-            let priceable_assets =
-                crate::pricing::resolver::filter_priceable_assets(&assets_with_positions);
-
-            if !assets_with_positions.is_empty() {
-                let total = priceable_assets.len();
-                let printer = ProgressPrinter::new(&options);
-                let price_range = if let Some(date) = historical_date {
-                    (date, date)
-                } else {
-                    (today, today)
-                };
-
-                printer.handle_event(&ProgressEvent::Spinner {
-                    message: format!("Fetching prices 0/{}...", total),
-                });
-
-                crate::pricing::resolver::ensure_prices_available_with_progress(
-                    &mut conn,
-                    &assets_with_positions,
-                    price_range,
-                    options.clone(),
-                    |event| match event {
-                        ProgressEvent::TickerResult {
-                            ticker,
-                            price,
-                            current,
-                            total,
-                        } => {
-                            let masked = if options.is_private() {
-                                ProgressEvent::TickerResult {
-                                    ticker: ticker.clone(),
-                                    price: price
-                                        .as_ref()
-                                        .map(|_| "R$ ***".to_string())
-                                        .map_err(|err| err.clone()),
-                                    current: *current,
-                                    total: *total,
-                                }
-                            } else {
-                                ProgressEvent::TickerResult {
-                                    ticker: ticker.clone(),
-                                    price: price.clone(),
-                                    current: *current,
-                                    total: *total,
-                                }
-                            };
-                            printer.handle_event(&masked);
-                            printer.handle_event(&ProgressEvent::Spinner {
-                                message: format!("Fetching prices {}/{}...", current, total),
-                            });
-                        }
-                        _ => printer.handle_event(event),
-                    },
-                )
-                .await
-                .or_else(|e: anyhow::Error| {
-                    tracing::warn!("Price resolution failed: {}", e);
-                    Ok::<(), anyhow::Error>(())
-                })?;
-
-                printer.handle_event(&ProgressEvent::Success {
-                    message: "Price resolution complete".to_string(),
-                });
-
-                report = if let Some(date) = historical_date {
-                    reports::calculate_portfolio_at_date(&conn, date, asset_type_filter.as_ref())?
-                } else {
-                    reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?
-                };
-
-                // Re-apply single-asset filter after recompute
-                if let Scope::SingleAsset(ref ticker) = scope {
-                    apply_single_asset_filter(&mut report, ticker);
-                }
-            }
+    {
+        let assets_with_positions: Vec<_> =
+            report.positions.iter().map(|p| p.asset.clone()).collect();
+        let price_range = if let Some(date) = historical_date {
+            (date, date)
         } else {
-            // JSON mode: no spinner, just fetch silently
-            let assets_with_positions: Vec<_> =
-                report.positions.iter().map(|p| p.asset.clone()).collect();
+            (today, today)
+        };
 
-            if !assets_with_positions.is_empty() {
-                let price_range = if let Some(date) = historical_date {
-                    (date, date)
-                } else {
-                    (today, today)
-                };
+        super::prices_ui::ensure_prices_with_ui(
+            &mut conn,
+            &assets_with_positions,
+            price_range,
+            &options,
+        )
+        .await?;
 
-                crate::pricing::resolver::ensure_prices_available(
-                    &mut conn,
-                    &assets_with_positions,
-                    price_range,
-                    options.clone(),
-                )
-                .await
-                .or_else(|e: anyhow::Error| {
-                    tracing::warn!("Price resolution failed: {}", e);
-                    Ok::<(), anyhow::Error>(())
-                })?;
-            }
+        // Recalculate with updated prices
+        report = if let Some(date) = historical_date {
+            reports::calculate_portfolio_at_date(&conn, date, asset_type_filter.as_ref())?
+        } else {
+            reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?
+        };
 
-            report = if let Some(date) = historical_date {
-                reports::calculate_portfolio_at_date(&conn, date, asset_type_filter.as_ref())?
-            } else {
-                reports::calculate_portfolio(&conn, asset_type_filter.as_ref())?
-            };
-
-            // Re-apply single-asset filter after recompute
-            if let Scope::SingleAsset(ref ticker) = scope {
-                apply_single_asset_filter(&mut report, ticker);
-            }
+        if let Scope::SingleAsset(ref ticker) = scope {
+            apply_single_asset_filter(&mut report, ticker);
         }
     }
 
