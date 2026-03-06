@@ -79,8 +79,9 @@ pub struct CashFlowSummary {
 pub fn get_period_dates(
     period: Period,
     conn: Option<&Connection>,
+    as_of: NaiveDate,
 ) -> Result<(NaiveDate, NaiveDate)> {
-    let today = Local::now().date_naive();
+    let today = as_of;
     let (start, end) = match period {
         Period::Mtd => {
             let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
@@ -143,7 +144,8 @@ fn ensure_snapshot(conn: &mut Connection, date: NaiveDate) -> Result<()> {
 }
 
 pub fn calculate_performance(conn: &mut Connection, period: Period) -> Result<PerformanceReport> {
-    let (start_date, end_date) = get_period_dates(period.clone(), Some(conn))?;
+    let today = Local::now().date_naive();
+    let (start_date, end_date) = get_period_dates(period.clone(), Some(conn), today)?;
 
     // Ensure snapshots exist
     ensure_snapshot(conn, start_date)?;
@@ -648,7 +650,8 @@ mod tests {
 
     #[test]
     fn test_get_period_dates_mtd() {
-        let (start, end) = get_period_dates(Period::Mtd, None).unwrap();
+        let today = Local::now().date_naive();
+        let (start, end) = get_period_dates(Period::Mtd, None, today).unwrap();
         assert!(start <= end);
     }
 

@@ -24,8 +24,9 @@ async fn dispatch_performance_scoped(
     }
 
     let period = reports::parse_period(period_str)?;
+    let today = chrono::Local::now().date_naive();
     let (period_start, period_end) =
-        crate::reports::performance::get_period_dates(period.clone(), Some(&conn))?;
+        crate::reports::performance::get_period_dates(period.clone(), Some(&conn), today)?;
 
     // Ensure prices are available for the required date range
     let assets = db::get_assets_with_transactions(&conn)?;

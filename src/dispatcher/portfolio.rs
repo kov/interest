@@ -32,9 +32,8 @@ fn resolve_as_of_date(period: Option<&str>) -> Result<Option<chrono::NaiveDate>>
     };
 
     let parsed = reports::parse_period(period_str)?;
-    let (_, end_date) = crate::reports::performance::get_period_dates(parsed, None)?;
-
     let today = chrono::Local::now().date_naive();
+    let (_, end_date) = crate::reports::performance::get_period_dates(parsed, None, today)?;
     if end_date > today {
         anyhow::bail!(
             "Period end date is in the future ({}). Use a past date or omit for current portfolio.",

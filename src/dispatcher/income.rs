@@ -88,7 +88,8 @@ fn resolve_income_period(
 
     let period_str = period.unwrap_or("YTD");
     let parsed = crate::reports::parse_period(period_str)?;
-    let (from_date, to_date) = crate::reports::performance::get_period_dates(parsed, None)?;
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(parsed, None, today)?;
     let year_val = to_date.year();
     Ok((from_date, to_date, year_val))
 }

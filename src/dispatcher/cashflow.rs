@@ -53,7 +53,8 @@ async fn dispatch_cashflow_scoped(
     let conn = db::open_db(None)?;
 
     let period = reports::parse_period(period_str)?;
-    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn))?;
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn), today)?;
 
     // Check if this is a single-year request (show monthly breakdown)
     let is_single_year = period_str
@@ -89,7 +90,8 @@ async fn dispatch_cashflow_stats(period_str: &str, options: options::OutputOptio
     let conn = db::open_db(None)?;
 
     let period = reports::parse_period(period_str)?;
-    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn))?;
+    let today = chrono::Local::now().date_naive();
+    let (from_date, to_date) = crate::reports::performance::get_period_dates(period, Some(&conn), today)?;
 
     let stats = cashflow::calculate_cash_flow_stats(&conn, from_date, to_date)?;
 
