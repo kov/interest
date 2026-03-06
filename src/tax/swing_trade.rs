@@ -9,7 +9,7 @@ use super::cost_basis::{AverageCostMatcher, SaleCostBasis};
 use crate::db::{AssetType, Transaction, TransactionType};
 
 /// Tax category for operations
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaxCategory {
     StockSwingTrade,  // 15%, R$20k exemption
     StockDayTrade,    // 20%, no exemption
@@ -188,10 +188,6 @@ pub fn calculate_monthly_tax(
 
     // Process each asset ONCE
     for asset in assets {
-        if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
-            continue;
-        }
-
         if !crate::db::is_supported_portfolio_ticker(&asset.ticker) {
             continue;
         }
@@ -434,7 +430,7 @@ pub fn calculate_monthly_tax(
         if new_carry.is_zero() {
             carryforward.remove(&category);
         } else {
-            carryforward.insert(category.clone(), new_carry);
+            carryforward.insert(category, new_carry);
         }
 
         // Taxable amount excludes exempt stock profit; carry is untouched by exempt gains

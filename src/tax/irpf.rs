@@ -129,7 +129,7 @@ fn compute_annual_report_with_carry(
             }
 
             by_category.insert(
-                calc.category.clone(),
+                calc.category,
                 CategoryMonthSummary {
                     sales: calc.total_sales,
                     profit_loss: calc.net_profit,
@@ -162,7 +162,7 @@ fn compute_annual_report_with_carry(
             if v.is_zero() {
                 None
             } else {
-                Some((k.clone(), *v))
+                Some((*k, *v))
             }
         })
         .collect::<HashMap<_, _>>();
@@ -180,7 +180,7 @@ fn compute_annual_report_with_carry(
                 if v.is_zero() {
                     None
                 } else {
-                    Some((k.clone(), *v))
+                    Some((*k, *v))
                 }
             })
             .collect(),
@@ -379,16 +379,7 @@ pub fn export_to_csv(report: &AnnualTaxReport) -> String {
         csv.push_str("\nPREJUÍZOS A COMPENSAR\n");
         csv.push_str("Categoria,Prejuízo\n");
         for (category, loss) in &report.losses_to_carry_forward {
-            let category_name = match category {
-                TaxCategory::StockSwingTrade => "Ações (Swing Trade)",
-                TaxCategory::StockDayTrade => "Ações (Day Trade)",
-                TaxCategory::FiiSwingTrade => "FII (Swing Trade)",
-                TaxCategory::FiiDayTrade => "FII (Day Trade)",
-                TaxCategory::FiagroSwingTrade => "FIAGRO (Swing Trade)",
-                TaxCategory::FiagroDayTrade => "FIAGRO (Day Trade)",
-                TaxCategory::FiInfra => "FI-Infra (Isento)",
-            };
-            csv.push_str(&format!("{},{:.2}\n", category_name, loss));
+            csv.push_str(&format!("{},{:.2}\n", category.display_name(), loss));
         }
     }
 

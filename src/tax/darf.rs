@@ -40,7 +40,7 @@ pub fn generate_darf_payments(
             payments.push(DarfPayment {
                 year,
                 month,
-                category: calc.category.clone(),
+                category: calc.category,
                 darf_code: darf_code.to_string(),
                 description: calc.category.darf_description().to_string(),
                 tax_due: calc.tax_due,
