@@ -196,7 +196,7 @@ pub enum PortfolioCommands {
         period: Option<String>,
 
         /// Filter by asset type (deprecated: use `portfolio type` instead)
-        #[arg(short, long, hide = true)]
+        #[arg(short, long, hide = true, ignore_case = true)]
         asset_type: Option<AssetType>,
 
         /// Show portfolio as of this date (deprecated: use period positional instead)
@@ -206,7 +206,8 @@ pub enum PortfolioCommands {
 
     /// Filter portfolio by asset type
     Type {
-        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        /// Asset type (stock, fii, fiagro, fi-infra, etf, bdr, etc.)
+        #[arg(ignore_case = true)]
         asset_type: AssetType,
 
         /// Period or date (optional, default: today)
@@ -303,7 +304,8 @@ pub enum PerformanceCommands {
 
     /// Show performance filtered by asset type
     Type {
-        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        /// Asset type (stock, fii, fiagro, fi-infra, etf, bdr, etc.)
+        #[arg(ignore_case = true)]
         asset_type: AssetType,
 
         /// Period (optional, default: YTD)
@@ -330,7 +332,8 @@ pub enum CashFlowCommands {
 
     /// Show cash flow filtered by asset type
     Type {
-        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        /// Asset type (stock, fii, fiagro, fi-infra, etf, bdr, etc.)
+        #[arg(ignore_case = true)]
         asset_type: AssetType,
 
         /// Period (optional, default: ALL)
@@ -363,7 +366,8 @@ pub enum IncomeCommands {
 
     /// Show income filtered by asset type
     Type {
-        /// Asset type (STOCK, FII, FIAGRO, FI_INFRA, ETF, BDR, etc.)
+        /// Asset type (stock, fii, fiagro, fi-infra, etf, bdr, etc.)
+        #[arg(ignore_case = true)]
         asset_type: AssetType,
 
         /// Period (optional, default: YTD)
@@ -441,7 +445,7 @@ pub enum IncomeCommands {
         ticker: Option<String>,
 
         /// Filter by asset type
-        #[arg(long)]
+        #[arg(long, ignore_case = true)]
         asset_type: Option<AssetType>,
 
         /// Yield period (default: LTM)
@@ -716,7 +720,7 @@ pub enum TickersCommands {
         ticker: Option<String>,
 
         /// Asset type to set (required when a ticker is provided)
-        #[arg(long = "type")]
+        #[arg(long = "type", ignore_case = true)]
         asset_type: Option<AssetType>,
     },
 }
@@ -725,8 +729,8 @@ pub enum TickersCommands {
 pub enum AssetsCommands {
     /// List all assets (optional filter by type)
     List {
-        /// Asset type to filter (STOCK, FII, FIAGRO, FI_INFRA, etc.)
-        #[arg(long = "type")]
+        /// Asset type to filter (stock, fii, fiagro, fi-infra, etc.)
+        #[arg(long = "type", ignore_case = true)]
         asset_type: Option<AssetType>,
     },
 
@@ -742,7 +746,7 @@ pub enum AssetsCommands {
         ticker: String,
 
         /// Asset type (overrides auto-detect)
-        #[arg(long = "type")]
+        #[arg(long = "type", ignore_case = true)]
         asset_type: Option<AssetType>,
 
         /// Optional name
@@ -756,6 +760,7 @@ pub enum AssetsCommands {
         ticker: String,
 
         /// Asset type
+        #[arg(ignore_case = true)]
         asset_type: AssetType,
     },
 
@@ -786,8 +791,8 @@ pub enum AssetsCommands {
     /// Sync Mais Retorno asset metadata
     #[command(name = "sync-maisretorno")]
     SyncMaisRetorno {
-        /// Asset type to filter (STOCK, FII, FIAGRO, FI_INFRA, etc.)
-        #[arg(long = "type")]
+        /// Asset type to filter (stock, fii, fiagro, fi-infra, etc.)
+        #[arg(long = "type", ignore_case = true)]
         asset_type: Option<AssetType>,
 
         /// Fetch only (do not write to the registry)

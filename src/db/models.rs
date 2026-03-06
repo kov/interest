@@ -8,20 +8,22 @@ use std::str::FromStr;
     Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
     clap::ValueEnum,
 )]
-#[clap(rename_all = "SCREAMING_SNAKE_CASE")]
+#[clap(rename_all = "kebab-case")]
 pub enum AssetType {
     Stock,
     Etf,
     Fii,
     Fiagro,
+    #[value(alias = "FI_INFRA")]
     FiInfra,
     Bond,
+    #[value(alias = "GOV_BOND")]
     GovBond,
     Bdr,
     Fidc,
     Fip,
     Option,
-    #[value(name = "TERM")]
+    #[value(name = "term", alias = "TERM")]
     TermContract,
     Unknown,
 }
@@ -92,7 +94,10 @@ impl FromStr for AssetType {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_uppercase().as_str() {
+        // Normalize: trim, uppercase, replace hyphens with underscores
+        // so both "fi-infra" and "FI_INFRA" are accepted.
+        let normalized = s.trim().to_ascii_uppercase().replace('-', "_");
+        match normalized.as_str() {
             "STOCK" => Ok(AssetType::Stock),
             "ETF" => Ok(AssetType::Etf),
             "FII" => Ok(AssetType::Fii),
