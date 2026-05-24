@@ -5,7 +5,16 @@ use std::str::FromStr;
 
 /// Asset types supported by the system
 #[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
     clap::ValueEnum,
 )]
 #[clap(rename_all = "kebab-case")]

@@ -139,7 +139,10 @@ pub fn get_total_losses_by_category(conn: &Connection) -> Result<HashMap<TaxCate
     let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
 
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, crate::db::get_decimal_value(row, 1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            crate::db::get_decimal_value(row, 1)?,
+        ))
     })?;
 
     for row in rows {
@@ -168,7 +171,10 @@ pub fn get_remaining_losses_before_year(
     let mut losses: HashMap<TaxCategory, Decimal> = HashMap::new();
 
     let rows = stmt.query_map([year], |row| {
-        Ok((row.get::<_, String>(0)?, crate::db::get_decimal_value(row, 1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            crate::db::get_decimal_value(row, 1)?,
+        ))
     })?;
 
     for row in rows {

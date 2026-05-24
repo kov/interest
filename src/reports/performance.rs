@@ -113,9 +113,7 @@ pub fn get_period_dates(
             if let Some(c) = conn {
                 let mut stmt = c.prepare("SELECT MIN(trade_date) FROM transactions")?;
                 let min_date: Option<NaiveDate> = stmt.query_row([], |row| row.get(0)).ok();
-                let start = min_date
-                    .and_then(|d| d.pred_opt())
-                    .unwrap_or(fallback);
+                let start = min_date.and_then(|d| d.pred_opt()).unwrap_or(fallback);
                 (start, today)
             } else {
                 (fallback, today)
@@ -362,10 +360,12 @@ fn calculate_realized_gains_by_asset_type(
             continue;
         }
 
-        let enriched =
-            crate::reports::enrichment::build_enriched_transactions(
-                conn, asset_id, to_date, &assets_by_id,
-            )?;
+        let enriched = crate::reports::enrichment::build_enriched_transactions(
+            conn,
+            asset_id,
+            to_date,
+            &assets_by_id,
+        )?;
         let mut swing_matcher = AverageCostMatcher::new();
         let mut day_trade_matcher = AverageCostMatcher::new();
 

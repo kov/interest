@@ -86,8 +86,7 @@ pub fn build_enriched_transactions(
 
     transactions.sort_by(|a, b| (a.trade_date, a.id).cmp(&(b.trade_date, b.id)));
 
-    let amortizations =
-        crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(as_of))?;
+    let amortizations = crate::db::get_amortizations_for_asset(conn, asset_id, None, Some(as_of))?;
     let exchanges_as_source =
         crate::db::get_asset_exchanges_as_source_up_to(conn, asset_id, as_of)?;
     let corporate_actions = crate::corporate_actions::get_actions_up_to(conn, asset_id, as_of)?;

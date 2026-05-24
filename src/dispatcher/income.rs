@@ -16,7 +16,8 @@ pub async fn dispatch_income(
         }
         crate::cli::IncomeCommands::Type { asset_type, period } => {
             let (from_date, to_date, year_val) = resolve_income_period(period.as_deref())?;
-            dispatch_income_show_impl(from_date, to_date, year_val, Some(*asset_type), options).await
+            dispatch_income_show_impl(from_date, to_date, year_val, Some(*asset_type), options)
+                .await
         }
         crate::cli::IncomeCommands::Asset { ticker, period } => {
             let (from_date, to_date, _year_val) = resolve_income_period(period.as_deref())?;

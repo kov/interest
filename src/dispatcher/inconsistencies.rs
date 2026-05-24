@@ -486,8 +486,7 @@ fn apply_inconsistency_resolution(
     resolution: &Map<String, Value>,
 ) -> Result<()> {
     match &issue.issue_type {
-        db::InconsistencyType::MissingCostBasis
-        | db::InconsistencyType::MissingPurchaseHistory => {
+        db::InconsistencyType::MissingCostBasis | db::InconsistencyType::MissingPurchaseHistory => {
             create_resolution_transaction(conn, issue, resolution)
         }
         db::InconsistencyType::InvalidTicker | db::InconsistencyType::InvalidDate => Err(

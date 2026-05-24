@@ -8,9 +8,7 @@ pub async fn dispatch_assets(
     options: options::OutputOptions,
 ) -> Result<()> {
     match action {
-        crate::cli::AssetsCommands::List { asset_type } => {
-            list_assets(*asset_type, options)
-        }
+        crate::cli::AssetsCommands::List { asset_type } => list_assets(*asset_type, options),
         crate::cli::AssetsCommands::Show { ticker } => show_asset(ticker, options),
         crate::cli::AssetsCommands::Add {
             ticker,
@@ -89,7 +87,11 @@ fn add_asset(
     Ok(())
 }
 
-fn set_asset_type(ticker: &str, asset_type: db::AssetType, options: options::OutputOptions) -> Result<()> {
+fn set_asset_type(
+    ticker: &str,
+    asset_type: db::AssetType,
+    options: options::OutputOptions,
+) -> Result<()> {
     let conn = open_conn()?;
     db::update_asset_type(&conn, ticker, &asset_type)?;
 
@@ -203,4 +205,3 @@ fn prompt_exact(allowed: &[&str]) -> Result<bool> {
     let trimmed = input.trim();
     Ok(allowed.contains(&trimmed))
 }
-

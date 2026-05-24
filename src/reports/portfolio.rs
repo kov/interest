@@ -1,11 +1,11 @@
+use crate::db::{Asset, AssetType, Transaction, TransactionType};
+use crate::reports::aggregation::normalize_positions_with_prices;
 use anyhow::Result;
 use blake3::Hasher;
 use chrono::NaiveDate;
 use rusqlite::Connection;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use crate::db::{Asset, AssetType, Transaction, TransactionType};
-use crate::reports::aggregation::normalize_positions_with_prices;
 
 /// Summary of a single position
 #[derive(Debug, Clone)]
@@ -194,10 +194,12 @@ fn calculate_portfolio_with_cutoff(
         let asset_id = asset.id.unwrap();
 
         // Build enriched transaction list and replay with interleaved events
-        let enriched =
-            crate::reports::enrichment::build_enriched_transactions(
-                conn, asset_id, as_of, &assets_by_id,
-            )?;
+        let enriched = crate::reports::enrichment::build_enriched_transactions(
+            conn,
+            asset_id,
+            as_of,
+            &assets_by_id,
+        )?;
         let mut position = AvgCostPosition::new(asset_id);
         let ticker = asset.ticker.clone();
         enriched.replay(&mut position, as_of, |tx, pos| {
