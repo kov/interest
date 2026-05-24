@@ -21,24 +21,33 @@ pub enum TaxCategory {
 }
 
 impl TaxCategory {
-    pub fn from_asset_and_trade_type(asset_type: &AssetType, is_day_trade: bool) -> Self {
+    // BDR is grouped with stocks today because Brazilian capital-gains rules treat
+    // BDR sales like stock sales (15% swing, 20% day). Receita requires reporting
+    // them on a separate line, so this will need its own category later.
+    pub fn from_asset_and_trade_type(asset_type: &AssetType, is_day_trade: bool) -> Option<Self> {
         match (asset_type, is_day_trade) {
             (AssetType::Stock, false)
             | (AssetType::Bdr, false)
+            | (AssetType::Etf, false)
             | (AssetType::Option, false)
-            | (AssetType::TermContract, false) => TaxCategory::StockSwingTrade,
+            | (AssetType::TermContract, false) => Some(TaxCategory::StockSwingTrade),
             (AssetType::Stock, true)
             | (AssetType::Bdr, true)
+            | (AssetType::Etf, true)
             | (AssetType::Option, true)
-            | (AssetType::TermContract, true) => TaxCategory::StockDayTrade,
-            (AssetType::Etf, false) => TaxCategory::StockSwingTrade,
-            (AssetType::Etf, true) => TaxCategory::StockDayTrade,
-            (AssetType::Fii, false) => TaxCategory::FiiSwingTrade,
-            (AssetType::Fii, true) => TaxCategory::FiiDayTrade,
-            (AssetType::Fiagro, false) => TaxCategory::FiagroSwingTrade,
-            (AssetType::Fiagro, true) => TaxCategory::FiagroDayTrade,
-            (AssetType::FiInfra, _) => TaxCategory::FiInfra,
-            _ => TaxCategory::StockSwingTrade, // Default for bonds, etc.
+            | (AssetType::TermContract, true) => Some(TaxCategory::StockDayTrade),
+            (AssetType::Fii, false) => Some(TaxCategory::FiiSwingTrade),
+            (AssetType::Fii, true) => Some(TaxCategory::FiiDayTrade),
+            (AssetType::Fiagro, false) => Some(TaxCategory::FiagroSwingTrade),
+            (AssetType::Fiagro, true) => Some(TaxCategory::FiagroDayTrade),
+            (AssetType::FiInfra, _) => Some(TaxCategory::FiInfra),
+            // Renda fixa (IR retido na fonte) and Unknown have no capital-gains
+            // category in this report.
+            (AssetType::Bond, _)
+            | (AssetType::GovBond, _)
+            | (AssetType::Fidc, _)
+            | (AssetType::Fip, _)
+            | (AssetType::Unknown, _) => None,
         }
     }
 
@@ -197,16 +206,23 @@ pub fn calculate_monthly_tax(
             continue;
         }
 
+        // Skip asset types with no capital-gains tax category (renda fixa, unknown)
+        if TaxCategory::from_asset_and_trade_type(&asset.asset_type, false).is_none() {
+            continue;
+        }
+
         let asset_id = asset.id.unwrap();
 
         if crate::db::is_rename_source_asset(conn, asset_id, month_end)? {
             continue;
         }
 
-        let enriched =
-            crate::reports::enrichment::build_enriched_transactions(
-                conn, asset_id, month_end, &assets_by_id,
-            )?;
+        let enriched = crate::reports::enrichment::build_enriched_transactions(
+            conn,
+            asset_id,
+            month_end,
+            &assets_by_id,
+        )?;
         let mut swing_matcher = AverageCostMatcher::new();
         let mut day_trade_matcher = AverageCostMatcher::new();
 
@@ -225,7 +241,8 @@ pub fn calculate_monthly_tax(
                         let category = TaxCategory::from_asset_and_trade_type(
                             &asset.asset_type,
                             tx.is_day_trade,
-                        );
+                        )
+                        .expect("asset filtered above guarantees a tax category");
 
                         let mut sale = if tx.is_day_trade {
                             day_trade_matcher.match_sale(tx, None)?
@@ -354,7 +371,6 @@ pub fn calculate_monthly_tax(
 
     Ok(results)
 }
-
 
 /// Get all transactions for an asset up to the end of specified month
 #[cfg(test)]

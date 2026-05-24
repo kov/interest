@@ -2,9 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use assert_cmd::cargo;
+use rust_decimal::Decimal;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::str::FromStr;
 use tempfile::TempDir;
 
 pub fn setup_test_tickers_cache(cache_root: &Path) {
@@ -188,8 +191,8 @@ pub fn income_detail_json(home: &TempDir, year: &str, ticker: &str) -> Result<Ve
 
 pub fn tax_report_json(home: &TempDir, year: &str) -> Result<Value> {
     let doc = run_cmd_json(home, &["--json", "tax", "report", year])?;
-    let monthly = extract_table_rows(&doc, Some("Monthly Summary"), None)?;
-    let annual = find_key_value_block(&doc, "Annual Totals");
+    let monthly = aggregate_monthly_summary_rows(&doc)?;
+    let annual = find_key_value_block(&doc, "Annual Totals (All Categories)");
 
     let report = serde_json::json!({
         "monthly_summaries": monthly,
@@ -199,6 +202,103 @@ pub fn tax_report_json(home: &TempDir, year: &str) -> Result<Value> {
         "annual_total_tax": kv_value(annual, "Total Tax"),
     });
     Ok(report)
+}
+
+const PT_BR_MONTH_NAMES: [&str; 12] = [
+    "Janeiro",
+    "Fevereiro",
+    "Março",
+    "Abril",
+    "Maio",
+    "Junho",
+    "Julho",
+    "Agosto",
+    "Setembro",
+    "Outubro",
+    "Novembro",
+    "Dezembro",
+];
+
+/// Walk every "Monthly Summary — ..." per-category table and sum the per-month
+/// values back into a single per-month view shaped like the pre-split helper.
+pub fn aggregate_monthly_summary_rows(doc: &Value) -> Result<Vec<Value>> {
+    let blocks = doc
+        .get("blocks")
+        .and_then(|b| b.as_array())
+        .context("blocks missing")?;
+    let mut tables = Vec::new();
+    collect_table_blocks(blocks, &mut tables);
+
+    let month_to_index: std::collections::HashMap<&str, usize> = PT_BR_MONTH_NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (*m, i))
+        .collect();
+
+    // [sales, profit, loss, tax_due] per month index
+    let mut aggregates: BTreeMap<usize, [Decimal; 4]> = BTreeMap::new();
+
+    for table in tables {
+        let title = table.get("title").and_then(|t| t.as_str()).unwrap_or("");
+        if !title.starts_with("Monthly Summary") {
+            continue;
+        }
+        let columns: Vec<&str> = table
+            .get("columns")
+            .and_then(|c| c.as_array())
+            .map(|cs| {
+                cs.iter()
+                    .filter_map(|c| c.get("key").and_then(|v| v.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rows = table
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for row in &rows {
+            let cells = row
+                .get("cells")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let cell_value = |key: &str| -> Option<Value> {
+                let idx = columns.iter().position(|k| *k == key)?;
+                cells.get(idx).and_then(|c| c.get("value")).cloned()
+            };
+            let month_str = cell_value("month")
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let Some(&idx) = month_to_index.get(month_str.as_str()) else {
+                continue;
+            };
+            let entry = aggregates.entry(idx).or_insert([Decimal::ZERO; 4]);
+            for (i, key) in ["sales", "profit", "loss", "tax_due"].iter().enumerate() {
+                let Some(v) = cell_value(key) else { continue };
+                let Some(s) = v.as_str() else { continue };
+                if let Ok(d) = Decimal::from_str(s) {
+                    entry[i] += d;
+                }
+            }
+        }
+    }
+
+    Ok(aggregates
+        .into_iter()
+        .map(|(idx, [sales, profit, loss, tax_due])| {
+            serde_json::json!({
+                "month": PT_BR_MONTH_NAMES[idx],
+                "sales": sales.to_string(),
+                "profit": profit.to_string(),
+                "loss": loss.to_string(),
+                "tax_due": tax_due.to_string(),
+            })
+        })
+        .collect())
 }
 
 pub fn list_split_actions_json(home: &TempDir, ticker: Option<&str>) -> Result<Vec<Value>> {

@@ -522,11 +522,11 @@ fn test_tax_report_json_shape() -> Result<()> {
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("invalid tax JSON");
-    let monthly = extract_table_rows(&value, Some("Monthly Summary"), None)?;
-    assert!(!monthly.is_empty(), "monthly summary table missing rows");
+    let monthly = cli_helpers::aggregate_monthly_summary_rows(&value)?;
+    assert!(!monthly.is_empty(), "monthly summary tables missing rows");
 
-    let annual =
-        find_key_value_block(&value, "Annual Totals").expect("missing annual totals block");
+    let annual = find_key_value_block(&value, "Annual Totals (All Categories)")
+        .expect("missing annual totals block");
     for label in ["Total Sales", "Total Profit", "Total Loss", "Total Tax"] {
         let value = kv_value(Some(annual), label);
         assert!(
@@ -556,10 +556,11 @@ fn test_tax_summary_json_shape() -> Result<()> {
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("invalid tax summary JSON");
-    let monthly = extract_table_rows(&value, None, Some("month"))?;
-    assert!(!monthly.is_empty(), "monthly summary table missing rows");
+    let monthly = cli_helpers::aggregate_monthly_summary_rows(&value)?;
+    assert!(!monthly.is_empty(), "monthly summary tables missing rows");
 
-    let annual = find_key_value_block(&value, "Annual Total").expect("missing annual total block");
+    let annual = find_key_value_block(&value, "Annual Total (All Categories)")
+        .expect("missing annual total block");
     for label in ["Sales", "Profit", "Loss", "Tax"] {
         let value = kv_value(Some(annual), label);
         assert!(

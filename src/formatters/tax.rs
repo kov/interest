@@ -8,7 +8,96 @@ use crate::output::{
     ValueKind,
 };
 use crate::tax;
+use crate::tax::irpf::MonthlyIrpfSummary;
+use crate::tax::swing_trade::TaxCategory;
 use anyhow::Result;
+
+// Display order for per-category Monthly Summary tables. Matches the order in
+// which Receita expects these to be reported on the IRPF declaration.
+const TAX_CATEGORY_DISPLAY_ORDER: &[TaxCategory] = &[
+    TaxCategory::StockSwingTrade,
+    TaxCategory::StockDayTrade,
+    TaxCategory::FiiSwingTrade,
+    TaxCategory::FiiDayTrade,
+    TaxCategory::FiagroSwingTrade,
+    TaxCategory::FiagroDayTrade,
+    TaxCategory::FiInfra,
+];
+
+fn monthly_summary_columns() -> Vec<ColumnDef> {
+    vec![
+        ColumnDef::new("month", "Month", ValueKind::Text),
+        ColumnDef::new("sales", "Sales", ValueKind::Currency),
+        ColumnDef::new("profit", "Profit", ValueKind::CurrencyDelta),
+        ColumnDef::new("loss", "Loss", ValueKind::CurrencyDelta),
+        ColumnDef::new("tax_due", "Tax Due", ValueKind::CurrencyDelta),
+    ]
+}
+
+/// Build a per-category Monthly Summary table. Returns None if the category
+/// had no activity in the year.
+fn build_monthly_table_for_category(
+    monthly_summaries: &[MonthlyIrpfSummary],
+    category: TaxCategory,
+) -> Option<OutputBlock> {
+    let mut rows = Vec::new();
+    let mut total_sales = Decimal::ZERO;
+    let mut total_profit = Decimal::ZERO;
+    let mut total_loss = Decimal::ZERO;
+    let mut total_tax = Decimal::ZERO;
+
+    for monthly in monthly_summaries {
+        let Some(cat) = monthly.by_category.get(&category) else {
+            continue;
+        };
+        let profit = cat.profit_loss.max(Decimal::ZERO);
+        let loss = (-cat.profit_loss).max(Decimal::ZERO);
+        total_sales += cat.sales;
+        total_profit += profit;
+        total_loss += loss;
+        total_tax += cat.tax_due;
+        rows.push(Row {
+            cells: vec![
+                Value::Text(monthly.month_name.to_string()),
+                Value::Currency(cat.sales),
+                Value::CurrencyDelta(profit),
+                Value::CurrencyDelta(loss),
+                Value::CurrencyDelta(cat.tax_due),
+            ],
+        });
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let footer = Row {
+        cells: vec![
+            Value::Text("TOTAL".to_string()),
+            Value::Currency(total_sales),
+            Value::CurrencyDelta(total_profit),
+            Value::CurrencyDelta(total_loss),
+            Value::CurrencyDelta(total_tax),
+        ],
+    };
+
+    Some(OutputBlock::Table {
+        title: Some(format!("Monthly Summary — {}", category.display_name())),
+        columns: monthly_summary_columns(),
+        rows,
+        footer: Some(footer),
+        options: TableOptions {
+            style: TableStyle::Rounded,
+        },
+    })
+}
+
+fn build_per_category_monthly_blocks(monthly_summaries: &[MonthlyIrpfSummary]) -> Vec<OutputBlock> {
+    TAX_CATEGORY_DISPLAY_ORDER
+        .iter()
+        .filter_map(|cat| build_monthly_table_for_category(monthly_summaries, *cat))
+        .collect()
+}
 
 //
 // HELPER TYPES AND FUNCTIONS
@@ -155,37 +244,10 @@ fn build_tax_report_document(
     }
 
     if !report.monthly_summaries.is_empty() {
-        let rows = report
-            .monthly_summaries
-            .iter()
-            .map(|summary| Row {
-                cells: vec![
-                    Value::Text(summary.month_name.to_string()),
-                    Value::Currency(summary.total_sales),
-                    Value::CurrencyDelta(summary.total_profit),
-                    Value::CurrencyDelta(summary.total_loss),
-                    Value::CurrencyDelta(summary.tax_due),
-                ],
-            })
-            .collect::<Vec<_>>();
-        blocks.push(OutputBlock::Table {
-            title: Some("Monthly Summary".to_string()),
-            columns: vec![
-                ColumnDef::new("month", "Month", ValueKind::Text),
-                ColumnDef::new("sales", "Sales", ValueKind::Currency),
-                ColumnDef::new("profit", "Profit", ValueKind::CurrencyDelta),
-                ColumnDef::new("loss", "Loss", ValueKind::CurrencyDelta),
-                ColumnDef::new("tax_due", "Tax Due", ValueKind::CurrencyDelta),
-            ],
-            rows,
-            footer: None,
-            options: TableOptions {
-                style: TableStyle::Rounded,
-            },
-        });
+        blocks.extend(build_per_category_monthly_blocks(&report.monthly_summaries));
 
         blocks.push(OutputBlock::KeyValue {
-            title: Some("Annual Totals".to_string()),
+            title: Some("Annual Totals (All Categories)".to_string()),
             rows: vec![
                 KeyValueRow {
                     label: "Total Sales".to_string(),
@@ -318,64 +380,38 @@ fn build_tax_summary_document(report: &tax::irpf::AnnualTaxReport, year: i32) ->
         };
     }
 
-    let rows = report
-        .monthly_summaries
-        .iter()
-        .map(|summary| Row {
-            cells: vec![
-                Value::Text(summary.month_name.to_string()),
-                Value::Currency(summary.total_sales),
-                Value::CurrencyDelta(summary.total_profit),
-                Value::CurrencyDelta(summary.total_loss),
-                Value::CurrencyDelta(summary.tax_due),
-            ],
-        })
-        .collect::<Vec<_>>();
+    let mut blocks = vec![OutputBlock::Header {
+        level: 1,
+        text: format!("Tax Summary - {}", year),
+    }];
+
+    blocks.extend(build_per_category_monthly_blocks(&report.monthly_summaries));
+
+    blocks.push(OutputBlock::KeyValue {
+        title: Some("Annual Total (All Categories)".to_string()),
+        rows: vec![
+            KeyValueRow {
+                label: "Sales".to_string(),
+                value: Value::Currency(report.annual_total_sales),
+            },
+            KeyValueRow {
+                label: "Profit".to_string(),
+                value: Value::CurrencyDelta(report.annual_total_profit),
+            },
+            KeyValueRow {
+                label: "Loss".to_string(),
+                value: Value::CurrencyDelta(report.annual_total_loss),
+            },
+            KeyValueRow {
+                label: "Tax".to_string(),
+                value: Value::CurrencyDelta(report.annual_total_tax),
+            },
+        ],
+    });
 
     OutputDocument {
         title: None,
-        blocks: vec![
-            OutputBlock::Header {
-                level: 1,
-                text: format!("Tax Summary - {}", year),
-            },
-            OutputBlock::Table {
-                title: None,
-                columns: vec![
-                    ColumnDef::new("month", "Month", ValueKind::Text),
-                    ColumnDef::new("sales", "Sales", ValueKind::Currency),
-                    ColumnDef::new("profit", "Profit", ValueKind::CurrencyDelta),
-                    ColumnDef::new("loss", "Loss", ValueKind::CurrencyDelta),
-                    ColumnDef::new("tax_due", "Tax Due", ValueKind::CurrencyDelta),
-                ],
-                rows,
-                footer: None,
-                options: TableOptions {
-                    style: TableStyle::Rounded,
-                },
-            },
-            OutputBlock::KeyValue {
-                title: Some("Annual Total".to_string()),
-                rows: vec![
-                    KeyValueRow {
-                        label: "Sales".to_string(),
-                        value: Value::Currency(report.annual_total_sales),
-                    },
-                    KeyValueRow {
-                        label: "Profit".to_string(),
-                        value: Value::CurrencyDelta(report.annual_total_profit),
-                    },
-                    KeyValueRow {
-                        label: "Loss".to_string(),
-                        value: Value::CurrencyDelta(report.annual_total_loss),
-                    },
-                    KeyValueRow {
-                        label: "Tax".to_string(),
-                        value: Value::CurrencyDelta(report.annual_total_tax),
-                    },
-                ],
-            },
-        ],
+        blocks,
         meta: Default::default(),
     }
 }

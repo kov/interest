@@ -20,17 +20,17 @@ pub struct MonthlyIrpfSummary {
     pub total_loss: Decimal,
     pub total_loss_offset_applied: Decimal,
     pub tax_due: Decimal,
-    #[allow(dead_code)]
     pub by_category: HashMap<TaxCategory, CategoryMonthSummary>,
 }
 
 /// Tax category summary for a month
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CategoryMonthSummary {
     pub sales: Decimal,
     pub profit_loss: Decimal,
+    #[allow(dead_code)]
     pub loss_offset_applied: Decimal,
+    #[allow(dead_code)]
     pub exemption_applied: Decimal,
     pub tax_due: Decimal,
 }
@@ -158,13 +158,7 @@ fn compute_annual_report_with_carry(
 
     let ending_carry = carryforward
         .iter()
-        .filter_map(|(k, v)| {
-            if v.is_zero() {
-                None
-            } else {
-                Some((*k, *v))
-            }
-        })
+        .filter_map(|(k, v)| if v.is_zero() { None } else { Some((*k, *v)) })
         .collect::<HashMap<_, _>>();
 
     let report = AnnualTaxReport {
@@ -176,13 +170,7 @@ fn compute_annual_report_with_carry(
         annual_total_tax,
         previous_losses_carry_forward: starting_carry
             .iter()
-            .filter_map(|(k, v)| {
-                if v.is_zero() {
-                    None
-                } else {
-                    Some((*k, *v))
-                }
-            })
+            .filter_map(|(k, v)| if v.is_zero() { None } else { Some((*k, *v)) })
             .collect(),
         losses_to_carry_forward: ending_carry.clone(),
     };

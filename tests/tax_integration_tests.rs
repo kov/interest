@@ -20,7 +20,16 @@ fn decimal_from_value(value: &Value) -> Result<Decimal> {
 fn add_rename(home: &TempDir, from: &str, to: &str, date: &str) -> Result<()> {
     run_cmd(
         home,
-        &["actions", "rename", "add", from, to, date, "--notes", "test rename"],
+        &[
+            "actions",
+            "rename",
+            "add",
+            from,
+            to,
+            date,
+            "--notes",
+            "test rename",
+        ],
     )?;
     Ok(())
 }
@@ -28,7 +37,16 @@ fn add_rename(home: &TempDir, from: &str, to: &str, date: &str) -> Result<()> {
 fn add_split(home: &TempDir, ticker: &str, qty: &str, date: &str) -> Result<()> {
     run_cmd(
         home,
-        &["actions", "split", "add", ticker, qty, date, "--notes", "test split"],
+        &[
+            "actions",
+            "split",
+            "add",
+            ticker,
+            qty,
+            date,
+            "--notes",
+            "test split",
+        ],
     )?;
     Ok(())
 }
@@ -64,8 +82,16 @@ fn check_portfolio_position(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    assert_eq!(cols[1], expected_qty, "Quantity mismatch for {} at {}", ticker, date);
-    assert_eq!(cols[3], expected_cost, "Total cost mismatch for {} at {}", ticker, date);
+    assert_eq!(
+        cols[1], expected_qty,
+        "Quantity mismatch for {} at {}",
+        ticker, date
+    );
+    assert_eq!(
+        cols[3], expected_cost,
+        "Total cost mismatch for {} at {}",
+        ticker, date
+    );
     Ok(())
 }
 
@@ -143,6 +169,80 @@ fn test_stock_day_trade_always_taxable() -> Result<()> {
     assert_eq!(sales, dec!(1200.00));
     assert_eq!(profit, dec!(200.00));
     assert_eq!(tax_due, dec!(40.00));
+
+    Ok(())
+}
+
+/// BDR sales never qualify for the R$20k swing-trade exemption, even though
+/// they share the StockSwingTrade tax bucket with regular stocks.
+#[test]
+fn test_bdr_taxed_even_when_sales_under_20k() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "A1MD34", "BDR")?;
+    // Sales = 50 * 30 = R$1,500 (well under R$20k threshold)
+    // Profit = (30 - 25) * 50 = R$250 → tax = R$250 * 15% = R$37.50
+    add_transaction(&home, "A1MD34", "buy", "100", "25", "2025-05-05", false)?;
+    add_transaction(&home, "A1MD34", "sell", "50", "30", "2025-05-20", false)?;
+
+    let report = tax_report_json(&home, "2025")?;
+    let may = month_summary(&report, "Maio")?;
+
+    let sales = decimal_from_value(&may["sales"])?;
+    let profit = decimal_from_value(&may["profit"])?;
+    let tax_due = decimal_from_value(&may["tax_due"])?;
+
+    assert_eq!(sales, dec!(1500.00));
+    assert_eq!(profit, dec!(250.00));
+    assert_eq!(
+        tax_due,
+        dec!(37.50),
+        "BDR profit must be taxed at 15% regardless of monthly sales total"
+    );
+
+    Ok(())
+}
+
+/// BDR sales must not be counted toward the R$20k stock-exemption threshold:
+/// a small stock sale (< R$20k) keeps its exemption even when BDR sales push
+/// the combined total well over R$20k.
+#[test]
+fn test_bdr_sales_do_not_count_toward_stock_exemption_threshold() -> Result<()> {
+    let home = TempDir::new()?;
+
+    add_asset(&home, "PETR4", "STOCK")?;
+    add_asset(&home, "A1MD34", "BDR")?;
+
+    // Stock: sales = 100 * 60 = R$6,000 (≤ R$20k → stock portion stays exempt)
+    //        profit = (60 - 50) * 100 = R$1,000
+    add_transaction(&home, "PETR4", "buy", "200", "50", "2025-06-01", false)?;
+    add_transaction(&home, "PETR4", "sell", "100", "60", "2025-06-15", false)?;
+
+    // BDR: sales = 200 * 110 = R$22,000 (alone exceeds R$20k threshold,
+    //       and combined with stock sales would also cross it)
+    //      profit = (110 - 100) * 200 = R$2,000 → BDR must be taxed
+    add_transaction(&home, "A1MD34", "buy", "200", "100", "2025-06-02", false)?;
+    add_transaction(&home, "A1MD34", "sell", "200", "110", "2025-06-16", false)?;
+
+    let report = tax_report_json(&home, "2025")?;
+    let jun = month_summary(&report, "Junho")?;
+
+    let sales = decimal_from_value(&jun["sales"])?;
+    let profit = decimal_from_value(&jun["profit"])?;
+    let tax_due = decimal_from_value(&jun["tax_due"])?;
+
+    // Combined sales: 6,000 + 22,000 = 28,000
+    assert_eq!(sales, dec!(28000.00));
+    // Combined profit: 1,000 (stock) + 2,000 (BDR) = 3,000
+    assert_eq!(profit, dec!(3000.00));
+    // Only BDR's R$2,000 profit is taxable; stock R$1,000 stays exempt
+    // because stock sales alone (R$6,000) are under R$20k.
+    // Tax = R$2,000 * 15% = R$300
+    assert_eq!(
+        tax_due,
+        dec!(300.00),
+        "stock exemption must survive BDR sales pushing combined total over R$20k"
+    );
 
     Ok(())
 }
